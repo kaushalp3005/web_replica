@@ -1,8 +1,33 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f2f3f3;
+  --foreground: #16191f;
+  --aws-navy: #232f3e;
+  --aws-orange: #ec7211;
+  --aws-orange-hover: #eb5f07;
+  --aws-orange-active: #c45500;
+  --aws-link: #0073bb;
+  --aws-link-hover: #cc4400;
+  --aws-border: #d5dbdb;
+  --aws-border-strong: #aab7b8;
+  --aws-error: #d13212;
+
+  /* Semantic text colours — promote the four most common hex literals
+     scattered through the page files so a theme tweak is one-line. */
+  --text-primary:   #16191f; /* primary body / headings */
+  --text-secondary: #414d5c; /* labels, captions */
+  --text-muted:     #687078; /* placeholders, hints */
+  --text-disabled:  #aab7b8; /* disabled controls */
+
+  /* Surface tints — quiet backgrounds the row tables / form panels use. */
+  --surface-subtle:   #fafafa; /* table headers, ghost rows */
+  --surface-disabled: #f4f4f4; /* disabled input fills */
+  --surface-divider:  #eaeded; /* horizontal rules, chip wells */
+
+  /* Semantic status text. The pill backgrounds stay inline because each
+     status row also needs a paired ring colour. */
+  --text-success: #1d8102;
 }
 
 @theme inline {
@@ -12,15 +37,8 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: "Amazon Ember", "Helvetica Neue", Roboto, Arial, sans-serif;
 }
