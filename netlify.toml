@@ -16,12 +16,14 @@
 # ─────────────────────────────────────────────────────────────────────────
 
 [build]
-  # No `publish` set on purpose. Netlify's Next.js Runtime (v5+) detects
-  # the project and configures the publish path automatically; setting
-  # `publish = ".next"` explicitly can desynchronise with future runtime
-  # versions. If a future deploy ever needs to override, set
-  # `publish = ".next"` here AND test on a preview before promoting.
   command = "npm run build"
+  # Required by the Next.js Runtime (v5.15+). Without this Netlify falls
+  # back to whatever the UI has under Site Configuration → Build &
+  # deploy → Publish directory, which is often the repo root — and the
+  # runtime refuses with "publish directory cannot be the same as the
+  # base directory" (we hit this on first deploy). Pinning here keeps
+  # the publish path in version control instead of UI state.
+  publish = ".next"
 
 [build.environment]
   # Pinned to Node 20 LTS — matches Next.js 16's supported runtime and
