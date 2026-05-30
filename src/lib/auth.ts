@@ -5,7 +5,29 @@
 // account_suspended, account_disabled) are mapped to user-visible strings, matching
 // LoginActivity.handleLoginError.
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+// Resolve the API origin. Normally this is `NEXT_PUBLIC_API_BASE_URL`, but we
+// guard against the mixed-content trap: if the page is served over HTTPS while
+// the configured base is a plain-HTTP origin (e.g. a bare-IP backend), the
+// browser blocks every request and the app is dead before any call leaves the
+// page. In that case fall back to "" (same-origin), which routes through the
+// Next.js `/api/*` proxy declared in next.config.ts — the browser sees only
+// same-origin HTTPS, and Next forwards to the backend server-side.
+//
+// Local dev is unaffected: the page is http://localhost there, so the guard
+// never trips and direct http://localhost:8000 calls keep working.
+function resolveApiBase(): string {
+  const configured = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+  if (
+    typeof window !== "undefined" &&
+    window.location.protocol === "https:" &&
+    configured.startsWith("http://")
+  ) {
+    return "";
+  }
+  return configured;
+}
+
+const API_BASE = resolveApiBase();
 
 const TOKEN_KEYS = {
   access: "auth.access_token",
