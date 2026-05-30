@@ -353,7 +353,7 @@ function Subsection({ label, children }: { label: string; children: React.ReactN
 }
 
 const inputCls =
-  "w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#00a1c9] focus:shadow-[0_0_0_1px_#00a1c9] disabled:bg-[var(--surface-disabled)] disabled:text-[var(--text-disabled)] read-only:bg-[var(--surface-subtle)]";
+  "w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] disabled:bg-[var(--surface-disabled)] disabled:text-[var(--text-disabled)] read-only:bg-[var(--surface-subtle)]";
 
 function Field({
   label, value, onChange, disabled, placeholder, type = "text", readOnly,

@@ -1,0 +1,422 @@
+// Plan v2 API surface. Mirrors the endpoint set used by
+// frontend_replica/src/modules/production/plan-list/plan-list.js. Server
+// routes live in server_replica/app/modules/production/router.py:4261+.
+//
+// The list response shape is { results: PlanRow[], pagination: { page,
+// page_size, total, total_pages } } — drop-in compatible with v1.
+
+import { apiFetch } from "./auth";
+
+// ── Row shape ────────────────────────────────────────────────────────────
+
+export interface PlanRow {
+  plan_id: number;
+  plan_name?: string | null;
+  entity?: string | null;
+  warehouse?: string | null;
+  plan_type?: "daily" | "weekly" | string | null;
+  status?: "draft" | "approved" | "executed" | "cancelled" | string | null;
+  plan_date?: string | null;            // YYYY-MM-DD
+  date_from?: string | null;
+  date_to?: string | null;
+  total_planned_kg?: number | string | null;
+  total_planned_units?: number | string | null;
+  line_count?: number | null;
+  revision_number?: number | null;
+  created_at?: string | null;
+  created_by?: string | null;
+  approved_at?: string | null;
+  approved_by?: string | null;
+  [k: string]: unknown;
+}
+
+export interface PlanPagination {
+  page?: number;
+  page_size?: number;
+  total?: number;
+  total_pages?: number;
+}
+
+export interface PlanListResponse {
+  results?: PlanRow[];
+  pagination?: PlanPagination;
+}
+
+// ── Listing query ───────────────────────────────────────────────────────
+//
+// Server param names: entity, warehouse, plan_type, status, date_from,
+// date_to, page, page_size. Comma-separated multi-values are supported by
+// server-side list_plans for `status` and `plan_type`.
+//
+// NOTE: frontend_replica sends `type` as the param name for plan_type,
+// which the server silently ignores (it treats it as an unknown query).
+// We send the correct `plan_type` so the filter actually applies.
+
+export interface PlanListQuery {
+  entity?: string;
+  warehouse?: string;
+  plan_type?: string[];        // joined comma-separated on the wire
+  status?: string[];           // joined comma-separated on the wire
+  date_from?: string;          // YYYY-MM-DD
+  date_to?: string;
+  search?: string;
+  page?: number;
+  page_size?: number;
+}
+
+function buildListParams(q: PlanListQuery): URLSearchParams {
+  const p = new URLSearchParams();
+  if (q.entity) p.set("entity", q.entity);
+  if (q.warehouse) p.set("warehouse", q.warehouse);
+  if (q.plan_type && q.plan_type.length) p.set("plan_type", q.plan_type.join(","));
+  if (q.status && q.status.length) p.set("status", q.status.join(","));
+  if (q.date_from) p.set("date_from", q.date_from);
+  if (q.date_to) p.set("date_to", q.date_to);
+  if (q.search) p.set("search", q.search);
+  if (q.page != null) p.set("page", String(q.page));
+  if (q.page_size != null) p.set("page_size", String(q.page_size));
+  return p;
+}
+
+// ── Calls ────────────────────────────────────────────────────────────────
+
+export async function listPlans(
+  q: PlanListQuery,
+  signal?: AbortSignal,
+): Promise<PlanListResponse> {
+  const res = await apiFetch(`/api/v1/production/plans-v2?${buildListParams(q)}`, { signal });
+  if (!res.ok) throw new Error(`Plans HTTP ${res.status}`);
+  return (await res.json()) as PlanListResponse;
+}
+
+// ── Plan detail (GET /plans-v2/{plan_id}) ────────────────────────────────
+//
+// Server returns the plan header flattened at top level plus a `lines`
+// array where each line has its own ordered `steps` array. Matches the
+// shape produced by services/plan_v2.py:get_plan().
+
+export interface PlanStepRow {
+  step_id?: number;
+  plan_line_id?: number;
+  step_order?: number;
+  process_name?: string | null;
+  stage?: string | null;
+  floor?: string | null;
+  std_time_min?: number | string | null;
+  loss_pct?: number | string | null;
+  notes?: string | null;
+  [k: string]: unknown;
+}
+
+export interface PlanLineRow {
+  plan_line_id?: number;
+  plan_id?: number;
+  fg_sku_name?: string | null;
+  customer_name?: string | null;
+  planned_qty_kg?: number | string | null;
+  planned_qty_units?: number | string | null;
+  area?: string | null;
+  deadline_date?: string | null;
+  linked_so_fulfillment_ids?: number[] | null;
+  steps?: PlanStepRow[];
+  [k: string]: unknown;
+}
+
+// PlanDetail extends PlanRow because the server flattens the header fields
+// at the top level and adds `lines[]`. Use intersection so callers can
+// reach line-level data without losing access to header fields.
+export type PlanDetail = PlanRow & {
+  lines?: PlanLineRow[];
+};
+
+export async function getPlan(
+  planId: number,
+  signal?: AbortSignal,
+): Promise<PlanDetail> {
+  const res = await apiFetch(`/api/v1/production/plans-v2/${planId}`, { signal });
+  if (res.status === 404) throw new Error("Plan not found.");
+  if (!res.ok) throw new Error(`Plan HTTP ${res.status}`);
+  return (await res.json()) as PlanDetail;
+}
+
+// ── Update (partial) ────────────────────────────────────────────────────
+//
+// Server route: PUT /plans-v2/{plan_id} (router.py:4347) — body is
+// PlanV2Update, but the server filters None fields BEFORE applying:
+//   fields = {k: v for k, v in body.model_dump().items() if v is not None}
+// so any field we omit is left untouched on the server side. To support
+// "only the changed values get sent", the caller passes a body containing
+// just the fields they intend to change; everything else is undefined and
+// therefore omitted from the JSON wire.
+//
+// Server-side allow-list (services/plan_v2.py:387): plan_date, date_from,
+// date_to, plan_type. Status changes flow through approve/cancel.
+
+export interface UpdatePlanBody {
+  plan_date?: string;             // YYYY-MM-DD
+  date_from?: string;
+  date_to?: string;
+  plan_type?: string;
+}
+
+export async function updatePlan(
+  planId: number,
+  body: UpdatePlanBody,
+): Promise<unknown> {
+  // Drop undefined keys so they aren't serialised as null — the server
+  // treats null and missing identically, but cleaner wire is friendlier in
+  // logs and request inspectors.
+  const trimmed: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (v !== undefined && v !== "") trimmed[k] = v;
+  }
+  if (Object.keys(trimmed).length === 0) {
+    throw new Error("Nothing to update");
+  }
+  const res = await apiFetch(`/api/v1/production/plans-v2/${planId}`, {
+    method: "PUT",
+    body: JSON.stringify(trimmed),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const j = (await res.json()) as { detail?: string };
+      if (j.detail) detail = j.detail;
+    } catch { /* non-JSON */ }
+    throw new Error(detail);
+  }
+  return await res.json();
+}
+
+// ── Per-line + per-step partial updates ─────────────────────────────────
+//
+// Mirror the planning page's editing model end-to-end. Server routes (all
+// under /api/v1/production):
+//   • PUT    /plans-v2/lines/{plan_line_id}                       — line patch
+//   • PUT    /plans-v2/steps/{step_id}                            — step patch
+//   • PUT    /plans-v2/lines/{plan_line_id}/steps/reorder         — reorder
+//   • DELETE /plans-v2/steps/{step_id}                            — drop step
+//
+// All four flow through apiFetch so they pick up the silent-refresh path
+// added earlier — no special handling needed for auth.
+
+export interface UpdatePlanLineBody {
+  planned_qty_kg?: number;
+  planned_qty_units?: number;
+  area?: string;
+  deadline_date?: string;   // YYYY-MM-DD
+}
+
+export async function updatePlanLine(
+  planLineId: number,
+  body: UpdatePlanLineBody,
+): Promise<unknown> {
+  const trimmed: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (v !== undefined && v !== "") trimmed[k] = v;
+  }
+  if (Object.keys(trimmed).length === 0) throw new Error("Nothing to update");
+  const res = await apiFetch(`/api/v1/production/plans-v2/lines/${planLineId}`, {
+    method: "PUT",
+    body: JSON.stringify(trimmed),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const j = (await res.json()) as { detail?: string };
+      if (j.detail) detail = j.detail;
+    } catch { /* non-JSON */ }
+    throw new Error(detail);
+  }
+  return await res.json();
+}
+
+export interface UpdatePlanStepBody {
+  process_name?: string;
+  stage?: string;
+  floor?: string | null;
+  std_time_min?: number | null;
+  loss_pct?: number | null;
+  notes?: string;
+}
+
+export async function updatePlanStep(
+  stepId: number,
+  body: UpdatePlanStepBody,
+): Promise<unknown> {
+  // Allow explicit `null` for floor/std_time_min/loss_pct (lets the operator
+  // clear a value). Only drop `undefined`s — those are "field not touched".
+  const trimmed: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (v !== undefined) trimmed[k] = v;
+  }
+  if (Object.keys(trimmed).length === 0) throw new Error("Nothing to update");
+  const res = await apiFetch(`/api/v1/production/plans-v2/steps/${stepId}`, {
+    method: "PUT",
+    body: JSON.stringify(trimmed),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const j = (await res.json()) as { detail?: string };
+      if (j.detail) detail = j.detail;
+    } catch { /* non-JSON */ }
+    throw new Error(detail);
+  }
+  return await res.json();
+}
+
+export async function reorderPlanSteps(
+  planLineId: number,
+  stepIds: number[],
+): Promise<unknown> {
+  const res = await apiFetch(
+    `/api/v1/production/plans-v2/lines/${planLineId}/steps/reorder`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ step_ids: stepIds }),
+    },
+  );
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const j = (await res.json()) as { detail?: string };
+      if (j.detail) detail = j.detail;
+    } catch { /* non-JSON */ }
+    throw new Error(detail);
+  }
+  return await res.json();
+}
+
+export async function deletePlanStep(stepId: number): Promise<unknown> {
+  const res = await apiFetch(`/api/v1/production/plans-v2/steps/${stepId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const j = (await res.json()) as { detail?: string };
+      if (j.detail) detail = j.detail;
+    } catch { /* non-JSON */ }
+    throw new Error(detail);
+  }
+  return await res.json();
+}
+
+// ── Delete (approved plans only) ────────────────────────────────────────
+//
+// Server route: POST /plans-v2/{plan_id}/delete (added in this iteration).
+// Only valid when the plan is in `approved` status. The server-side handler
+// fans out a notification email to every active admin user before
+// confirming the delete, so the action always carries an audit trail.
+
+export interface DeletePlanBody {
+  reason: string;                 // required — surfaces in the admin email
+  deleted_by?: string;            // operator identity (defaults to "" server-side)
+}
+
+export interface DeletePlanResponse {
+  plan_id?: number;
+  status?: string;
+  admin_email_count?: number;     // how many admins were notified
+  [k: string]: unknown;
+}
+
+export async function deletePlan(
+  planId: number,
+  body: DeletePlanBody,
+): Promise<DeletePlanResponse> {
+  const res = await apiFetch(`/api/v1/production/plans-v2/${planId}/delete`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const j = (await res.json()) as { detail?: string };
+      if (j.detail) detail = j.detail;
+    } catch { /* non-JSON */ }
+    throw new Error(detail);
+  }
+  return (await res.json()) as DeletePlanResponse;
+}
+
+export interface ApprovePlanBody {
+  approved_by: string;          // required by PlanV2Approve
+}
+
+export interface ApprovePlanResponse {
+  plan_id?: number;
+  status?: string;
+  // The backend auto-generates per-floor job cards on approve. Shape varies;
+  // the original frontend reads job_cards.lines[*].job_card_ids.
+  job_cards?: {
+    error?: string;
+    count?: number;
+    lines?: Array<{ job_card_ids?: number[] }>;
+  };
+  [k: string]: unknown;
+}
+
+export async function approvePlan(
+  planId: number,
+  body: ApprovePlanBody,
+): Promise<ApprovePlanResponse> {
+  const res = await apiFetch(`/api/v1/production/plans-v2/${planId}/approve`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const j = (await res.json()) as { detail?: string };
+      if (j.detail) detail = j.detail;
+    } catch { /* non-JSON */ }
+    throw new Error(detail);
+  }
+  return (await res.json()) as ApprovePlanResponse;
+}
+
+export interface CancelPlanBody {
+  reason?: string;              // defaults to "" server-side
+}
+
+export async function cancelPlan(planId: number, body: CancelPlanBody): Promise<unknown> {
+  const res = await apiFetch(`/api/v1/production/plans-v2/${planId}/cancel`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const j = (await res.json()) as { detail?: string };
+      if (j.detail) detail = j.detail;
+    } catch { /* non-JSON */ }
+    throw new Error(detail);
+  }
+  return await res.json();
+}
+
+// ── Formatters reused by the page ───────────────────────────────────────
+
+export function fmtPlanKg(v: number | string | null | undefined): string {
+  if (v == null || v === "") return "—";
+  const n = typeof v === "number" ? v : parseFloat(v);
+  if (Number.isNaN(n)) return "—";
+  return n.toLocaleString("en-IN", { maximumFractionDigits: 1 });
+}
+
+export function fmtPlanDate(iso?: string | null): string {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+  } catch {
+    return iso;
+  }
+}
+
+export function fmtDateRange(from?: string | null, to?: string | null): string {
+  if (!from && !to) return "—";
+  if (from && to && from === to) return fmtPlanDate(from);
+  return `${fmtPlanDate(from)} → ${fmtPlanDate(to)}`;
+}

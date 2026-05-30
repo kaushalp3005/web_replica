@@ -5,10 +5,12 @@
 // + manual-entry.js. Header form + N line items (shared SoLineEditor),
 // validates before submit, POSTs /api/v1/so/create.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useRequireAuth } from "@/lib/user";
 import { createSo, COMPANY_OPTIONS, VOUCHER_TYPE_OPTIONS } from "@/lib/so";
+import { registerOnSignOut } from "@/lib/auth";
+import { sessionLoad, sessionSave, sessionClear } from "@/lib/session-state";
 import { SoChrome } from "../_chrome";
 import { SoLineEditor, emptyLine, lineToWire, type LineRow } from "../_SoLineForm";
 
@@ -30,14 +32,45 @@ const EMPTY_HEADER: HeaderForm = {
   voucher_type: "",
 };
 
+// Form-draft slot — persists header + lines across navigation so an
+// operator who wanders away mid-typing doesn't lose their work. Cleared on
+// successful submit, Cancel, and sign-out.
+const DRAFT_KEY = "so.draft.manual";
+interface ManualSoDraft {
+  header: HeaderForm;
+  lines: LineRow[];
+}
+
 export default function ManualSoEntryPage() {
   const router = useRouter();
   useRequireAuth(router.replace);
 
-  const [header, setHeader] = useState<HeaderForm>(EMPTY_HEADER);
-  const [lines, setLines] = useState<LineRow[]>([]);
+  // Lazy load the draft ONCE on mount (returns null on SSR or no entry).
+  // Both header + lines hydrate from the same snapshot, then maintain their
+  // own state — write-through to sessionStorage happens via the effect below.
+  const [initialDraft] = useState<ManualSoDraft | null>(() =>
+    typeof window !== "undefined" ? sessionLoad<ManualSoDraft>(DRAFT_KEY) : null,
+  );
+  const [header, setHeader] = useState<HeaderForm>(initialDraft?.header ?? EMPTY_HEADER);
+  const [lines, setLines] = useState<LineRow[]>(initialDraft?.lines ?? []);
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
+
+  // Persist on every change. Snapshot pattern — small payload, simple to
+  // reason about, idempotent if the values haven't actually moved.
+  useEffect(() => {
+    sessionSave<ManualSoDraft>(DRAFT_KEY, { header, lines });
+  }, [header, lines]);
+
+  // Drain on sign-out (avatar button or 401 interceptor). The unregister
+  // callback fires on unmount so we don't accumulate stale closures.
+  useEffect(() => {
+    return registerOnSignOut(() => sessionClear(DRAFT_KEY));
+  }, []);
+
+  function clearDraft() {
+    sessionClear(DRAFT_KEY);
+  }
 
   function setHeaderField<K extends keyof HeaderForm>(k: K, v: HeaderForm[K]) {
     setHeader((h) => ({ ...h, [k]: v }));
@@ -88,6 +121,9 @@ export default function ManualSoEntryPage() {
         lines: lines.map(lineToWire),
       });
       setFeedback({ kind: "ok", msg: "Sales Order created." });
+      // Draft has served its purpose — drop it before navigating away so
+      // a future visit to manual entry starts from a clean slate.
+      clearDraft();
       // Navigate back to the listing so the new SO shows up.
       router.push("/modules/production/so-creation");
     } catch (e2) {
@@ -126,7 +162,7 @@ export default function ManualSoEntryPage() {
               type="button"
               onClick={addLine}
               disabled={submitting}
-              className="h-7 px-3 rounded-[2px] text-[12px] font-semibold border bg-gradient-to-b from-[#f7dfa5] to-[#f0c14b] border-[#a88734] hover:from-[#f5d78e] hover:to-[#eeb933] text-[var(--text-primary)] disabled:opacity-50"
+              className="h-7 px-3 rounded-[2px] text-[12px] font-semibold border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white disabled:opacity-50"
             >
               + Add line
             </button>
@@ -152,7 +188,12 @@ export default function ManualSoEntryPage() {
         <div className="flex items-center gap-3 mb-8">
           <button
             type="button"
-            onClick={() => router.push("/modules/production/so-creation")}
+            onClick={() => {
+              // Cancel is an explicit "abandon" — drop the draft so it
+              // doesn't resurrect on the next visit to manual entry.
+              clearDraft();
+              router.push("/modules/production/so-creation");
+            }}
             disabled={submitting}
             className="h-9 px-3 text-[13px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)] disabled:opacity-50"
           >
@@ -164,8 +205,8 @@ export default function ManualSoEntryPage() {
             className={[
               "h-9 px-4 rounded-[2px] text-[13px] font-bold border tracking-wide",
               submitting
-                ? "bg-[#f2c399] border-[#f2c399] cursor-not-allowed text-[var(--text-primary)]"
-                : "bg-gradient-to-b from-[#f7dfa5] to-[#f0c14b] border-[#a88734] hover:from-[#f5d78e] hover:to-[#eeb933] text-[var(--text-primary)]",
+                ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
+                : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
             ].join(" ")}
           >
             {submitting ? "Submitting…" : "Submit Sales Order"}
@@ -182,7 +223,7 @@ export default function ManualSoEntryPage() {
 }
 
 const headerInputCls =
-  "w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#00a1c9] focus:shadow-[0_0_0_1px_#00a1c9]";
+  "w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]";
 
 function Field({
   label, value, onChange, type = "text",

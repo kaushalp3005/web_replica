@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
 import {
   AuthError,
@@ -126,10 +127,7 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen flex flex-col">
       <header className="bg-[var(--aws-navy)] h-[45px] flex items-center px-6">
-        <span className="text-white font-bold tracking-tight text-[17px] flex items-baseline">
-          aws
-          <span className="inline-block w-[4px] h-[4px] rounded-full bg-[var(--aws-orange)] ml-[1px]" />
-        </span>
+        <BrandMark />
       </header>
 
       <main className="flex-1 flex justify-center pt-10 pb-16 px-4">
@@ -194,12 +192,12 @@ export default function LoginPage() {
                   disabled={loading}
                   className={[
                     "w-full mt-1 h-9 rounded-[2px] text-[14px] font-semibold",
-                    "text-[var(--text-primary)] border",
+                    "text-white border",
                     "shadow-[inset_0_-1px_0_rgba(0,0,0,0.18)]",
                     "transition-colors",
                     loading
-                      ? "bg-[#f2c399] border-[#f2c399] cursor-not-allowed"
-                      : "bg-gradient-to-b from-[#f7dfa5] to-[#f0c14b] border-[#a88734] hover:from-[#f5d78e] hover:to-[#eeb933] active:from-[#e0b53c] active:to-[#d39e2e]",
+                      ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed"
+                      : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] active:bg-[var(--aws-orange-active)]",
                   ].join(" ")}
                 >
                   {loading ? "Signing in…" : "Sign in"}
@@ -219,13 +217,14 @@ export default function LoginPage() {
             .
           </p>
           <p className="mt-2 text-[12px] leading-[18px] text-[var(--text-secondary)] text-center">
-            Need help?{" "}
-            <a
-              href="#"
+            Forgot your password?{" "}
+            <button
+              type="button"
+              onClick={() => router.push("/forgot-password")}
               className="text-[var(--aws-link)] hover:underline hover:text-[var(--aws-link-hover)]"
             >
-              Contact admin to reset your password
-            </a>
+              Reset it via WhatsApp OTP
+            </button>
           </p>
         </div>
       </main>
@@ -290,7 +289,7 @@ function Field({
           "border outline-none transition-shadow",
           error
             ? "border-[var(--aws-error)] shadow-[0_0_0_1px_var(--aws-error)]"
-            : "border-[var(--aws-border-strong)] focus:border-[#00a1c9] focus:shadow-[0_0_0_1px_#00a1c9]",
+            : "border-[var(--aws-border-strong)] focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]",
           "disabled:bg-[#f4f4f4] disabled:text-[#879596]",
         ].join(" ")}
       />

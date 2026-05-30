@@ -11,11 +11,12 @@
 import { useEffect, useState } from "react";
 import { tokenStore, userStore, type MeResponse } from "./auth";
 
-// Type-safe accessor for the warehouses alias the backend uses on /me
-// (alias of allowed_warehouses). Kept here so callers don't repeat the
-// inline `as { warehouses?: string[] }` cast.
-interface MeWithWarehouses extends MeResponse {
+// Type-safe accessor for the warehouses + floors aliases the backend uses
+// on /me (aliases of allowed_warehouses / allowed_floors). Kept here so
+// callers don't repeat the inline cast each time.
+interface MeWithScope extends MeResponse {
   warehouses?: string[];
+  floors?: string[];
 }
 
 export function initialFromName(name: string | null | undefined): string {
@@ -43,13 +44,18 @@ export function useUserInitial(): string {
 export interface UserScope {
   isAdmin: boolean;
   warehouses: string[];
+  // Allowed shop-floor / area names — empty means "no floor restriction".
+  // Planning's per-step floor dropdown intersects this list with the
+  // selected factory's full floor set.
+  floors: string[];
 }
 
 export function useUserScope(): UserScope {
-  const me = useMe() as MeWithWarehouses | null;
+  const me = useMe() as MeWithScope | null;
   return {
     isAdmin: !!me?.is_admin,
     warehouses: me?.warehouses ?? [],
+    floors: me?.floors ?? [],
   };
 }
 

@@ -5,10 +5,12 @@
 // badges, issuance bar. Backed by GET /api/v1/production/job-cards-v2.
 
 import { useEffect, useRef, useState } from "react";
+import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
-import { apiFetch, signOut } from "@/lib/auth";
+import { apiFetch } from "@/lib/auth";
 import { useRequireAuth, useUserInitial, useUserScope } from "@/lib/user";
 import { JC_LIST_PAGE_SIZE, SEARCH_DEBOUNCE_MS } from "@/lib/constants";
+import { BackLink } from "@/components/BackLink";
 import {
   loadListCache,
   saveListCache,
@@ -85,9 +87,9 @@ const PAGE_SIZE = JC_LIST_PAGE_SIZE;
 const STATUS_STYLES: Record<string, { bg: string; fg: string; ring: string }> = {
   locked: { bg: "#fdf3f1", fg: "#b1361e", ring: "#f0c7be" },
   unlocked: { bg: "#f4f4f4", fg: "#414d5c", ring: "#d5dbdb" },
-  assigned: { bg: "#fef3e6", fg: "#a35200", ring: "#f5d6a8" },
-  material_received: { bg: "#eaf3ff", fg: "#0073bb", ring: "#bbd9f3" },
-  in_progress: { bg: "#eaf3ff", fg: "#0073bb", ring: "#bbd9f3" },
+  assigned: { bg: "#fbeced", fg: "#9a393e", ring: "#e6bcbe" },
+  material_received: { bg: "#eaf3ff", fg: "#9a393e", ring: "#bbd9f3" },
+  in_progress: { bg: "#eaf3ff", fg: "#9a393e", ring: "#bbd9f3" },
   completed: { bg: "#eaf6ed", fg: "#1d8102", ring: "#b6dbb1" },
   closed: { bg: "#f0eef8", fg: "#5752c4", ring: "#d2cef0" },
   cancelled: { bg: "#f4f4f4", fg: "#687078", ring: "#d5dbdb" },
@@ -321,10 +323,7 @@ export default function JobCardListingPage() {
   return (
     <div className="min-h-screen flex flex-col bg-[var(--background)]">
       <header className="bg-[var(--aws-navy)] h-[45px] flex items-center px-6 gap-4">
-        <span className="text-white font-bold tracking-tight text-[17px] flex items-baseline">
-          aws
-          <span className="inline-block w-[4px] h-[4px] rounded-full bg-[var(--aws-orange)] ml-[1px]" />
-        </span>
+        <BrandMark />
         <span className="text-[#d5dbdb] text-[13px] hidden sm:inline">Console</span>
         <nav className="text-[12px] text-[#d5dbdb] hidden md:flex items-center gap-2 ml-2">
           <button onClick={() => router.push("/modules")} className="hover:underline">
@@ -335,8 +334,9 @@ export default function JobCardListingPage() {
         </nav>
         <div className="flex-1" />
         <button
-          onClick={() => { signOut(); router.replace("/"); }}
-          aria-label="Sign out"
+          onClick={() => router.push("/modules/profile")}
+          aria-label="Open profile"
+          title="Profile"
           className="w-8 h-8 rounded-full bg-[var(--aws-orange)] text-white text-[13px] font-bold flex items-center justify-center hover:bg-[var(--aws-orange-hover)]"
         >
           {initial}
@@ -344,6 +344,9 @@ export default function JobCardListingPage() {
       </header>
 
       <main className="flex-1 max-w-[1280px] w-full mx-auto px-4 sm:px-6 py-6">
+        <div className="mb-3">
+          <BackLink parentHref="/modules" label="modules" />
+        </div>
         <div className="flex flex-wrap items-end justify-between gap-4 mb-5">
           <div>
             <h1 className="text-[22px] leading-[28px] font-semibold text-[var(--text-primary)]">
@@ -379,10 +382,10 @@ export default function JobCardListingPage() {
 
         {!userScope.isAdmin && userScope.warehouses.length > 0 ? (
           <div className="mb-4 border border-[var(--aws-border)] bg-[#f1faff] text-[12px] text-[var(--text-primary)] px-3 py-2 rounded-sm flex items-center gap-2">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#0073bb" strokeWidth={2}>
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#9a393e" strokeWidth={2}>
               <circle cx="12" cy="12" r="10" />
               <line x1="12" y1="8" x2="12" y2="13" />
-              <circle cx="12" cy="16" r="0.6" fill="#0073bb" />
+              <circle cx="12" cy="16" r="0.6" fill="#9a393e" />
             </svg>
             <span>
               Your account is scoped to{" "}
@@ -410,7 +413,7 @@ export default function JobCardListingPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search JC#, SKU, customer, batch…"
-              className="w-full h-8 pl-7 pr-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#00a1c9] focus:shadow-[0_0_0_1px_#00a1c9]"
+              className="w-full h-8 pl-7 pr-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
             />
           </div>
           <StatusMultiSelect
@@ -471,11 +474,7 @@ export default function JobCardListingPage() {
                 ) : null}
               </div>
             ) : null}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {rows.map((jc) => (
-                <JobCard key={jc.job_card_id} jc={jc} />
-              ))}
-            </div>
+            <JobCardGroupedGrid rows={rows} />
           </>
         )}
 
@@ -495,6 +494,168 @@ export default function JobCardListingPage() {
         <a href="#" className="hover:underline">Privacy</a>
         <span>© {new Date().getFullYear()}</span>
       </footer>
+    </div>
+  );
+}
+
+// ── Grouped grid: plan-grouped merged cards + loose JCs ─────────────────
+//
+// All rows in a single shared list are sorted latest-first by job_card_id
+// (newer JCs have larger ids — the v2 backend issues them monotonically).
+// Then we partition: rows with a plan_id roll up into one merged card per
+// plan, with each stage shown inline; rows without plan_id render as
+// standalone cards. The mixed list is reassembled in latest-first order
+// by taking each group's MAX(job_card_id) as its sort key — so freshly
+// approved plans surface at the top of the page even when their oldest
+// stage is buried mid-list.
+
+interface PlanGroup {
+  kind: "plan";
+  plan_id: number;
+  stages: JobCardRow[];          // already sorted by step_number then job_card_id asc
+  newestJcId: number;            // used for latest-first global ordering
+}
+interface LooseGroup {
+  kind: "loose";
+  row: JobCardRow;
+  newestJcId: number;
+}
+type Group = PlanGroup | LooseGroup;
+
+function buildGroups(rows: JobCardRow[]): Group[] {
+  const byPlan = new Map<number, JobCardRow[]>();
+  const loose: LooseGroup[] = [];
+  for (const jc of rows) {
+    if (jc.plan_id != null) {
+      const list = byPlan.get(jc.plan_id) ?? [];
+      list.push(jc);
+      byPlan.set(jc.plan_id, list);
+    } else {
+      loose.push({ kind: "loose", row: jc, newestJcId: jc.job_card_id });
+    }
+  }
+  const planGroups: PlanGroup[] = [];
+  for (const [plan_id, stages] of byPlan.entries()) {
+    // Sort stages by step number if known, then by JC id ascending — that
+    // way the chain reads top-down in the order production runs.
+    const ordered = [...stages].sort((a, b) => a.job_card_id - b.job_card_id);
+    const newestJcId = stages.reduce((m, s) => (s.job_card_id > m ? s.job_card_id : m), 0);
+    planGroups.push({ kind: "plan", plan_id, stages: ordered, newestJcId });
+  }
+  // Merge + sort by newestJcId descending so the most recently created
+  // group (plan or loose) is at the top.
+  return [...planGroups, ...loose].sort((a, b) => b.newestJcId - a.newestJcId);
+}
+
+function JobCardGroupedGrid({ rows }: { rows: JobCardRow[] }) {
+  const groups = buildGroups(rows);
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      {groups.map((g) => (
+        g.kind === "plan" ? (
+          <PlanMergedCard key={`plan-${g.plan_id}`} group={g} />
+        ) : (
+          <JobCard key={`jc-${g.row.job_card_id}`} jc={g.row} />
+        )
+      ))}
+    </div>
+  );
+}
+
+// Compact merged card: one per plan, with each stage rendered as a single
+// row inside. Click a stage row to jump to that JC's detail page. Header
+// shows SKU + customer + plant; the stage rows show step/process · stage
+// label · qty · status.
+function PlanMergedCard({ group }: { group: PlanGroup }) {
+  const router = useRouter();
+  const first = group.stages[0];
+  const sku = first?.fg_sku_name || "—";
+  const customer = first?.customer_name || "—";
+  const plant = first?.factory || "—";
+  // Total kg across stages (per-stage planned qty — gives a rough sense of
+  // the plan's overall scale at a glance).
+  const totalKg = group.stages.reduce(
+    (s, jc) => s + (parseFloat(String(jc.planned_qty_kg ?? jc.batch_size_kg ?? 0)) || 0),
+    0,
+  );
+  // SO numbers de-duped across all stages.
+  const allSos = Array.from(
+    new Set(group.stages.flatMap((jc) => jc.so_numbers ?? [])),
+  );
+  const so = formatSo(allSos);
+
+  function openStage(jcId: number) {
+    patchListCache({ scrollY: typeof window !== "undefined" ? window.scrollY : 0 });
+    router.push(`/modules/job-card/${jcId}`);
+  }
+
+  return (
+    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
+      {/* Header — compact: plan id + SKU + customer + plant chip + total */}
+      <div className="px-3 py-2 border-b border-[var(--aws-border)] bg-[var(--surface-subtle)]">
+        <div className="flex items-center justify-between gap-2 mb-0.5">
+          <span className="font-mono text-[10px] uppercase tracking-wide font-bold text-[var(--text-muted)]">
+            Plan #{group.plan_id}
+          </span>
+          <span className="text-[10px] font-semibold text-[var(--text-secondary)]">
+            {group.stages.length} stage{group.stages.length === 1 ? "" : "s"} · {fmtBatch(totalKg)}
+          </span>
+        </div>
+        <div className="text-[13px] font-semibold text-[var(--text-primary)] truncate" title={sku}>{sku}</div>
+        <div className="text-[11px] text-[var(--text-secondary)] truncate" title={customer}>{customer}</div>
+        <div className="flex items-center gap-2 mt-1 text-[10px] text-[var(--text-muted)]">
+          <span>{plant}</span>
+          {so.display !== "—" ? (
+            <>
+              <span>·</span>
+              <span title={so.tooltip}>SO {so.display}</span>
+            </>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Stage list — one row per JC. Compact: number badge · process/stage
+          · qty · status pill. Tap any row to open that JC's detail page. */}
+      <ol>
+        {group.stages.map((jc, i) => {
+          const status = jc.status ?? "";
+          const style = STATUS_STYLES[status] ?? { bg: "#f4f4f4", fg: "#414d5c", ring: "#d5dbdb" };
+          const qty = jc.planned_qty_kg ?? jc.batch_size_kg;
+          const processLabel = jc.stage || `Stage ${i + 1}`;
+          return (
+            <li
+              key={jc.job_card_id}
+              className={[
+                "flex items-center gap-2 px-3 py-1.5 text-[11px] cursor-pointer hover:bg-[var(--surface-subtle)]",
+                i > 0 ? "border-t border-[var(--aws-border)]" : "",
+              ].join(" ")}
+              onClick={() => openStage(jc.job_card_id)}
+            >
+              <span className="shrink-0 inline-flex items-center justify-center w-4 h-4 rounded-full bg-[var(--aws-navy)] text-white text-[9px] font-bold">
+                {i + 1}
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-[var(--text-primary)] truncate" title={processLabel}>
+                  {processLabel}
+                </div>
+                <div className="text-[10px] text-[var(--text-muted)] truncate">
+                  {jc.floor || "—"} · {fmtBatch(qty)}
+                </div>
+              </div>
+              <span
+                className="shrink-0 text-[9px] font-semibold px-1.5 py-0.5 rounded-sm capitalize"
+                style={{
+                  background: style.bg,
+                  color: style.fg,
+                  border: `1px solid ${style.ring}`,
+                }}
+              >
+                {fmtStatus(status) || "—"}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }
@@ -525,7 +686,7 @@ function JobCard({ jc }: { jc: JobCardRow }) {
         patchListCache({ scrollY: typeof window !== "undefined" ? window.scrollY : 0 });
         router.push(`/modules/job-card/${jc.job_card_id}`);
       }}
-      className="text-left bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-4 hover:border-[var(--aws-navy)] hover:shadow-[0_2px_6px_rgba(0,28,36,0.18)] transition focus:outline-none focus:border-[#00a1c9] focus:shadow-[0_0_0_2px_#00a1c9]"
+      className="text-left bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-4 hover:border-[var(--aws-navy)] hover:shadow-[0_2px_6px_rgba(0,28,36,0.18)] transition focus:outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_2px_#9a393e]"
     >
       <div className="flex items-start justify-between gap-2 mb-2">
         <span

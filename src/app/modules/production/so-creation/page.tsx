@@ -25,6 +25,12 @@ import {
   syncFulfillment,
   uploadSoBook,
 } from "@/lib/so";
+import {
+  loadSoListCache,
+  saveSoListCache,
+  type SoListCache,
+} from "@/lib/so-list-cache";
+import { BackLink } from "@/components/BackLink";
 import { SoChrome } from "./_chrome";
 
 const PAGE_SIZE = 50;
@@ -187,7 +193,7 @@ function downloadBlob(blob: Blob, filename: string): void {
 const STATUS_PALETTE: Record<string, { fg: string; bg: string; ring: string }> = {
   ok:        { fg: "var(--text-success)", bg: "#eaf6ed", ring: "#b6dbb1" },
   mismatch:  { fg: "#b1361e",             bg: "#fdf3f1", ring: "#f0c7be" },
-  warning:   { fg: "#a35200",             bg: "#fef3e6", ring: "#f5d6a8" },
+  warning:   { fg: "#9a393e",             bg: "#fbeced", ring: "#e6bcbe" },
   unmatched: { fg: "var(--text-muted)",   bg: "var(--surface-disabled)", ring: "var(--aws-border)" },
 };
 
@@ -201,19 +207,44 @@ export default function SoCreationPage() {
   const [showMethods, setShowMethods] = useState(true);
   const [uploadOpen, setUploadOpen] = useState(false);
 
+  // ── Cache hydration ────────────────────────────────────────────────────
+  //
+  // Lazy init runs ONCE on mount — calling loadSoListCache() in every
+  // useState() factory below is safe because each factory only runs once.
+  // We resolve once and pass the same snapshot to each useState so they
+  // all agree on the source of truth.
+  //
+  // Same anti-loop reasoning as jc-list-cache (see app/modules/job-card/
+  // page.tsx:137): no per-render loads, no fresh object references that
+  // would invalidate effect deps and cause request storms.
+  const [cache] = useState<SoListCache | null>(() =>
+    typeof window !== "undefined" ? loadSoListCache() : null,
+  );
+
   // Filters / sort / pagination ──────────────────────────────────────────
-  const [search, setSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [status, setStatus] = useState<StatusChip>("all");
-  const [dateFrom, setDateFrom] = useState<string>("");
-  const [dateTo, setDateTo] = useState<string>("");
+  const [search, setSearch] = useState(cache?.search ?? "");
+  // debouncedSearch hydrates from the same key — after a settled debounce
+  // these always agree, so on rehydration we want the fetch to fire with
+  // the cached query immediately, not wait 300ms after mount.
+  const [debouncedSearch, setDebouncedSearch] = useState(cache?.search ?? "");
+  const [status, setStatus] = useState<StatusChip>(cache?.status ?? "all");
+  const [dateFrom, setDateFrom] = useState<string>(cache?.dateFrom ?? "");
+  const [dateTo, setDateTo] = useState<string>(cache?.dateTo ?? "");
   // Advanced multi-select filters. Each key maps to a Set of allowed values
   // joined with commas before going on the wire — backend AND-s across keys
   // and OR-s within a single key, matching so-view.js `syncAdvFiltersToQuery`.
-  const [advFilters, setAdvFilters] = useState<Record<string, Set<string>>>({});
-  const [sortBy, setSortBy] = useState<SortBy>("so_date");
-  const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
-  const [page, setPage] = useState(1);
+  // Cache stores arrays; rehydrate as Sets here.
+  const [advFilters, setAdvFilters] = useState<Record<string, Set<string>>>(() => {
+    if (!cache?.advFilters) return {};
+    const out: Record<string, Set<string>> = {};
+    for (const [k, arr] of Object.entries(cache.advFilters)) {
+      out[k] = new Set(arr);
+    }
+    return out;
+  });
+  const [sortBy, setSortBy] = useState<SortBy>(cache?.sortBy ?? "so_date");
+  const [sortOrder, setSortOrder] = useState<SortOrder>(cache?.sortOrder ?? "asc");
+  const [page, setPage] = useState(cache?.page ?? 1);
 
   const [data, setData] = useState<SoListResponse | null>(null);
   const [listLoading, setListLoading] = useState(true);
@@ -225,7 +256,9 @@ export default function SoCreationPage() {
   const [uploadMsg, setUploadMsg] = useState<{ kind: "ok" | "warn" | "err"; text: string } | null>(null);
 
   // Expanded SOs (inline detail rows) ────────────────────────────────────
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [expanded, setExpanded] = useState<Set<number>>(() =>
+    new Set(cache?.expanded ?? []),
+  );
 
   // Debounce search ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -240,6 +273,38 @@ export default function SoCreationPage() {
   // depends on this scalar instead of the Set map so the deps array stays
   // statically analysable for react-hooks/exhaustive-deps.
   const advKey = advFilterKey(advFilters);
+
+  // Fingerprint of the expanded-rows Set for the cache-save effect dep
+  // array. Sorted so equal-membership sets fingerprint identically.
+  const expandedKey = useMemo(
+    () => [...expanded].sort((a, b) => a - b).join(","),
+    [expanded],
+  );
+
+  // Persist the listing state on any change. Snapshot pattern (write the
+  // whole shape every time) rather than incremental writes — sessionStorage
+  // is local and the payload is small. advFilters Sets are dehydrated to
+  // arrays for JSON; the lazy init above rehydrates them on next mount.
+  useEffect(() => {
+    const advArrays: Record<string, string[]> = {};
+    for (const [k, set] of Object.entries(advFilters)) advArrays[k] = [...set];
+    saveSoListCache({
+      search,
+      status,
+      dateFrom,
+      dateTo,
+      advFilters: advArrays,
+      sortBy,
+      sortOrder,
+      page,
+      expanded: [...expanded],
+    });
+    // advKey + expandedKey are the stable fingerprints of advFilters /
+    // expanded — they re-fire the effect when membership changes without
+    // wiring the Set objects into the dep array (which would trip the
+    // exhaustive-deps rule).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, status, dateFrom, dateTo, advKey, sortBy, sortOrder, page, expandedKey]);
 
   // Fetch effect ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -384,6 +449,9 @@ export default function SoCreationPage() {
 
   return (
     <SoChrome title="SO Creation">
+      <div className="mb-3">
+        <BackLink parentHref="/modules/production" label="production" />
+      </div>
       <div className="mb-5">
         <h1 className="text-[22px] leading-[28px] font-semibold text-[var(--text-primary)]">SO Creation</h1>
         <p className="text-[13px] text-[var(--text-secondary)] mt-1">
@@ -395,7 +463,6 @@ export default function SoCreationPage() {
         <MethodPicker
           onUpload={() => { setShowMethods(false); setUploadOpen(true); }}
           onManual={() => router.push("/modules/production/so-creation/manual")}
-          onUpdate={() => router.push("/modules/production/so-creation/update")}
         />
       ) : null}
 
@@ -405,6 +472,15 @@ export default function SoCreationPage() {
           fileName={uploadFileName}
           message={uploadMsg}
           onChosen={onFileChosen}
+          onCancel={() => {
+            // Close the drop zone, restore the method picker, and wipe any
+            // stale feedback so the next entry starts clean. Disabled while
+            // an upload is in-flight (button is hidden in that case).
+            setUploadOpen(false);
+            setShowMethods(true);
+            setUploadMsg(null);
+            setUploadFileName("");
+          }}
         />
       ) : null}
 
@@ -488,10 +564,10 @@ export default function SoCreationPage() {
 // ── Method picker ────────────────────────────────────────────────────────
 
 function MethodPicker({
-  onUpload, onManual, onUpdate,
-}: { onUpload: () => void; onManual: () => void; onUpdate: () => void }) {
+  onUpload, onManual,
+}: { onUpload: () => void; onManual: () => void }) {
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5">
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
       <MethodCard
         title="Upload Excel"
         desc="Upload a Sales Register .xlsx file to bulk-process Sales Orders and run GST reconciliation."
@@ -502,11 +578,6 @@ function MethodPicker({
         desc="Enter SO header details and line items step by step with a guided form."
         onClick={onManual}
       />
-      <MethodCard
-        title="Update via Excel"
-        desc="Upload an updated Excel file to preview and apply changes to existing Sales Orders."
-        onClick={onUpdate}
-      />
     </div>
   );
 }
@@ -516,7 +587,7 @@ function MethodCard({ title, desc, onClick }: { title: string; desc: string; onC
     <button
       type="button"
       onClick={onClick}
-      className="text-left bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-4 hover:border-[var(--aws-navy)] hover:shadow-[0_2px_6px_rgba(0,28,36,0.18)] transition focus:outline-none focus:border-[#00a1c9] focus:shadow-[0_0_0_2px_#00a1c9]"
+      className="text-left bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-4 hover:border-[var(--aws-navy)] hover:shadow-[0_2px_6px_rgba(0,28,36,0.18)] transition focus:outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_2px_#9a393e]"
     >
       <div className="text-[14px] font-semibold text-[var(--text-primary)] mb-1">{title}</div>
       <p className="text-[12px] text-[var(--text-secondary)]">{desc}</p>
@@ -527,12 +598,13 @@ function MethodCard({ title, desc, onClick }: { title: string; desc: string; onC
 // ── Upload zone ──────────────────────────────────────────────────────────
 
 function UploadZone({
-  uploading, fileName, message, onChosen,
+  uploading, fileName, message, onChosen, onCancel,
 }: {
   uploading: boolean;
   fileName: string;
   message: { kind: "ok" | "warn" | "err"; text: string } | null;
   onChosen: (file: File) => void;
+  onCancel: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [drag, setDrag] = useState(false);
@@ -548,10 +620,27 @@ function UploadZone({
           if (f) onChosen(f);
         }}
         className={[
-          "bg-white border-2 border-dashed rounded-md p-6 text-center cursor-pointer transition",
-          drag ? "border-[var(--aws-orange)] bg-[#fef3e6]" : "border-[var(--aws-border-strong)] hover:border-[var(--aws-navy)]",
+          "relative bg-white border-2 border-dashed rounded-md p-6 text-center cursor-pointer transition",
+          drag ? "border-[var(--aws-orange)] bg-[#fbeced]" : "border-[var(--aws-border-strong)] hover:border-[var(--aws-navy)]",
         ].join(" ")}
       >
+        {/* Close affordance — hidden while an upload is in-flight (cancelling
+            mid-POST would leave the backend half-processed). stopPropagation
+            prevents the click from also opening the file-picker. */}
+        {!uploading ? (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onCancel(); }}
+            aria-label="Cancel upload"
+            title="Cancel"
+            className="absolute top-2 right-2 w-7 h-7 flex items-center justify-center rounded-sm text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-divider)] focus:outline-none focus:ring-2 focus:ring-[#9a393e]"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        ) : null}
         <input
           ref={inputRef}
           type="file"
@@ -584,7 +673,7 @@ function UploadZone({
           className={[
             "mt-2 text-[12px]",
             message.kind === "ok"   ? "text-[var(--text-success)]" :
-            message.kind === "warn" ? "text-[#a35200]" :
+            message.kind === "warn" ? "text-[#9a393e]" :
                                        "text-[var(--aws-error)]",
           ].join(" ")}
         >
@@ -635,7 +724,7 @@ function Toolbar({
     { value: "all",       label: "All" },
     { value: "ok",        label: "OK",        count: summary?.so_ok,        tone: "var(--text-success)" },
     { value: "mismatch",  label: "Mismatch",  count: summary?.so_mismatch,  tone: "#b1361e" },
-    { value: "warning",   label: "Warning",   count: summary?.so_warning,   tone: "#a35200" },
+    { value: "warning",   label: "Warning",   count: summary?.so_warning,   tone: "#9a393e" },
     { value: "unmatched", label: "Unmatched", count: summary?.so_unmatched, tone: "var(--text-muted)" },
   ];
 
@@ -650,7 +739,7 @@ function Toolbar({
           value={search}
           onChange={(e) => onSearch(e.target.value)}
           placeholder="Search SO number, customer…"
-          className="w-full h-8 pl-7 pr-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#00a1c9] focus:shadow-[0_0_0_1px_#00a1c9]"
+          className="w-full h-8 pl-7 pr-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
         />
       </div>
       {chips.map((c) => (
@@ -687,7 +776,7 @@ function Toolbar({
         <button
           type="button"
           onClick={onClearAllFilters}
-          className="h-8 px-3 text-[12px] rounded-full border border-[var(--aws-error)] text-[var(--aws-error)] bg-[#fdf3f1] hover:bg-[#fbe4dd] flex items-center gap-1.5"
+          className="h-8 px-3 text-[12px] rounded-full border border-[var(--aws-error)] text-[var(--aws-error)] bg-[#fdf3f1] hover:bg-[#f8dde1] flex items-center gap-1.5"
           title={`${advCount + (dateActive ? 1 : 0) + (statusActive ? 1 : 0) + (searchActive ? 1 : 0)} active filter${advCount + (dateActive ? 1 : 0) + (statusActive ? 1 : 0) + (searchActive ? 1 : 0) === 1 ? "" : "s"}`}
         >
           <span>✕</span> Clear filters
@@ -702,7 +791,7 @@ function Toolbar({
           className={[
             "h-8 px-3 text-[12px] rounded-[2px] border flex items-center gap-1.5",
             advCount > 0
-              ? "border-[var(--aws-orange)] text-[var(--aws-orange)] bg-[#fef3e6]"
+              ? "border-[var(--aws-orange)] text-[var(--aws-orange)] bg-[#fbeced]"
               : "border-[var(--aws-border-strong)] bg-white text-[var(--text-primary)] hover:border-[var(--aws-navy)]",
           ].join(" ")}
         >
@@ -832,7 +921,7 @@ function AdvancedFilterPanel({
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search filters…"
-          className="w-full h-8 pl-7 pr-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#00a1c9] focus:shadow-[0_0_0_1px_#00a1c9]"
+          className="w-full h-8 pl-7 pr-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
         />
       </div>
 
@@ -1222,7 +1311,7 @@ function GstSegBar({ row }: { row: SoRow }) {
     <div className="flex flex-col gap-1" title={tooltip}>
       <div className="flex h-1.5 w-[120px] rounded-full overflow-hidden bg-[var(--surface-divider)]">
         {okPct        > 0 ? <span style={{ width: `${okPct}%`,        background: "var(--text-success)" }} /> : null}
-        {warnPct      > 0 ? <span style={{ width: `${warnPct}%`,      background: "#a35200" }} /> : null}
+        {warnPct      > 0 ? <span style={{ width: `${warnPct}%`,      background: "#9a393e" }} /> : null}
         {errPct       > 0 ? <span style={{ width: `${errPct}%`,       background: "#b1361e" }} /> : null}
         {unmatchedPct > 0 ? <span style={{ width: `${unmatchedPct}%`, background: "var(--text-muted)" }} /> : null}
       </div>
@@ -1346,7 +1435,7 @@ function SectionShell({ title, children }: { title: string; children: React.Reac
 function KV({ label, value, mono, accent }: { label: string; value: React.ReactNode; mono?: boolean; accent?: "ok" | "warn" | "err" }) {
   const colour =
     accent === "ok"   ? "text-[var(--text-success)]" :
-    accent === "warn" ? "text-[#a35200]" :
+    accent === "warn" ? "text-[#9a393e]" :
     accent === "err"  ? "text-[#b1361e]" :
                         "text-[var(--text-primary)]";
   return (
@@ -1402,8 +1491,8 @@ function MatchSection({ line }: { line: SoLine }) {
   const tone =
     score == null    ? { cls: "bg-[var(--text-muted)]",    color: "text-[var(--text-muted)]",   label: "—" } :
     pct  >= 90       ? { cls: "bg-[var(--text-success)]",  color: "text-[var(--text-success)]", label: "Excellent" } :
-    pct  >= 75       ? { cls: "bg-[#0073bb]",              color: "text-[#0073bb]",             label: "Good" } :
-    pct  >= 50       ? { cls: "bg-[#a35200]",              color: "text-[#a35200]",             label: "Fair" } :
+    pct  >= 75       ? { cls: "bg-[#9a393e]",              color: "text-[#9a393e]",             label: "Good" } :
+    pct  >= 50       ? { cls: "bg-[#9a393e]",              color: "text-[#9a393e]",             label: "Fair" } :
                        { cls: "bg-[#b1361e]",              color: "text-[#b1361e]",             label: "Weak" };
   return (
     <SectionShell title="Master Match Info">
@@ -1468,7 +1557,7 @@ function GstSection({ line, gst }: { line: SoLine; gst: GstRecon }) {
               <CompareRow label="Article Name"  excel={line.sku_name}      master={gst.matched_item_description} />
               <CompareRow label="Item Category" excel={line.item_category} master={gst.matched_item_category} />
               <CompareRow label="Sub Category"  excel={line.sub_category}  master={gst.matched_sub_category} />
-              <CompareRow label="UOM"           excel={line.uom}           master={gst.matched_uom != null ? String(gst.matched_uom) : null} />
+              <CompareRow label="UOM"           excel={line.uom}           master={gst.matched_uom != null ? String(gst.matched_uom) : null} verdict={gst.uom_match} />
               <CompareRow label="Sales Group"   excel={line.sales_group}   master={gst.matched_sales_group} />
               <CompareRow label="Item Type"     excel={line.item_type}     master={gst.matched_item_type} />
               <CompareRow label="GST Rate"      excel={gst.actual_gst_rate}   master={gst.expected_gst_rate}   format="rate" />
@@ -1505,12 +1594,18 @@ function NoGstSection() {
 }
 
 function CompareRow({
-  label, excel, master, format,
+  label, excel, master, format, verdict,
 }: {
   label: string;
   excel: number | string | null | undefined;
   master: number | string | null | undefined;
   format?: "rate" | "cur";
+  // Explicit verdict from the server-side reconciliation. When supplied it
+  // overrides the local string-or-number compare — important for fields
+  // like UOM where the Excel label ("PCS") and the master factor (1.0)
+  // are intentionally different shapes and a naive compare would always
+  // read as a mismatch. null = check was skipped server-side (⚠).
+  verdict?: boolean | null;
 }) {
   const fmt = (v: number | string | null | undefined): string => {
     if (v == null || v === "") return "";
@@ -1521,8 +1616,13 @@ function CompareRow({
   const eD = fmt(excel);
   const mD = fmt(master);
   let cls: "pass" | "fail" | "warn" = "warn";
-  if (excel == null || master == null) cls = "warn";
-  else {
+  if (verdict !== undefined) {
+    // null → warn (server skipped the check, e.g. missing master row);
+    // true → pass; false → fail.
+    cls = verdict === true ? "pass" : verdict === false ? "fail" : "warn";
+  } else if (excel == null || master == null) {
+    cls = "warn";
+  } else {
     const nE = parseFloat(String(excel));
     const nM = parseFloat(String(master));
     const same = (!Number.isNaN(nE) && !Number.isNaN(nM))
@@ -1534,7 +1634,7 @@ function CompareRow({
   const tone =
     cls === "pass" ? "text-[var(--text-success)]" :
     cls === "fail" ? "text-[#b1361e]" :
-                     "text-[#a35200]";
+                     "text-[#9a393e]";
   return (
     <tr className="border-b border-[var(--aws-border)]">
       <td className="px-2 py-1 font-semibold text-[var(--text-secondary)]">{label}</td>
@@ -1577,7 +1677,7 @@ function ValidationChecks({ line, gst }: { line: SoLine; gst: GstRecon }) {
     <div className="space-y-1.5">
       {checks.map((c, i) => {
         const icon = c.pass ? "✓" : c.warn ? "⚠" : "✗";
-        const tone = c.pass ? "text-[var(--text-success)]" : c.warn ? "text-[#a35200]" : "text-[#b1361e]";
+        const tone = c.pass ? "text-[var(--text-success)]" : c.warn ? "text-[#9a393e]" : "text-[#b1361e]";
         return (
           <div key={i} className="flex items-start gap-2 text-[12px]">
             <span className={["font-bold w-4 shrink-0", tone].join(" ")}>{icon}</span>

@@ -212,41 +212,173 @@ export async function fetchMe(): Promise<MeResponse> {
   return (await res.json()) as MeResponse;
 }
 
-// Authed fetch: attaches the access token. Non-2xx other than 401 stays the
-// caller's problem. A 401 means the access token has expired (or was
-// rejected) — there is no client-side refresh wired up yet, so we treat it
-// as a hard sign-out: clear stores, drain module caches, and bounce to the
-// login page. Using `window.location.assign` rather than `router.replace`
-// because apiFetch has no access to the Next.js router and a hard refresh
-// is the safest way to drop any stale in-memory React state along the way.
+// ── Silent refresh ──────────────────────────────────────────────────────
 //
-// Setting a "signing out" flag prevents redirect loops when multiple
-// in-flight requests all 401 at once: only the first triggers the
-// redirect; the rest see the flag and return the original response.
+// Mirrors frontend_replica/src/shared/js/auth.js:authFetch — on 401, peek
+// the error envelope, branch on the code, and either hard sign-out (for
+// `token_reuse_detected` / `invalid_refresh_token`) or silently refresh
+// the access token and retry the original request exactly once.
+//
+// Concurrency dedupe: when N requests 401 at the same time, only ONE
+// `/auth/refresh` call fires — the rest await the same shared promise. We
+// keep the resolved promise reachable for 1s after completion so straggler
+// 401s arriving on the heels of the first refresh consume the cached result
+// instead of triggering a second refresh (which would arm the server's
+// reuse-detection if rotation already occurred).
+
+let refreshPromise: Promise<LoginResponse> | null = null;
+
+async function refreshTokens(): Promise<LoginResponse> {
+  const refresh = safeGet(TOKEN_KEYS.refresh);
+  if (!refresh) throw new Error("no_refresh_token");
+  const res = await fetch(`${API_BASE}/api/v1/auth/refresh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: refresh }),
+  });
+  if (!res.ok) {
+    const env = await parseEnvelope(res);
+    throw new AuthError(env.error ?? "refresh_failed", env, res.status);
+  }
+  const next = (await res.json()) as LoginResponse;
+  // Rotation: the new refresh token replaces the old one. The server may
+  // also revoke the old refresh token server-side, so we must store the
+  // new one before any further request fires.
+  tokenStore.save(next);
+  return next;
+}
+
+function _dedupedRefresh(): Promise<LoginResponse> {
+  if (!refreshPromise) {
+    refreshPromise = refreshTokens();
+    refreshPromise.finally(() => {
+      // Hold the resolved promise for ~1s so straggler 401s share it.
+      const p = refreshPromise;
+      setTimeout(() => { if (refreshPromise === p) refreshPromise = null; }, 1000);
+    });
+  }
+  return refreshPromise;
+}
+
+// Authed fetch:
+//   1. Attaches the current access token (if any)
+//   2. On 401 + non-terminal envelope, silently refreshes and retries once
+//   3. Only signs out + redirects when refresh actually fails or the
+//      envelope reports a terminal code (token_reuse_detected /
+//      invalid_refresh_token / refresh_token_expired)
+//
+// Window-level signingOut flag prevents redirect loops when multiple
+// in-flight requests all fail refresh simultaneously.
 let signingOut = false;
-export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  const token = tokenStore.accessToken();
+
+function _hardSignOutAndRedirect(): void {
+  if (signingOut || typeof window === "undefined") return;
+  signingOut = true;
+  try {
+    const dest = window.location.pathname + window.location.search;
+    if (dest && dest !== "/") {
+      sessionStorage.setItem("auth.redirect_after_login", dest);
+    }
+  } catch { /* sessionStorage disabled */ }
+  signOut();
+  window.location.assign("/");
+}
+
+async function _doFetch(path: string, init: RequestInit, token: string | null): Promise<Response> {
   const headers = new Headers(init.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
-  if (res.status === 401 && !signingOut && typeof window !== "undefined") {
-    signingOut = true;
-    // Stash the path the user was on so the login page can bounce them
-    // back after re-auth. We can't import lib/user.ts here without
-    // creating a cycle, so duplicate the sessionStorage key contract.
-    try {
-      const dest = window.location.pathname + window.location.search;
-      if (dest && dest !== "/") {
-        sessionStorage.setItem("auth.redirect_after_login", dest);
-      }
-    } catch { /* sessionStorage disabled — fall back to /modules later */ }
-    signOut();
-    window.location.assign("/");
+  return fetch(`${API_BASE}${path}`, { ...init, headers });
+}
+
+// Terminal error codes — refresh cannot recover. Anything else means the
+// access token expired or was rejected for a benign reason; we attempt the
+// silent refresh path.
+const TERMINAL_AUTH_ERRORS = new Set([
+  "token_reuse_detected",
+  "invalid_refresh_token",
+  "refresh_token_expired",
+]);
+
+export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const first = await _doFetch(path, init, tokenStore.accessToken());
+  if (first.status !== 401) return first;
+  if (signingOut) return first;
+
+  // Peek the envelope on a clone so the caller can still consume the
+  // original body if we end up returning it (we don't on the happy path,
+  // but defensive cloning is cheap).
+  let env: ErrorEnvelope = {};
+  try { env = await first.clone().json() as ErrorEnvelope; } catch { /* non-JSON */ }
+
+  if (env.error && TERMINAL_AUTH_ERRORS.has(env.error)) {
+    _hardSignOutAndRedirect();
+    return first;
   }
-  return res;
+
+  // If we have no refresh token to begin with, there's nothing to recover.
+  if (!safeGet(TOKEN_KEYS.refresh) || tokenStore.isRefreshExpired()) {
+    _hardSignOutAndRedirect();
+    return first;
+  }
+
+  // Silent refresh + retry once.
+  try {
+    await _dedupedRefresh();
+  } catch {
+    _hardSignOutAndRedirect();
+    return first;
+  }
+  return _doFetch(path, init, tokenStore.accessToken());
+}
+
+// ── OTP-based password reset ────────────────────────────────────────────
+//
+// Both endpoints are unauthenticated — the user is locked out when they
+// request a reset, so apiFetch (which assumes a bearer token) is the wrong
+// transport. We hit them directly with `fetch` and translate the error
+// envelope into AuthError for the UI.
+
+export interface SendResetOtpResponse {
+  message: string;
+  expires_in_seconds: number;
+}
+
+export async function sendResetOtp(phone: string): Promise<SendResetOtpResponse> {
+  const res = await fetch(`${API_BASE}/api/v1/auth/password/reset/send-otp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ phone }),
+  });
+  if (!res.ok) {
+    const env = await parseEnvelope(res);
+    throw new AuthError(env.error ?? "unknown_error", env, res.status);
+  }
+  return (await res.json()) as SendResetOtpResponse;
+}
+
+export interface VerifyResetOtpResponse {
+  message: string;
+  revoked_count: number;
+}
+
+export async function verifyResetOtp(
+  phone: string,
+  otp: string,
+  new_password: string,
+): Promise<VerifyResetOtpResponse> {
+  const res = await fetch(`${API_BASE}/api/v1/auth/password/reset/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ phone, otp, new_password }),
+  });
+  if (!res.ok) {
+    const env = await parseEnvelope(res);
+    throw new AuthError(env.error ?? "unknown_error", env, res.status);
+  }
+  return (await res.json()) as VerifyResetOtpResponse;
 }
 
 // Mirrors LoginActivity.handleLoginError — keep messages generic enough that

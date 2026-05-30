@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
 import { fetchMe, signOut, userStore, type MeResponse } from "@/lib/auth";
+// `signOut` is still used by the unauthorised-/me fallback below.
 import { useRequireAuth, useUserInitial } from "@/lib/user";
 import { MODULES } from "@/lib/modules";
 
@@ -51,14 +53,13 @@ export default function ModulesPage() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return MODULES;
-    return MODULES.filter((m) => m.title.toLowerCase().includes(q));
-  }, [query]);
-
-  function onLogout() {
-    signOut();
-    router.replace("/");
-  }
+    // Hide the Admin tile from non-admins. The /modules/admin route also
+    // gates itself, but suppressing the entry point keeps the grid honest
+    // for operators who don't have the permission.
+    const visible = me?.is_admin ? MODULES : MODULES.filter((m) => m.route !== "admin");
+    if (!q) return visible;
+    return visible.filter((m) => m.title.toLowerCase().includes(q));
+  }, [query, me]);
 
   function onOpen(m: (typeof MODULES)[number]) {
     if (m.implemented) {
@@ -72,15 +73,13 @@ export default function ModulesPage() {
   return (
     <div className="min-h-screen flex flex-col bg-[var(--background)]">
       <header className="bg-[var(--aws-navy)] h-[45px] flex items-center px-6 gap-4">
-        <span className="text-white font-bold tracking-tight text-[17px] flex items-baseline">
-          aws
-          <span className="inline-block w-[4px] h-[4px] rounded-full bg-[var(--aws-orange)] ml-[1px]" />
-        </span>
+        <BrandMark />
         <span className="text-[#d5dbdb] text-[13px] hidden sm:inline">Console</span>
         <div className="flex-1" />
         <button
-          onClick={onLogout}
-          aria-label="Sign out"
+          onClick={() => router.push("/modules/profile")}
+          aria-label="Open profile"
+          title="Profile"
           className="w-8 h-8 rounded-full bg-[var(--aws-orange)] text-white text-[13px] font-bold flex items-center justify-center hover:bg-[var(--aws-orange-hover)]"
         >
           {initial}
@@ -107,7 +106,7 @@ export default function ModulesPage() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search modules"
-            className="w-full sm:max-w-sm h-9 px-3 text-[14px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#00a1c9] focus:shadow-[0_0_0_1px_#00a1c9]"
+            className="w-full sm:max-w-sm h-9 px-3 text-[14px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
           />
         </div>
 
@@ -116,10 +115,10 @@ export default function ModulesPage() {
             <button
               key={m.route}
               onClick={() => onOpen(m)}
-              className="group text-left bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-5 hover:border-[var(--aws-orange)] hover:shadow-[0_2px_6px_rgba(0,28,36,0.18)] transition focus:outline-none focus:border-[#00a1c9] focus:shadow-[0_0_0_2px_#00a1c9]"
+              className="group text-left bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-5 hover:border-[var(--aws-orange)] hover:shadow-[0_2px_6px_rgba(0,28,36,0.18)] transition focus:outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_2px_#9a393e]"
             >
               <div className="flex items-start gap-4">
-                <div className="w-12 h-12 rounded-md bg-[#fef3e6] text-[var(--aws-orange)] flex items-center justify-center shrink-0">
+                <div className="w-12 h-12 rounded-md bg-[#fbeced] text-[var(--aws-orange)] flex items-center justify-center shrink-0">
                   <m.Icon className="w-7 h-7" />
                 </div>
                 <div className="flex-1 min-w-0">
@@ -127,7 +126,7 @@ export default function ModulesPage() {
                     <h2 className="text-[16px] font-semibold text-[var(--text-primary)]">
                       {m.title}
                     </h2>
-                    <span className="text-[10px] uppercase tracking-wide font-bold px-1.5 py-0.5 rounded-sm bg-[#eaf3ff] text-[#0073bb]">
+                    <span className="text-[10px] uppercase tracking-wide font-bold px-1.5 py-0.5 rounded-sm bg-[#eaf3ff] text-[#9a393e]">
                       {m.badge}
                     </span>
                   </div>

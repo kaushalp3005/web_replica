@@ -19,6 +19,8 @@ import {
   getSo,
   updateSo,
 } from "@/lib/so";
+import { registerOnSignOut } from "@/lib/auth";
+import { sessionLoad, sessionSave, sessionClear } from "@/lib/session-state";
 
 // Detail endpoint and list endpoint both return wrapped { line, gst_recon }
 // entries today; older builds shipped plain SoLine[]. Tolerate both.
@@ -51,6 +53,21 @@ function headerFromRow(r: SoRow): HeaderForm {
   };
 }
 
+// Form-draft slot — per-soId so editing SO #123 then SO #456 doesn't
+// cross-contaminate. Drained on successful submit, Cancel, and sign-out.
+//
+// CRITICAL: only the operator's edits (header + lines) are persisted. The
+// server snapshot (`original`) is the optimistic-concurrency baseline for
+// updateSo's old_header/old_lines payload — it MUST come from a fresh fetch
+// each page mount, never from sessionStorage, or stale-detection breaks.
+interface ManualUpdateDraft {
+  header: HeaderForm;
+  lines: LineRow[];
+}
+function draftKeyFor(soId: number): string {
+  return `so.draft.manual-update.${soId}`;
+}
+
 export default function ManualSoUpdatePage() {
   const router = useRouter();
   useRequireAuth(router.replace);
@@ -59,9 +76,21 @@ export default function ManualSoUpdatePage() {
   const soId = Number(params?.soId);
   const focusSection = search?.get("section") ?? null;
 
+  // Draft hydration ONCE on mount. soId is read from URL params and is
+  // stable for the page's lifetime (a route change to a different soId
+  // remounts the component).
+  const [initialDraft] = useState<ManualUpdateDraft | null>(() => {
+    if (typeof window === "undefined" || !Number.isFinite(soId)) return null;
+    return sessionLoad<ManualUpdateDraft>(draftKeyFor(soId));
+  });
+  // hadDraft flag is consumed inside the fetch effect to decide whether to
+  // overwrite header/lines with server values. After the first fetch this
+  // flag flips off so refetches behave normally (none today, but safe).
+  const hadDraftRef = useRef(!!initialDraft);
+
   const [original, setOriginal] = useState<SoRow | null>(null);
-  const [header, setHeader] = useState<HeaderForm | null>(null);
-  const [lines, setLines] = useState<LineRow[]>([]);
+  const [header, setHeader] = useState<HeaderForm | null>(initialDraft?.header ?? null);
+  const [lines, setLines] = useState<LineRow[]>(initialDraft?.lines ?? []);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -70,6 +99,27 @@ export default function ManualSoUpdatePage() {
 
   const headerSecRef = useRef<HTMLElement>(null);
   const linesSecRef  = useRef<HTMLElement>(null);
+
+  // Persist on change. Guarded on `header` being non-null so we don't
+  // clobber an existing draft with `{header: null, lines: []}` during the
+  // brief window before the first fetch returns (when no draft was found).
+  useEffect(() => {
+    if (!Number.isFinite(soId)) return;
+    if (!header) return;
+    sessionSave<ManualUpdateDraft>(draftKeyFor(soId), { header, lines });
+  }, [soId, header, lines]);
+
+  // Sign-out drains this slot. Captures `soId` in the closure — page
+  // remount on soId change re-registers with the new key.
+  useEffect(() => {
+    if (!Number.isFinite(soId)) return;
+    return registerOnSignOut(() => sessionClear(draftKeyFor(soId)));
+  }, [soId]);
+
+  function clearDraft() {
+    if (!Number.isFinite(soId)) return;
+    sessionClear(draftKeyFor(soId));
+  }
 
   // Fetch + initial scroll target. Single fetch per soId; if the operator
   // navigates between SO ids the component re-mounts via the dynamic route.
@@ -90,9 +140,18 @@ export default function ManualSoUpdatePage() {
       try {
         const r = await getSo(soId, controller.signal);
         if (controller.signal.aborted) return;
+        // `original` is ALWAYS refreshed — it's the staleness baseline for
+        // updateSo's old_header/old_lines payload. Persisting it would
+        // defeat 409 SoStaleError detection.
         setOriginal(r);
-        setHeader(headerFromRow(r));
-        setLines(unwrapLines(r.lines).map(lineFromExisting));
+        // header/lines come from the server only when there's no live draft
+        // to restore. After this first pass we flip the flag off so any
+        // future refetch (none today, but safe) uses server values.
+        if (!hadDraftRef.current) {
+          setHeader(headerFromRow(r));
+          setLines(unwrapLines(r.lines).map(lineFromExisting));
+        }
+        hadDraftRef.current = false;
       } catch (e) {
         if (controller.signal.aborted) return;
         setError(e instanceof Error ? e.message : "Failed to load SO");
@@ -158,6 +217,9 @@ export default function ManualSoUpdatePage() {
         new_lines: lines.map(lineToWire),
       });
       setFeedback({ kind: "ok", msg: `${original.so_number} updated — ${(r.header_changes ?? 0) + (r.line_changes ?? 0)} change${(r.header_changes ?? 0) + (r.line_changes ?? 0) === 1 ? "" : "s"} applied.` });
+      // Drop the draft now that the edits are applied — no need to keep it
+      // around past the brief delay before the navigation fires.
+      clearDraft();
       setTimeout(() => router.push("/modules/production/so-creation"), 900);
     } catch (e) {
       if (e instanceof SoStaleError) {
@@ -219,7 +281,7 @@ export default function ManualSoUpdatePage() {
                 type="button"
                 onClick={addLine}
                 disabled={submitting}
-                className="h-7 px-3 rounded-[2px] text-[12px] font-semibold border bg-gradient-to-b from-[#f7dfa5] to-[#f0c14b] border-[#a88734] hover:from-[#f5d78e] hover:to-[#eeb933] text-[var(--text-primary)] disabled:opacity-50"
+                className="h-7 px-3 rounded-[2px] text-[12px] font-semibold border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white disabled:opacity-50"
               >
                 + Add line
               </button>
@@ -245,7 +307,12 @@ export default function ManualSoUpdatePage() {
           <div className="flex items-center gap-3 mb-8">
             <button
               type="button"
-              onClick={() => router.push("/modules/production/so-creation")}
+              onClick={() => {
+                // Cancel is explicit abandon — drop the draft so it
+                // doesn't resurrect on the next visit to this SO.
+                clearDraft();
+                router.push("/modules/production/so-creation");
+              }}
               disabled={submitting}
               className="h-9 px-3 text-[13px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)] disabled:opacity-50"
             >
@@ -257,8 +324,8 @@ export default function ManualSoUpdatePage() {
               className={[
                 "h-9 px-4 rounded-[2px] text-[13px] font-bold border tracking-wide",
                 submitting
-                  ? "bg-[#f2c399] border-[#f2c399] cursor-not-allowed text-[var(--text-primary)]"
-                  : "bg-gradient-to-b from-[#f7dfa5] to-[#f0c14b] border-[#a88734] hover:from-[#f5d78e] hover:to-[#eeb933] text-[var(--text-primary)]",
+                  ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
+                  : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
               ].join(" ")}
             >
               {submitting ? "Submitting…" : "Submit update"}
@@ -276,7 +343,7 @@ export default function ManualSoUpdatePage() {
 }
 
 const headerInputCls =
-  "w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#00a1c9] focus:shadow-[0_0_0_1px_#00a1c9]";
+  "w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]";
 
 function Field({
   label, value, onChange, type = "text",

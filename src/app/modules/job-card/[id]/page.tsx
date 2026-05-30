@@ -12,10 +12,12 @@
 // for line so the operator sees the same form on web as on mobile.
 
 import { useEffect, useMemo, useState } from "react";
+import { BrandMark } from "@/components/BrandMark";
 import { useParams, useRouter } from "next/navigation";
-import { apiFetch, signOut, userStore } from "@/lib/auth";
+import { apiFetch, userStore } from "@/lib/auth";
 import { useRequireAuth, useUserInitial } from "@/lib/user";
 import { BALANCE_TOLERANCE_KG, WEIGHT_SAMPLE_COUNT } from "@/lib/constants";
+import { BackLink } from "@/components/BackLink";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -190,9 +192,9 @@ const TABS: { key: TabKey; label: string }[] = [
 const STATUS_STYLES: Record<string, { bg: string; fg: string; ring: string }> = {
   locked:            { bg: "#fdf3f1", fg: "#b1361e", ring: "#f0c7be" },
   unlocked:          { bg: "#f4f4f4", fg: "#414d5c", ring: "#d5dbdb" },
-  assigned:          { bg: "#fef3e6", fg: "#a35200", ring: "#f5d6a8" },
-  material_received: { bg: "#eaf3ff", fg: "#0073bb", ring: "#bbd9f3" },
-  in_progress:       { bg: "#eaf3ff", fg: "#0073bb", ring: "#bbd9f3" },
+  assigned:          { bg: "#fbeced", fg: "#9a393e", ring: "#e6bcbe" },
+  material_received: { bg: "#eaf3ff", fg: "#9a393e", ring: "#bbd9f3" },
+  in_progress:       { bg: "#eaf3ff", fg: "#9a393e", ring: "#bbd9f3" },
   completed:         { bg: "#eaf6ed", fg: "#1d8102", ring: "#b6dbb1" },
   closed:            { bg: "#f0eef8", fg: "#5752c4", ring: "#d2cef0" },
   cancelled:         { bg: "#f4f4f4", fg: "#687078", ring: "#d5dbdb" },
@@ -312,6 +314,10 @@ export default function JobCardDetailPage() {
         if (detailRes.status === 404) { setError("Job card not found."); return; }
         if (!detailRes.ok) throw new Error(`Detail HTTP ${detailRes.status}`);
 
+        // Server route: server_replica/app/modules/production/router.py:4806
+        // (@router.get("/job-cards-v2/{job_card_id}/chain")). Distinct from
+        // the legacy v1 chain (`/orders/{orderId}/job-card-chain`) which is
+        // production-order-keyed; the v2 chain returns plan_line siblings.
         const chainRes = await apiFetch(
           `/api/v1/production/job-cards-v2/${jcId}/chain`,
           { signal: controller.signal },
@@ -338,18 +344,10 @@ export default function JobCardDetailPage() {
     };
   }, [jcId, router, reloadKey, authed]);
 
-  function onLogout() {
-    signOut();
-    router.replace("/");
-  }
-
   return (
     <div className="min-h-screen flex flex-col bg-[var(--background)]">
       <header className="bg-[var(--aws-navy)] h-[45px] flex items-center px-6 gap-4">
-        <span className="text-white font-bold tracking-tight text-[17px] flex items-baseline">
-          aws
-          <span className="inline-block w-[4px] h-[4px] rounded-full bg-[var(--aws-orange)] ml-[1px]" />
-        </span>
+        <BrandMark />
         <span className="text-[#d5dbdb] text-[13px] hidden sm:inline">Console</span>
         <nav className="text-[12px] text-[#d5dbdb] hidden md:flex items-center gap-2 ml-2">
           <button onClick={() => router.push("/modules")} className="hover:underline">Modules</button>
@@ -360,8 +358,9 @@ export default function JobCardDetailPage() {
         </nav>
         <div className="flex-1" />
         <button
-          onClick={onLogout}
-          aria-label="Sign out"
+          onClick={() => router.push("/modules/profile")}
+          aria-label="Open profile"
+          title="Profile"
           className="w-8 h-8 rounded-full bg-[var(--aws-orange)] text-white text-[13px] font-bold flex items-center justify-center hover:bg-[var(--aws-orange-hover)]"
         >
           {initial}
@@ -371,28 +370,11 @@ export default function JobCardDetailPage() {
       <main className="flex-1 max-w-[1280px] w-full mx-auto px-4 sm:px-6 py-6">
         {/* Back row — router.back() preserves the listing's in-memory state
             via the session-storage cache (lib/jc-list-cache.ts) so filters,
-            scroll position, and fetched rows survive the round trip. Falls
-            back to a fresh listing route push when there's no history entry
-            (operator opened the detail URL directly via deep link). */}
+            scroll position, and fetched rows survive the round trip. The
+            BackLink falls back to a fresh listing route push when there's
+            no history entry (operator opened the detail URL directly). */}
         <div className="mb-3">
-          <button
-            type="button"
-            onClick={() => {
-              if (typeof window !== "undefined" && window.history.length > 1) {
-                router.back();
-              } else {
-                router.push("/modules/job-card");
-              }
-            }}
-            className="inline-flex items-center gap-1.5 h-7 px-2 -ml-2 text-[12px] text-[var(--aws-link)] hover:underline"
-            aria-label="Back to job cards"
-          >
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <line x1="19" y1="12" x2="5" y2="12" />
-              <polyline points="12 19 5 12 12 5" />
-            </svg>
-            Back to job cards
-          </button>
+          <BackLink parentHref="/modules/job-card" label="job cards" />
         </div>
         {loading && !detail ? (
           <div className="bg-white border border-[var(--aws-border)] rounded-md p-10 text-center text-[var(--text-secondary)]">
@@ -607,7 +589,10 @@ function ActionBar({ detail, onReload }: { detail: JobCardDetail; onReload: () =
     const fgKg = num(String(detail.section_5_output?.fg_actual_kg ?? 0));
     const sentKg = num(String(detail.dispatched_to_next_kg ?? 0));
     const remaining = fgKg - sentKg;
-    if (detail.next_job_card_id && remaining > 0.0001) {
+    // 50 g tolerance — IEEE 754 noise + scale repeatability. Same constant
+    // the Accounting Summary uses, so a JC that reads "balanced" in one
+    // place can't simultaneously have a "Dispatch to next" button.
+    if (detail.next_job_card_id && remaining > BALANCE_TOLERANCE_KG) {
       label = "DISPATCH TO NEXT";
       onClick = () => {
         const qtyStr = window.prompt(
@@ -620,7 +605,7 @@ function ActionBar({ detail, onReload }: { detail: JobCardDetail; onReload: () =
           window.alert("Qty must be a positive number.");
           return;
         }
-        if (qty > remaining + 0.0001) {
+        if (qty > remaining + BALANCE_TOLERANCE_KG) {
           window.alert(`Qty exceeds remaining (${remaining.toFixed(2)} kg).`);
           return;
         }
@@ -656,8 +641,8 @@ function ActionBar({ detail, onReload }: { detail: JobCardDetail; onReload: () =
         className={[
           "h-9 px-4 rounded-[2px] text-[13px] font-bold border tracking-wide",
           busy
-            ? "bg-[#f2c399] border-[#f2c399] cursor-not-allowed text-[var(--text-primary)]"
-            : "bg-gradient-to-b from-[#f7dfa5] to-[#f0c14b] border-[#a88734] hover:from-[#f5d78e] hover:to-[#eeb933] text-[var(--text-primary)]",
+            ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
+            : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
         ].join(" ")}
       >
         {busy ? "Working…" : label}
@@ -850,7 +835,7 @@ function StageChainTab({ chain, onJump }: { chain: ChainStep[]; onJump: (id: num
               className={[
                 "w-full text-left rounded-md border p-3 transition",
                 step.is_current
-                  ? "border-[var(--aws-orange)] bg-[#fef3e6] cursor-default ring-1 ring-[var(--aws-orange)]"
+                  ? "border-[var(--aws-orange)] bg-[#fbeced] cursor-default ring-1 ring-[var(--aws-orange)]"
                   : "border-[var(--aws-border)] bg-white hover:border-[var(--aws-navy)] hover:shadow-[0_1px_4px_rgba(0,28,36,0.15)]",
               ].join(" ")}
             >
@@ -1091,7 +1076,7 @@ function TeamPanel({ detail, onReload }: { detail: JobCardDetail; onReload: () =
           <button
             type="button"
             onClick={() => { setOpen((v) => !v); setFeedback(null); }}
-            className="h-7 px-3 rounded-[2px] text-[12px] font-semibold border bg-gradient-to-b from-[#f7dfa5] to-[#f0c14b] border-[#a88734] hover:from-[#f5d78e] hover:to-[#eeb933] text-[var(--text-primary)]"
+            className="h-7 px-3 rounded-[2px] text-[12px] font-semibold border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white"
           >
             {open ? "Cancel" : buttonLabel}
           </button>
@@ -1146,7 +1131,7 @@ function TeamPanel({ detail, onReload }: { detail: JobCardDetail; onReload: () =
           {members.length > 0 ? (
             <div className="flex flex-wrap gap-2 mb-3">
               {members.map((m, i) => (
-                <span key={i} className="inline-flex items-center gap-1 bg-[#eaf3ff] border border-[#bbd9f3] text-[#0073bb] text-[12px] rounded-full px-2 py-0.5">
+                <span key={i} className="inline-flex items-center gap-1 bg-[#eaf3ff] border border-[#bbd9f3] text-[#9a393e] text-[12px] rounded-full px-2 py-0.5">
                   {m}
                   <button
                     type="button"
@@ -1346,7 +1331,7 @@ function SignOffsTab({ detail, onReload }: { detail: JobCardDetail; onReload: ()
                   "h-8 px-3 rounded-[2px] text-[12px] font-semibold border",
                   !canSign || submitting
                     ? "bg-[var(--surface-disabled)] border-[var(--aws-border)] text-[var(--text-disabled)] cursor-not-allowed"
-                    : "bg-gradient-to-b from-[#f7dfa5] to-[#f0c14b] border-[#a88734] hover:from-[#f5d78e] hover:to-[#eeb933] text-[var(--text-primary)]",
+                    : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
                 ].join(" ")}
               >
                 {submitting ? "Signing…" : "Sign"}
@@ -1579,6 +1564,13 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
         balanceMaterials.push({ bom_line_id: a?.bom_line_id ?? null, balance_type: "extra_given", material_name: a?.material_sku_name ?? "Unknown", qty_kg: extraKg, remarks: null });
       }
     }
+    // `balance_materials` is a first-class field on the v2 outputs endpoint
+    // (RecordOutputV2Request at server_replica/app/modules/production/
+    // router.py:5248) — persisted to job_card_balance_material_v2 via
+    // replace_balance_materials (router.py:5391-5402). The Android
+    // OutputV2Request model is the one that's incomplete; the web sends
+    // what the server actually expects, not what Android's Retrofit class
+    // happens to declare.
     body.balance_materials = balanceMaterials;
 
     setSubmitting(true);
@@ -2039,8 +2031,8 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
             className={[
               "h-8 px-3 rounded-[2px] text-[13px] font-semibold border",
               addingMetal
-                ? "bg-[#f2c399] border-[#f2c399] cursor-not-allowed text-[var(--text-primary)]"
-                : "bg-gradient-to-b from-[#f7dfa5] to-[#f0c14b] border-[#a88734] hover:from-[#f5d78e] hover:to-[#eeb933] text-[var(--text-primary)]",
+                ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
+                : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
             ].join(" ")}
           >
             {addingMetal ? "Saving…" : "Add metal check"}
@@ -2147,8 +2139,8 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           className={[
             "h-9 px-4 rounded-[2px] text-[13px] font-bold border tracking-wide",
             savingQuality
-              ? "bg-[#f2c399] border-[#f2c399] cursor-not-allowed text-[var(--text-primary)]"
-              : "bg-gradient-to-b from-[#f7dfa5] to-[#f0c14b] border-[#a88734] hover:from-[#f5d78e] hover:to-[#eeb933] text-[var(--text-primary)]",
+              ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
+              : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
           ].join(" ")}
         >
           {savingQuality ? "Saving…" : "SAVE QUALITY"}
@@ -2178,7 +2170,7 @@ function FormLabel({ children }: { children: React.ReactNode }) {
 }
 
 const inputCls =
-  "w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#00a1c9] focus:shadow-[0_0_0_1px_#00a1c9] disabled:bg-[var(--surface-disabled)] disabled:text-[#879596]";
+  "w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] disabled:bg-[var(--surface-disabled)] disabled:text-[#879596]";
 
 function FormText({ label, value, onChange, disabled, placeholder }: { label: string; value: string; onChange: (v: string) => void; disabled?: boolean; placeholder?: string }) {
   return (
@@ -2240,8 +2232,8 @@ function FormFooter({ feedback, submitting, submitLabel }: { feedback: { kind: "
         className={[
           "h-9 px-4 rounded-[2px] text-[13px] font-bold border tracking-wide",
           submitting
-            ? "bg-[#f2c399] border-[#f2c399] cursor-not-allowed text-[var(--text-primary)]"
-            : "bg-gradient-to-b from-[#f7dfa5] to-[#f0c14b] border-[#a88734] hover:from-[#f5d78e] hover:to-[#eeb933] text-[var(--text-primary)]",
+            ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
+            : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
         ].join(" ")}
       >
         {submitting ? "Saving…" : submitLabel}

@@ -13,8 +13,13 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Sign in",
-  description: "Sign in to your account",
+  title: "CFERP",
+  description: "CFERP — Candor Foods ERP",
+  icons: {
+    icon: "/candor_logo.jpg",
+    shortcut: "/candor_logo.jpg",
+    apple: "/candor_logo.jpg",
+  },
 };
 
 export default function RootLayout({
