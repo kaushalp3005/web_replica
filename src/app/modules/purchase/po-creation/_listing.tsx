@@ -51,9 +51,6 @@ export function PoListing(props: PoListingProps): React.JSX.Element {
     Map<string, { lines?: PoLineOut[]; loading: boolean; error?: string }>
   >(new Map());
 
-  // The currently-running AbortController for the listing fetch.
-  const ctrlRef = useRef<AbortController | null>(null);
-
   // ── Fetch fingerprint ──────────────────────────────────────────────────────
   // Stable scalar dep so the exhaustive-deps rule stays satisfied.
   const queryFp = JSON.stringify(
@@ -65,14 +62,12 @@ export function PoListing(props: PoListingProps): React.JSX.Element {
   // ── Listing fetch ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const q = query; // capture at effect time to avoid stale-closure on query prop
     const controller = new AbortController();
-    ctrlRef.current = controller;
     void (async () => {
       setLoading(true);
       setError(null);
       try {
-        const resp = await listPos(q, controller.signal);
+        const resp = await listPos(query, controller.signal);
         if (controller.signal.aborted) return;
         setData(resp);
       } catch (e) {

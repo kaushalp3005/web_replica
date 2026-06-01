@@ -81,11 +81,13 @@ function Field({
   children: React.ReactNode;
   className?: string;
 }): React.JSX.Element {
+  // Wrap the control inside the <label> so the label is implicitly associated
+  // with it (clicking the label focuses the control; screen readers pair them).
   return (
-    <div className={className}>
-      <label className={LABEL_CLS}>{label}</label>
+    <label className={`block ${className}`}>
+      <span className={LABEL_CLS}>{label}</span>
       {children}
-    </div>
+    </label>
   );
 }
 

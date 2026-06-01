@@ -116,13 +116,15 @@ function Field({
   className?: string;
   error?: string;
 }): React.JSX.Element {
+  // Control is wrapped by the <label> for implicit association; the error
+  // message is a sibling <p> (flow content is invalid inside a <label>).
   return (
     <div className={className}>
-      <label className={LABEL_CLS}>
-        {label}
+      <label className="block">
+        <span className={LABEL_CLS}>{label}</span>
         {children}
-        {error ? <p className="text-[11px] text-[var(--aws-error,#c2483c)] mt-0.5">{error}</p> : null}
       </label>
+      {error ? <p className="text-[11px] text-[var(--aws-error,#c2483c)] mt-0.5">{error}</p> : null}
     </div>
   );
 }
