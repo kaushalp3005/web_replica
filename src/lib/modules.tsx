@@ -64,6 +64,7 @@ export const MODULES: ModuleItem[] = [
     badge: "Core",
     stat: "PO Creation & Receiving",
     route: "purchase",
+    implemented: true,
     Icon: PurchaseIcon,
   },
   {
