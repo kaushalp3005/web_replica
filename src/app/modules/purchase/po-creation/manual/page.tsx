@@ -5,7 +5,7 @@
 // Payload mirrors frontend_replica/src/modules/purchase/po-creation/manual-entry.js
 // lines 968–1031.
 
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useRequireAuth } from "@/lib/user";
 import { createPo } from "@/lib/po";
@@ -118,9 +118,11 @@ function Field({
 }): React.JSX.Element {
   return (
     <div className={className}>
-      <label className={LABEL_CLS}>{label}</label>
-      {children}
-      {error ? <p className="text-[11px] text-[var(--aws-error,#c2483c)] mt-0.5">{error}</p> : null}
+      <label className={LABEL_CLS}>
+        {label}
+        {children}
+        {error ? <p className="text-[11px] text-[var(--aws-error,#c2483c)] mt-0.5">{error}</p> : null}
+      </label>
     </div>
   );
 }
@@ -336,6 +338,7 @@ export default function ManualPoEntryPage(): React.JSX.Element {
   const [errors, setErrors] = useState<{ entity?: string; poNumber?: string; lines?: string }>({});
 
   // ── Submit state ──────────────────────────────────────────────────────────
+  const submittingRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -426,12 +429,18 @@ export default function ManualPoEntryPage(): React.JSX.Element {
   // ── Submit ────────────────────────────────────────────────────────────────
 
   async function handleSubmit(): Promise<void> {
+    // Validate before acquiring any guard so the guard is never left set on validation failure.
     if (!validate()) return;
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     setSubmitError(null);
     setSuccessMsg(null);
 
+    // base is computed once; boxSeq increments globally across all lines/sections/boxes
+    // so every box in the whole payload receives a unique id: base-1, base-2, …
     const base = String(Date.now()).slice(-8);
+    let boxSeq = 0;
 
     const payloadLines = lineEntries.map((entry, i) => {
       const l = entry.line;
@@ -445,8 +454,8 @@ export default function ManualPoEntryPage(): React.JSX.Element {
           lot_number: sec.lot_number || null,
           manufacturing_date: sec.mfg_date || null,
           expiry_date: sec.exp_date || null,
-          boxes: boxes.map((b, bi) => ({
-            box_id: `${base}-${bi + 1}`,
+          boxes: boxes.map((b) => ({
+            box_id: `${base}-${++boxSeq}`,
             box_number: b.box_number,
             net_weight: b.net_weight ? parseFloat(b.net_weight) : null,
             gross_weight: b.gross_weight ? parseFloat(b.gross_weight) : null,
@@ -514,6 +523,7 @@ export default function ManualPoEntryPage(): React.JSX.Element {
         err instanceof Error ? err.message : "Failed to create Purchase Order";
       setSubmitError(msg);
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }
