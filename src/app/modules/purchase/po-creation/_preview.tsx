@@ -13,6 +13,8 @@ import {
   type PreviewHeader,
   type CommitMode,
   type CommitResponse,
+  type CommitPo,
+  type PreviewSummary,
   commitPo,
   fmtNum,
 } from "@/lib/po";
@@ -97,14 +99,26 @@ function countDiffFields(diff: Record<string, unknown>): number {
       }
     });
   }
-  return n || 1;
+  return n;
 }
 
 /** Strip working UI meta from a WorkPo before sending to API */
-function stripMeta(po: WorkPo): import("@/lib/po").CommitPo {
+function stripMeta(po: WorkPo): CommitPo {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { _selected, _expanded, _diffOpen, ...rest } = po;
-  return rest as import("@/lib/po").CommitPo;
+  // Coerce numeric line fields from raw strings to numbers/null at commit time.
+  // Working state stores raw strings so decimals are typeable; the wire payload must be numeric.
+  const numericLineFields = ["rate", "amount", "po_weight", "pack_count", "gst_rate", "line_number"] as const;
+  const lines = rest.lines?.map((l) => {
+    const coerced: Record<string, unknown> = { ...l };
+    for (const f of numericLineFields) {
+      if (f in coerced) {
+        coerced[f] = toNum(String(coerced[f] ?? ""));
+      }
+    }
+    return coerced as PreviewLine;
+  });
+  return { ...rest, lines } as CommitPo;
 }
 
 // ── Root component ────────────────────────────────────────────────────────────
@@ -112,7 +126,8 @@ function stripMeta(po: WorkPo): import("@/lib/po").CommitPo {
 export function PoPreview(props: PreviewProps): React.JSX.Element {
   const { fileName, entity, preview, onCancel, onCommitted } = props;
 
-  // On mount, copy preview.pos into local state with UI meta attached.
+  // Cloned once on mount. The parent remounts PoPreview with key={fileName} per upload,
+  // so a new parse always gets a fresh instance (no prop-driven reset needed here).
   const [pos, setPos] = useState<WorkPo[]>(() =>
     (preview.pos || []).map((po) => ({
       ...po,
@@ -126,7 +141,7 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
   const [mode, setMode] = useState<CommitMode>("create_only");
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
-  const [retrying, setRetrying] = useState(false);
+  const [lastAttemptFailed, setLastAttemptFailed] = useState(false);
 
   // ── Derived ────────────────────────────────────────────────────────────────
 
@@ -156,13 +171,14 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
     field: string,
     rawValue: string,
   ) {
-    const numericFields = ["rate", "amount", "po_weight", "pack_count", "gst_rate", "line_number"];
-    const value = numericFields.includes(field) ? toNum(rawValue) : rawValue;
+    // Store the raw string for ALL fields (including numeric ones) so the user
+    // can type decimals like "1." or "0.5" without the value being clamped.
+    // Numeric coercion happens in stripMeta at commit time.
     setPos((prev) =>
       prev.map((p, i) => {
         if (i !== poIdx) return p;
         const lines = p.lines.map((l, li) =>
-          li === lineIdx ? ({ ...l, [field]: value } as PreviewLine) : l,
+          li === lineIdx ? ({ ...l, [field]: rawValue } as PreviewLine) : l,
         );
         return { ...p, lines };
       }),
@@ -193,7 +209,7 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
     if (selectedPos.length === 0) return;
     setCommitting(true);
     setCommitError(null);
-    setRetrying(false);
+    setLastAttemptFailed(false);
     try {
       const result = await commitPo({
         entity,
@@ -203,7 +219,7 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
       onCommitted(result);
     } catch (err) {
       setCommitError(err instanceof Error ? err.message : "Commit failed");
-      setRetrying(true);
+      setLastAttemptFailed(true);
     } finally {
       setCommitting(false);
     }
@@ -309,7 +325,7 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
         dupSel={dupSel}
         hint={hint}
         committing={committing}
-        retrying={retrying}
+        lastAttemptFailed={lastAttemptFailed}
         commitError={commitError}
         onCommit={handleCommit}
         onCancel={onCancel}
@@ -323,7 +339,7 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
 function SummaryStrip({
   summary,
 }: {
-  summary: import("@/lib/po").PreviewSummary;
+  summary: PreviewSummary;
 }): React.JSX.Element {
   const cards: { label: string; value: string; accent: string }[] = [
     { label: "Total POs", value: fmtNum(summary.total_pos), accent: "var(--clr-info, #0972d3)" },
@@ -484,6 +500,7 @@ function PreviewCard({
             type="checkbox"
             checked={po._selected}
             onChange={onToggleSelect}
+            aria-label={`Select PO ${header.po_number || po.transaction_no}`}
             className="w-4 h-4 accent-[var(--aws-navy)] cursor-pointer"
           />
         </label>
@@ -517,7 +534,7 @@ function PreviewCard({
           <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-[12px] text-[var(--text-secondary)]">
             <span>
               <strong className="text-[var(--text-primary)]">Supplier</strong>{" "}
-              {String(header.supplier_name || header.supplier_id || "—")}
+              {String(header.vendor_supplier_name || header.supplier_id || "—")}
             </span>
             <span>
               <strong className="text-[var(--text-primary)]">Date</strong>{" "}
@@ -536,7 +553,7 @@ function PreviewCard({
 
         {/* Right controls */}
         <div className="flex items-center gap-2 flex-shrink-0">
-          {dup && diff && (
+          {dup && diff && diffChangeCount > 0 && (
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); onToggleDiff(); }}
@@ -607,7 +624,7 @@ const HEADER_FIELDS: HeaderField[] = [
   { f: "po_number",     label: "PO Number",     mono: true },
   { f: "po_date",       label: "PO Date",        type: "date" },
   { f: "delivery_date", label: "Delivery Date",  type: "date" },
-  { f: "supplier_name", label: "Supplier" },
+  { f: "vendor_supplier_name", label: "Supplier" },
   { f: "remarks",       label: "Remarks",        wide: true },
 ];
 
@@ -955,7 +972,7 @@ function CommitBar({
   dupSel,
   hint,
   committing,
-  retrying,
+  lastAttemptFailed,
   commitError,
   onCommit,
   onCancel,
@@ -967,7 +984,7 @@ function CommitBar({
   dupSel: number;
   hint: string;
   committing: boolean;
-  retrying: boolean;
+  lastAttemptFailed: boolean;
   commitError: string | null;
   onCommit: () => void;
   onCancel: () => void;
@@ -980,7 +997,7 @@ function CommitBar({
 
   const btnLabel = committing
     ? "Committing…"
-    : retrying
+    : lastAttemptFailed
       ? "Retry commit"
       : `Commit ${selected} PO${selected === 1 ? "" : "s"}`;
 
