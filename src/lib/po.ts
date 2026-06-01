@@ -215,6 +215,7 @@ export async function deletePo(transactionNo: string, reason: string): Promise<P
 }
 
 // Manual create — backend route pending. Mirrors manual-entry.js payload.
+// TODO: type the payload + return once POST /api/v1/purchase/create is implemented on the backend.
 export async function createPo(payload: Record<string, unknown>): Promise<unknown> {
   const res = await apiFetch(`/api/v1/purchase/create`, {
     method: "POST",
@@ -228,26 +229,10 @@ export async function createPo(payload: Record<string, unknown>): Promise<unknow
   return res.json();
 }
 
-// ── SKU lookup (so/router.py: GET /api/v1/so/sku-lookup) ──
-export interface SkuLookupResponse {
-  options: {
-    item_types: string[];
-    particulars: string[];
-    item_groups: string[];
-    sub_groups: string[];
-    sales_groups: string[];
-  };
-  selected_item: {
-    sku_id: number; particulars: string; item_type: string; item_group: string;
-    sub_group: string; uom: number; sale_group: string; gst: number;
-  } | null;
-}
-export async function skuLookup(params: Record<string, string>): Promise<SkuLookupResponse> {
-  const qs = new URLSearchParams(params).toString();
-  const res = await apiFetch(`/api/v1/so/sku-lookup${qs ? `?${qs}` : ""}`);
-  if (!res.ok) throw new Error(await readError(res, "SKU lookup failed"));
-  return res.json();
-}
+// ── SKU lookup — reuse so.ts's typed client (accepts AbortSignal for debounced autocomplete) ──
+// SKU lookup is shared with the SO module — reuse so.ts's typed client
+// (it already accepts an AbortSignal for debounced autocomplete).
+export { lookupSku as skuLookup, type SkuLookupParams, type SkuLookupResponse } from "./so";
 
 // ── Shared formatters (mirror po-view.js) ──
 export function fmtDate(d?: string | null): string {
