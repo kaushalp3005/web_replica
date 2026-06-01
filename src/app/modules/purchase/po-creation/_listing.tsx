@@ -65,13 +65,14 @@ export function PoListing(props: PoListingProps): React.JSX.Element {
   // ── Listing fetch ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (typeof window === "undefined") return;
+    const q = query; // capture at effect time to avoid stale-closure on query prop
     const controller = new AbortController();
     ctrlRef.current = controller;
     void (async () => {
       setLoading(true);
       setError(null);
       try {
-        const resp = await listPos(query, controller.signal);
+        const resp = await listPos(q, controller.signal);
         if (controller.signal.aborted) return;
         setData(resp);
       } catch (e) {
@@ -120,10 +121,12 @@ export function PoListing(props: PoListingProps): React.JSX.Element {
     [],
   );
 
-  // When a row is expanded and we don't yet have its lines, kick off the fetch.
+  // When a row is expanded and we don't yet have its lines (or a previous fetch
+  // errored), kick off the fetch so errors are retryable on re-expand.
   useEffect(() => {
     for (const txn of expanded) {
-      if (!linesCache.has(txn)) {
+      const entry = linesCache.get(txn);
+      if (!entry || (!entry.loading && entry.error && !entry.lines)) {
         void fetchLines(txn);
       }
     }
@@ -143,6 +146,7 @@ export function PoListing(props: PoListingProps): React.JSX.Element {
       const boxes = res.dependent_records?.po_boxes ?? 0;
       const tail = boxes > 0 ? ` (${boxes} box${boxes === 1 ? "" : "es"} retained)` : "";
       setDeleteMsg({ kind: "ok", text: `Deleted ${label}${tail}` });
+      // Close the modal only on success.
       setDeleteModal(null);
       // Clear cached lines for this txn and collapse it.
       setLinesCache((prev) => {
@@ -155,13 +159,14 @@ export function PoListing(props: PoListingProps): React.JSX.Element {
       // Bump internal nonce to re-run the listing fetch.
       setRefetchNonce((n) => n + 1);
     } catch (e) {
-      setDeleteMsg({ kind: "err", text: e instanceof Error ? e.message : "Delete failed" });
+      const text = e instanceof Error ? e.message : "Delete failed";
+      setDeleteMsg({ kind: "err", text });
+      // Re-throw so DeleteModal.submit can show the error inline and stay open.
+      throw e;
     }
   }
 
   // ── Sort helper ────────────────────────────────────────────────────────────
-  const SORTABLE_COLS = ["po_number", "po_date", "vendor_supplier_name", "voucher_type", "order_reference_no", "entity", "gross_total"] as const;
-
   function currentSort(): { col: string; dir: "asc" | "desc" } {
     const s = query.sort ?? "po_date:desc";
     const [col, dir] = s.split(":");
@@ -216,15 +221,17 @@ export function PoListing(props: PoListingProps): React.JSX.Element {
           <table className="w-full text-[13px] border-collapse">
             <thead className="bg-[var(--surface-subtle)] text-[var(--text-primary)]">
               <tr className="border-b border-[var(--aws-border)]">
+                {(() => { const sort = currentSort(); return (<>
                 <Th width={32}>{null}</Th>
-                <Th sortable col="po_number" sort={currentSort()} onSort={handleSort}>PO Number</Th>
-                <Th sortable col="po_date" sort={currentSort()} onSort={handleSort}>Date</Th>
-                <Th sortable col="vendor_supplier_name" sort={currentSort()} onSort={handleSort}>Vendor</Th>
-                <Th sortable col="voucher_type" sort={currentSort()} onSort={handleSort}>Voucher</Th>
-                <Th sortable col="order_reference_no" sort={currentSort()} onSort={handleSort}>Order Ref</Th>
-                <Th sortable col="entity" sort={currentSort()} onSort={handleSort}>Entity</Th>
-                <Th sortable col="gross_total" sort={currentSort()} onSort={handleSort}>Amount</Th>
+                <Th sortable col="po_number" sort={sort} onSort={handleSort}>PO Number</Th>
+                <Th sortable col="po_date" sort={sort} onSort={handleSort}>Date</Th>
+                <Th sortable col="vendor_supplier_name" sort={sort} onSort={handleSort}>Vendor</Th>
+                <Th sortable col="voucher_type" sort={sort} onSort={handleSort}>Voucher</Th>
+                <Th sortable col="order_reference_no" sort={sort} onSort={handleSort}>Order Ref</Th>
+                <Th sortable col="entity" sort={sort} onSort={handleSort}>Entity</Th>
+                <Th sortable col="gross_total" sort={sort} onSort={handleSort}>Amount</Th>
                 <Th width={72}>{null}</Th>
+                </>); })()}
               </tr>
             </thead>
             <tbody>
@@ -487,6 +494,8 @@ function PoToolbar({
 
 // ── Advanced Filter Panel ─────────────────────────────────────────────────────
 
+const SORTABLE_COLS = ["po_number", "po_date", "vendor_supplier_name", "voucher_type", "order_reference_no", "entity", "gross_total"] as const;
+
 const ADV_FIELDS: { key: keyof PoListQuery; label: string; placeholder: string }[] = [
   { key: "vendor_supplier_name_contains", label: "Vendor name contains", placeholder: "e.g. acme" },
   { key: "order_reference_no_contains",   label: "Order ref contains",   placeholder: "e.g. REF-9912" },
@@ -544,19 +553,23 @@ function AdvancedFilterPanel({
       className="absolute right-0 z-20 mt-1 w-[min(320px,calc(100vw-1rem))] bg-white border border-[var(--aws-border)] rounded-md shadow-[0_4px_12px_rgba(0,28,36,0.18)] p-3"
     >
       <div className="text-[11px] uppercase tracking-wide font-bold text-[var(--text-muted)] mb-2">Advanced Filters</div>
-      {ADV_FIELDS.map((f) => (
-        <div key={f.key as string} className="mb-2">
-          <label className="block text-[11px] font-semibold text-[var(--text-primary)] mb-0.5">{f.label}</label>
-          <input
-            type="text"
-            value={draft[f.key as string] ?? ""}
-            placeholder={f.placeholder}
-            onChange={(e) => setDraft((d) => ({ ...d, [f.key as string]: e.target.value }))}
-            onKeyDown={(e) => { if (e.key === "Enter") apply(); }}
-            className="w-full h-7 px-2 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
-          />
-        </div>
-      ))}
+      {ADV_FIELDS.map((f) => {
+        const inputId = `adv-filter-${f.key as string}`;
+        return (
+          <div key={f.key as string} className="mb-2">
+            <label htmlFor={inputId} className="block text-[11px] font-semibold text-[var(--text-primary)] mb-0.5">{f.label}</label>
+            <input
+              id={inputId}
+              type="text"
+              value={draft[f.key as string] ?? ""}
+              placeholder={f.placeholder}
+              onChange={(e) => setDraft((d) => ({ ...d, [f.key as string]: e.target.value }))}
+              onKeyDown={(e) => { if (e.key === "Enter") apply(); }}
+              className="w-full h-7 px-2 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
+            />
+          </div>
+        );
+      })}
       <div className="border-t border-[var(--aws-border)] pt-2 mt-1 flex items-center justify-between">
         <span className="text-[11px] text-[var(--text-muted)]">
           {activeCount > 0 ? `${activeCount} filter${activeCount === 1 ? "" : "s"} active` : "No filters active"}
@@ -607,15 +620,17 @@ function DatePanel({
       ref={ref}
       className="absolute right-0 z-10 mt-1 bg-white border border-[var(--aws-border)] rounded-md shadow-[0_4px_12px_rgba(0,28,36,0.18)] p-3 w-[260px]"
     >
-      <label className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">From</label>
+      <label htmlFor="date-panel-from" className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">From</label>
       <input
+        id="date-panel-from"
         type="date"
         value={from}
         onChange={(e) => { setFrom(e.target.value); setRangeErr(""); }}
         className="w-full h-8 px-2 text-[13px] rounded-[2px] border border-[var(--aws-border-strong)] mb-2"
       />
-      <label className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">To</label>
+      <label htmlFor="date-panel-to" className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">To</label>
       <input
+        id="date-panel-to"
         type="date"
         value={to}
         onChange={(e) => { setTo(e.target.value); setRangeErr(""); }}
@@ -896,7 +911,7 @@ function PoTableRow({
       {isOpen ? (
         <tr className="border-b border-[var(--aws-border)] bg-[var(--surface-subtle)]">
           <td colSpan={9} className="px-3 py-3" style={{ borderLeft: "3px solid var(--aws-orange)" }}>
-            <PoDetailPanel row={row} linesState={linesState} />
+            <PoDetailPanel key={row.transaction_no} row={row} linesState={linesState} />
           </td>
         </tr>
       ) : null}
@@ -949,7 +964,7 @@ function PoMobileCard({
       </div>
       {isOpen ? (
         <div className="border-t border-[var(--aws-border)] p-3 bg-[var(--surface-subtle)]">
-          <PoDetailPanel row={row} linesState={linesState} />
+          <PoDetailPanel key={row.transaction_no} row={row} linesState={linesState} />
         </div>
       ) : null}
     </div>
@@ -1129,6 +1144,17 @@ function DeleteModal({
   const [confirming, setConfirming] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const label = poNumber || txn;
+  const titleId = "delete-modal-title";
+  const reasonId = "delete-modal-reason";
+
+  // Dismiss on Escape key
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onCancel();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onCancel]);
 
   async function submit() {
     if (!reason.trim()) return;
@@ -1145,15 +1171,21 @@ function DeleteModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="bg-white rounded-md shadow-[0_8px_32px_rgba(0,28,36,0.28)] w-full max-w-[420px] p-5">
-        <h2 className="text-[15px] font-semibold text-[var(--text-primary)] mb-1">Delete PO</h2>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="bg-white rounded-md shadow-[0_8px_32px_rgba(0,28,36,0.28)] w-full max-w-[420px] p-5"
+      >
+        <h2 id={titleId} className="text-[15px] font-semibold text-[var(--text-primary)] mb-1">Delete PO</h2>
         <p className="text-[13px] text-[var(--text-secondary)] mb-3">
           Delete <span className="font-mono font-semibold">{label}</span>? This action cannot be undone.
         </p>
-        <label className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">
+        <label htmlFor={reasonId} className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">
           Reason <span className="text-[var(--aws-error)]">*</span>
         </label>
         <textarea
+          id={reasonId}
           rows={3}
           value={reason}
           onChange={(e) => setReason(e.target.value)}
