@@ -7,7 +7,7 @@
 // Flow mirrors frontend_replica/src/modules/purchase/po-creation/po-creation.js
 // lines 1–168 (landing) and showCommitResult (658–727) for the result banner.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useRequireAuth } from "@/lib/user";
 import {
@@ -125,13 +125,11 @@ export default function PoCreationPage(): React.JSX.Element {
 
   // ── Debounce search → query.po_number_contains ────────────────────────────
 
+  const isFirstSearch = useRef(true);
   useEffect(() => {
+    if (isFirstSearch.current) { isFirstSearch.current = false; return; }
     const t = setTimeout(() => {
-      setQuery((prev) => ({
-        ...prev,
-        po_number_contains: search.trim(),
-        page: 1,
-      }));
+      setQuery((prev) => ({ ...prev, po_number_contains: search.trim(), page: 1 }));
     }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [search]);
@@ -140,7 +138,10 @@ export default function PoCreationPage(): React.JSX.Element {
 
   // Stable fingerprints for advfilter fields and expanded rows
   const advFp = advKey(query);
-  const expandedFp = [...expanded].sort().join(",");
+  const expandedFp = useMemo(
+    () => [...expanded].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).join(","),
+    [expanded],
+  );
 
   useEffect(() => {
     savePoListCache({
@@ -231,7 +232,6 @@ export default function PoCreationPage(): React.JSX.Element {
   function handleCancel() {
     setMode("landing");
     setPreviewData(null);
-    setCommitResult(null);
   }
 
   function handleCommitted(result: CommitResponse) {
@@ -340,6 +340,7 @@ function EntitySelector({
         <button
           key={o.value}
           type="button"
+          aria-pressed={entity === o.value}
           onClick={() => onEntity(o.value)}
           className={[
             "h-8 px-4 text-[12px] rounded-full border font-semibold transition-colors",
@@ -383,7 +384,9 @@ function UploadZone({
       <div
         onClick={onBrowse}
         onDragOver={(e) => { e.preventDefault(); onDragOver(); }}
-        onDragLeave={onDragLeave}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) onDragLeave();
+        }}
         onDrop={(e) => {
           e.preventDefault();
           const f = e.dataTransfer.files?.[0];
@@ -482,6 +485,8 @@ function CommitResultBanner({
 
   return (
     <div
+      role={hasErrors ? "alert" : "status"}
+      aria-live="polite"
       className={[
         "mb-5 bg-white border rounded-md shadow-[0_1px_4px_rgba(0,28,36,0.14)] overflow-hidden",
         hasErrors ? "border-[#c2483c]" : "border-[#b6dbb1]",
@@ -560,7 +565,7 @@ function CommitResultBanner({
           <ul className="space-y-1">
             {result.errors.map((e, i) => (
               <li
-                key={i}
+                key={e.po_number ?? e.transaction_no ?? e.duplicate_key ?? i}
                 className="flex items-start gap-2 text-[12px] text-[#9a393e] bg-[#fbeced] border border-[#e6bcbe] rounded-[2px] px-2 py-1"
               >
                 <span className="font-mono font-semibold shrink-0">
