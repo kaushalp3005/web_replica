@@ -825,10 +825,13 @@ function EntityPill({ entity }: { entity?: string | null }) {
   const upper = entity.toUpperCase();
   const bg = upper === "CFPL" ? "#eaf6ed" : upper === "CDPL" ? "#eaf0fb" : "var(--surface-disabled)";
   const fg = upper === "CFPL" ? "var(--text-success)" : upper === "CDPL" ? "#2c5fa8" : "var(--text-secondary)";
+  // Border must be a literal color — appending alpha to a var() (e.g.
+  // `var(--text-success)22`) is invalid CSS and drops the border.
+  const border = upper === "CFPL" ? "#b6dbb1" : upper === "CDPL" ? "#2c5fa822" : "var(--aws-border)";
   return (
     <span
       className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-sm"
-      style={{ background: bg, color: fg, border: `1px solid ${fg}22` }}
+      style={{ background: bg, color: fg, border: `1px solid ${border}` }}
     >
       {upper}
     </span>

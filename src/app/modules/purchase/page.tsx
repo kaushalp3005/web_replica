@@ -8,11 +8,11 @@ import { useRequireAuth } from "@/lib/user";
 import { BackLink } from "@/components/BackLink";
 import { PurchaseChrome } from "./_chrome";
 
-type SubModule = { title: string; description: string; route: string; implemented: boolean };
+type SubModule = { title: string; description: string; route: string };
 
 const SUB_MODULES: SubModule[] = [
-  { title: "PO Upload", description: "Upload a PO workbook (.xlsx), preview SKU matches and duplicates, then commit. Browse, filter, and export existing purchase orders.", route: "/modules/purchase/po-creation", implemented: true },
-  { title: "Manual Entry", description: "Create a purchase order by hand — header, line items with SKU lookup, lots, and box weights.", route: "/modules/purchase/po-creation/manual", implemented: true },
+  { title: "PO Upload", description: "Upload a PO workbook (.xlsx), preview SKU matches and duplicates, then commit. Browse, filter, and export existing purchase orders.", route: "/modules/purchase/po-creation" },
+  { title: "Manual Entry", description: "Create a purchase order by hand — header, line items with SKU lookup, lots, and box weights.", route: "/modules/purchase/po-creation/manual" },
 ];
 
 export default function PurchaseLandingPage() {
@@ -37,7 +37,7 @@ export default function PurchaseLandingPage() {
             onClick={() => router.push(m.route)}
             className="text-left bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-4 transition hover:border-[var(--aws-navy)] hover:shadow-[0_2px_6px_rgba(0,28,36,0.18)]"
           >
-            <h3 className="text-[14px] font-semibold text-[var(--text-primary)] mb-1">{m.title}</h3>
+            <h2 className="text-[14px] font-semibold text-[var(--text-primary)] mb-1">{m.title}</h2>
             <p className="text-[12px] text-[var(--text-secondary)]">{m.description}</p>
           </button>
         ))}

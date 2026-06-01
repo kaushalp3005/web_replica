@@ -309,7 +309,10 @@ function _hardSignOutAndRedirect(): void {
 async function _doFetch(path: string, init: RequestInit, token: string | null): Promise<Response> {
   const headers = new Headers(init.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  if (init.body && !headers.has("Content-Type")) {
+  // Default JSON for string bodies, but NEVER for FormData — the browser must
+  // set multipart/form-data with its own boundary, and forcing a Content-Type
+  // here would strip that boundary and break file uploads (preview/upload).
+  if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
   return fetch(`${API_BASE}${path}`, { ...init, headers });

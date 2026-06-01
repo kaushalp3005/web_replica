@@ -486,7 +486,7 @@ function CommitResultBanner({
   return (
     <div
       role={hasErrors ? "alert" : "status"}
-      aria-live="polite"
+      aria-live={hasErrors ? "assertive" : "polite"}
       className={[
         "mb-5 bg-white border rounded-md shadow-[0_1px_4px_rgba(0,28,36,0.14)] overflow-hidden",
         hasErrors ? "border-[#c2483c]" : "border-[#b6dbb1]",
