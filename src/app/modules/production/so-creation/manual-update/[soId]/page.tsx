@@ -10,6 +10,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useRequireAuth } from "@/lib/user";
+import { useSeesCost, seesCostFor } from "@/lib/cost-gate";
 import {
   COMPANY_OPTIONS, VOUCHER_TYPE_OPTIONS,
   type SoLine,
@@ -19,7 +20,7 @@ import {
   getSo,
   updateSo,
 } from "@/lib/so";
-import { registerOnSignOut } from "@/lib/auth";
+import { registerOnSignOut, userStore } from "@/lib/auth";
 import { sessionLoad, sessionSave, sessionClear } from "@/lib/session-state";
 
 // Detail endpoint and list endpoint both return wrapped { line, gst_recon }
@@ -33,7 +34,7 @@ function unwrapLines(raw: SoRow["lines"]): SoLine[] {
   return raw as SoLine[];
 }
 import { SoChrome } from "../../_chrome";
-import { SoLineEditor, emptyLine, lineFromExisting, lineToWire, type LineRow } from "../../_SoLineForm";
+import { SoLineEditor, emptyLine, lineFromExisting, lineToWire, stripLineCostFields, type LineRow } from "../../_SoLineForm";
 
 interface HeaderForm {
   so_date: string;
@@ -71,6 +72,10 @@ function draftKeyFor(soId: number): string {
 export default function ManualSoUpdatePage() {
   const router = useRouter();
   useRequireAuth(router.replace);
+  // C12 cost-metric gate. Same reasoning as manual entry — deny-list
+  // roles can't edit Rate (the input is hidden by `_SoLineForm`), so we
+  // can't require it on submit.
+  const { seesCost } = useSeesCost();
   const params = useParams<{ soId: string }>();
   const search = useSearchParams();
   const soId = Number(params?.soId);
@@ -81,7 +86,14 @@ export default function ManualSoUpdatePage() {
   // remounts the component).
   const [initialDraft] = useState<ManualUpdateDraft | null>(() => {
     if (typeof window === "undefined" || !Number.isFinite(soId)) return null;
-    return sessionLoad<ManualUpdateDraft>(draftKeyFor(soId));
+    const raw = sessionLoad<ManualUpdateDraft>(draftKeyFor(soId));
+    if (!raw) return null;
+    // C12-fix H3: synchronous strip on draft hydrate. Mirrors the manual
+    // entry page — drafts are tab-scoped but share a device across users,
+    // so a stale draft authored by an allow-listed teammate must not leak
+    // its cost columns to a deny-list operator on rehydration.
+    if (seesCostFor(userStore.load())) return raw;
+    return { header: raw.header, lines: raw.lines.map(stripLineCostFields) };
   });
   // hadDraft flag is consumed inside the fetch effect to decide whether to
   // overwrite header/lines with server values. After the first fetch this
@@ -202,19 +214,30 @@ export default function ManualSoUpdatePage() {
       const l = lines[i];
       if (!l.sku_name.trim()) { setFeedback({ kind: "err", msg: `Line ${i + 1}: Particulars is required.` }); return; }
       if (!l.quantity.trim()) { setFeedback({ kind: "err", msg: `Line ${i + 1}: Pack count is required.` }); return; }
-      if (!l.rate_inr.trim()) { setFeedback({ kind: "err", msg: `Line ${i + 1}: Rate is required.` }); return; }
+      // Rate is only required when the operator can see / edit cost
+      // fields. Deny-list roles (team_leader, qc_inspector, etc.) get
+      // the Rate input hidden by `_SoLineForm` (C12), so making it a
+      // required field would dead-lock them.
+      if (seesCost && !l.rate_inr.trim()) { setFeedback({ kind: "err", msg: `Line ${i + 1}: Rate is required.` }); return; }
     }
 
     setSubmitting(true);
     try {
       const oldHeader = headerFromRow(original);
       const oldLines: SoLine[] = unwrapLines(original.lines);
+      // C12-fix H3: belt-and-braces strip before mapping to the wire
+      // shape — same reasoning as manual entry. Deny-list operators
+      // submit without `*_amount` / `rate_inr` values even if the live
+      // LineRow state somehow carries them (stale draft, future bug).
+      const wireLines = lines
+        .map((l) => (seesCost ? l : stripLineCostFields(l)))
+        .map(lineToWire);
       const r = await updateSo({
         so_number: original.so_number ?? "",
         old_header: oldHeader,
         new_header: header,
         old_lines: oldLines,
-        new_lines: lines.map(lineToWire),
+        new_lines: wireLines,
       });
       setFeedback({ kind: "ok", msg: `${original.so_number} updated — ${(r.header_changes ?? 0) + (r.line_changes ?? 0)} change${(r.header_changes ?? 0) + (r.line_changes ?? 0) === 1 ? "" : "s"} applied.` });
       // Drop the draft now that the edits are applied — no need to keep it

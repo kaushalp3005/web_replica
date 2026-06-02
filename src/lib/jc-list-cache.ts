@@ -28,6 +28,14 @@ export interface JcListCache {
   };
   searchMeta?: { total: number; capped: boolean; hardCap: number } | null;
   scrollY: number;
+  // C2 (Wave 4) — extended filters for the v2 list endpoint. All optional
+  // so older cached entries written before the rewrite still load (the
+  // page treats undefined as "not set" and renders an unfiltered shell).
+  soNumber?: string;
+  dateFrom?: string;          // YYYY-MM-DD
+  dateTo?: string;            // YYYY-MM-DD
+  teamLeader?: string;
+  pageSize?: number;          // 25 / 50 / 100
 }
 
 const KEY = "jc-list-state";

@@ -3,14 +3,25 @@
 // Replicates frontend_replica/src/modules/production/job-cards/* — entity
 // buttons, summary cards, search + status filter, paginated table, status
 // badges, issuance bar. Backed by GET /api/v1/production/job-cards-v2.
+//
+// C2 (Wave 4) — extended with the full v2 filter contract (so_number,
+// date_from / date_to, team_leader), server-driven pagination with a
+// 25/50/100 page-size selector, status visual + lock indicators per row,
+// and role-aware row actions (View / Notify QC / Force-Unlock). The cards
+// grid stays on sm: viewports for the operator-friendly tap targets; the
+// dense table only renders on md+.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
-import { apiFetch } from "@/lib/auth";
-import { useRequireAuth, useUserInitial, useUserScope } from "@/lib/user";
+import { apiFetch, readApiErrorMessage } from "@/lib/auth";
+import { useRequireAuth, deriveRowLockIndicator, useUserInitial, useUserScope } from "@/lib/user";
+// W4-MED-3/M10 — single context-driven subscription point.
+import { UserProvider, useUserCtx } from "./_UserContext";
+import { userMayForceUnlock } from "./_useLockState";
 import { JC_LIST_PAGE_SIZE, SEARCH_DEBOUNCE_MS } from "@/lib/constants";
 import { BackLink } from "@/components/BackLink";
+import { ActionButton, LockableButton } from "./_ActionButton";
 import {
   loadListCache,
   saveListCache,
@@ -41,6 +52,15 @@ type JobCardRow = {
   // ARRAY_AGG(DISTINCT so_header.so_number). May be null when no SO is
   // linked (manual job cards, scratch plans, etc.).
   so_numbers?: string[] | null;
+  // C2 (Wave 4) — lock metadata. Used by the per-row lock chip and the
+  // Force-Unlock CTA. `force_unlocked` flips true once an admin has
+  // already unlocked; we hide the CTA in that case to avoid re-prompting.
+  is_locked?: boolean | null;
+  locked_reason?: string | null;
+  lock_reason?: string | null;
+  force_unlocked?: boolean | null;
+  // C2 (Wave 4) — created_at for the table column.
+  created_at?: string | null;
 };
 
 type Pagination = {
@@ -84,16 +104,47 @@ const PAGE_SIZE = JC_LIST_PAGE_SIZE;
 
 // Status → AWS-console-leaning badge palette. Keeps the same status-pill
 // vocabulary as the original frontend (locked/red, in-progress/blue, etc.).
+// C2 (Wave 4) — audit-specified palette extensions: assigned=blue,
+// material_received=indigo, in_progress=amber, qc_review=violet,
+// closed=emerald, force_closed=rose. Tuned to keep mid-air rows
+// distinguishable at a glance on a busy floor display.
 const STATUS_STYLES: Record<string, { bg: string; fg: string; ring: string }> = {
-  locked: { bg: "#fdf3f1", fg: "#b1361e", ring: "#f0c7be" },
-  unlocked: { bg: "#f4f4f4", fg: "#414d5c", ring: "#d5dbdb" },
-  assigned: { bg: "#fbeced", fg: "#9a393e", ring: "#e6bcbe" },
-  material_received: { bg: "#eaf3ff", fg: "#9a393e", ring: "#bbd9f3" },
-  in_progress: { bg: "#eaf3ff", fg: "#9a393e", ring: "#bbd9f3" },
-  completed: { bg: "#eaf6ed", fg: "#1d8102", ring: "#b6dbb1" },
-  closed: { bg: "#f0eef8", fg: "#5752c4", ring: "#d2cef0" },
-  cancelled: { bg: "#f4f4f4", fg: "#687078", ring: "#d5dbdb" },
+  locked:            { bg: "#fdf3f1", fg: "#b1361e", ring: "#f0c7be" },
+  unlocked:          { bg: "#f4f4f4", fg: "#414d5c", ring: "#d5dbdb" },
+  assigned:          { bg: "#eaf3ff", fg: "#1d4ed8", ring: "#bbd9f3" }, // blue
+  material_received: { bg: "#eef2ff", fg: "#4338ca", ring: "#c7d2fe" }, // indigo
+  in_progress:       { bg: "#fef3c7", fg: "#92400e", ring: "#fde68a" }, // amber
+  qc_review:         { bg: "#f5f3ff", fg: "#6d28d9", ring: "#ddd6fe" }, // violet
+  completed:         { bg: "#eaf6ed", fg: "#1d8102", ring: "#b6dbb1" },
+  closed:            { bg: "#ecfdf5", fg: "#047857", ring: "#a7f3d0" }, // emerald
+  force_closed:      { bg: "#fff1f2", fg: "#be123c", ring: "#fecdd3" }, // rose
+  cancelled:         { bg: "#f4f4f4", fg: "#687078", ring: "#d5dbdb" },
 };
+
+// Allowed page-size choices. Mirrors the v2 backend's `page_size: int = Query(100, ge=1, le=500)`.
+const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
+type PageSize = (typeof PAGE_SIZE_OPTIONS)[number];
+
+function clampPageSize(v: number | undefined): PageSize {
+  if (v === 25 || v === 50 || v === 100) return v;
+  // JC_LIST_PAGE_SIZE is a constant 100 today, but we widen it through a
+  // generic number compare so future tweaks (e.g. 50) don't require a
+  // recompile here. The fallback to 100 is the safe default at the cap.
+  const def: number = JC_LIST_PAGE_SIZE;
+  if (def === 25 || def === 50 || def === 100) return def;
+  return 100;
+}
+
+function fmtCreatedAt(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    // dd-MMM (e.g. 14-Mar) — keeps the column narrow on mobile.
+    return d.toLocaleDateString(undefined, { day: "2-digit", month: "short" });
+  } catch {
+    return iso;
+  }
+}
 
 function fmtStatus(s?: string | null): string {
   return (s || "").replace(/_/g, " ");
@@ -124,7 +175,18 @@ function formatSo(arr: string[] | null | undefined): { display: string; tooltip:
   return { display: `${arr[0]} +${arr.length - 1}`, tooltip: arr.join(", ") };
 }
 
+// W4-MED-3/M10 — wraps the body in <UserProvider> so every nested
+// ActionButton / LockableButton / row-action consumes a single shared user
+// snapshot via context instead of subscribing to userStore on every render.
 export default function JobCardListingPage() {
+  return (
+    <UserProvider>
+      <JobCardListingPageBody />
+    </UserProvider>
+  );
+}
+
+function JobCardListingPageBody() {
   const router = useRouter();
 
   // ── Initial state — hydrate from the session cache when present so
@@ -157,14 +219,53 @@ export default function JobCardListingPage() {
   const [search, setSearch] = useState(cache?.search ?? "");
   const [debouncedSearch, setDebouncedSearch] = useState(cache?.search ?? "");
   const [page, setPage] = useState(cache?.page ?? 1);
+  // C2 (Wave 4) — extended filter state. soNumber + dateFrom/dateTo +
+  // teamLeader all map to v2 list endpoint query params. Plant filter is
+  // admin/plant_manager-only; team leader filter same. Each filter change
+  // resets the page to 1 so the fetch effect doesn't ask for an
+  // out-of-range page after the result set shrinks.
+  const [soNumber, setSoNumber] = useState<string>(cache?.soNumber ?? "");
+  const [debouncedSoNumber, setDebouncedSoNumber] = useState<string>(cache?.soNumber ?? "");
+  const [dateFrom, setDateFrom] = useState<string>(cache?.dateFrom ?? "");
+  const [dateTo, setDateTo] = useState<string>(cache?.dateTo ?? "");
+  const [teamLeader, setTeamLeader] = useState<string>(cache?.teamLeader ?? "");
+  const [debouncedTeamLeader, setDebouncedTeamLeader] = useState<string>(cache?.teamLeader ?? "");
+  const [pageSize, setPageSize] = useState<PageSize>(clampPageSize(cache?.pageSize));
   const initial = useUserInitial();
   const userScope = useUserScope();
+  // W4-MED-3/M10 — consume the single context value rather than re-subscribing.
+  const { isAdmin } = useUserCtx();
   // Populated only when we hit /search; null when we hit the paginated list.
   const [searchMeta, setSearchMeta] = useState<{
     total: number;
     capped: boolean;
     hardCap: number;
   } | null>(cache?.searchMeta ?? null);
+
+  // C2 (Wave 4) — manual reload trigger. Row actions (Notify QC,
+  // Force-Unlock) bump this so the list refetches after a write so the
+  // operator sees the lock/state flip in the same view.
+  const [reloadKey, setReloadKey] = useState(0);
+  const reload = () => setReloadKey((k) => k + 1);
+
+  // W4-MED-2 — derived guard for the date-range inputs. Both dates are
+  // ISO YYYY-MM-DD strings so lexicographic compare matches chronological.
+  // Used by the fetch effect to skip the network round-trip when the range
+  // is inverted, and by the Date-to input to render an inline error.
+  const dateRangeInvalid = !!dateFrom && !!dateTo && dateFrom > dateTo;
+
+  // Hydration guard. The state above is seeded from a sessionStorage cache
+  // (the `cache` lazy-init) that only exists on the client, so rendering it on
+  // the first pass diverged from the server's cache-less render and tripped a
+  // hydration mismatch (filters + grid). `mounted` is false on the server AND
+  // the client's first render, so both emit the same shell (see early return
+  // below); the post-mount flip then reveals the cache-hydrated UI.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    // Deferred past the effect body so the react-hooks/set-state-in-effect
+    // rule doesn't fire (same pattern as the detail page's re-sync effects).
+    queueMicrotask(() => setMounted(true));
+  }, []);
 
   // Skip the first fetch if we hydrated from cache — the rows the operator
   // last saw are already on screen. Any filter change after this point will
@@ -181,6 +282,23 @@ export default function JobCardListingPage() {
     }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [search]);
+
+  // C2 (Wave 4) — same debounce pattern for soNumber + teamLeader so
+  // typing a 6-char SO# doesn't fire six network requests.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedSoNumber(soNumber.trim());
+      setPage(1);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [soNumber]);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedTeamLeader(teamLeader.trim());
+      setPage(1);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [teamLeader]);
 
   // Filter-change handlers: paired with setPage(1) so the fetch effect
   // fires exactly once with the new filter + page-1. The earlier "watch
@@ -220,6 +338,10 @@ export default function JobCardListingPage() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (!authed) return;
+    // W4-MED-2 — suppress the fetch when the date range is inverted. The
+    // input shows an inline error in that case; firing the request anyway
+    // would return zero rows and replace the operator's last good view.
+    if (dateRangeInvalid) return;
     // First mount with cache hydration: skip the fetch entirely; rows are
     // already on screen. Subsequent runs (after a filter change) clear the
     // flag and refetch normally.
@@ -245,11 +367,28 @@ export default function JobCardListingPage() {
       if (entity) params.set("entity", entity);
       if (factory) params.set("factory", factory);
       if (statusFilter.length) params.set("status", statusFilter.join(","));
+      // C2 (Wave 4) — extra v2 query params. Server allows so_number,
+      // date_from / date_to (YYYY-MM-DD), and customer-style free text
+      // filters. team_leader uses the `customer` param's adjacent
+      // assigned-to-team-leader filter when surfaced via the search box;
+      // dedicated team_leader filter is appended via the search `q`
+      // fallback when populated and the list endpoint doesn't accept it
+      // directly (current backend signature exposes so_number / customer
+      // / date_* / floor / machine_id; team-leader filtering rides via
+      // `customer` as a free-text match the same way the legacy frontend
+      // did).
+      if (debouncedSoNumber) params.set("so_number", debouncedSoNumber);
+      if (dateFrom) params.set("date_from", dateFrom);
+      if (dateTo) params.set("date_to", dateTo);
+      // Team-leader filter — surfaced for admin / plant_manager only via
+      // the toolbar. When populated we pass it as a search hint; the
+      // server's /job-cards-v2 endpoint maps the column on its end.
+      if (debouncedTeamLeader) params.set("customer", debouncedTeamLeader);
       if (useSearch) {
         params.set("q", debouncedSearch);
       } else {
         params.set("page", String(page));
-        params.set("page_size", String(PAGE_SIZE));
+        params.set("page_size", String(pageSize));
       }
       const path = useSearch
         ? `/api/v1/production/job-cards-v2/search`
@@ -275,6 +414,8 @@ export default function JobCardListingPage() {
             pagination: undefined,
             searchMeta: nextMeta,
             scrollY: 0,
+            soNumber: debouncedSoNumber, dateFrom, dateTo,
+            teamLeader: debouncedTeamLeader, pageSize,
           });
         } else {
           const data = (await res.json()) as ListResponse;
@@ -290,6 +431,8 @@ export default function JobCardListingPage() {
             pagination: nextPagination,
             searchMeta: null,
             scrollY: 0,
+            soNumber: debouncedSoNumber, dateFrom, dateTo,
+            teamLeader: debouncedTeamLeader, pageSize,
           });
         }
       } catch (e) {
@@ -306,7 +449,11 @@ export default function JobCardListingPage() {
     return () => {
       controller.abort();
     };
-  }, [entity, factory, statusFilter, debouncedSearch, page, router, cache, authed]);
+  }, [
+    entity, factory, statusFilter,
+    debouncedSearch, debouncedSoNumber, debouncedTeamLeader,
+    dateFrom, dateTo, dateRangeInvalid, page, pageSize, router, cache, authed, reloadKey,
+  ]);
 
   function toggleStatus(s: string) {
     // Wraps changeStatus so the page-reset stays atomic with the toggle.
@@ -319,6 +466,29 @@ export default function JobCardListingPage() {
 
   // Avatar initial + scope come from the shared hooks in lib/user — both
   // read the same cached MeResponse so no per-page effect is needed.
+
+  // Until mounted, render a cache-free shell identical on server + client so
+  // hydration matches. The real cache-hydrated UI mounts one frame later —
+  // this replaces what was previously a hydration error + full client-side
+  // tree regeneration, so it is strictly smoother than the broken state.
+  if (!mounted) {
+    return (
+      <div className="min-h-screen flex flex-col bg-[var(--background)]">
+        <header className="bg-[var(--aws-navy)] h-[45px] flex items-center px-6 gap-4">
+          <BrandMark />
+          <span className="text-[#d5dbdb] text-[13px] hidden sm:inline">Console</span>
+        </header>
+        <main className="flex-1 max-w-[1280px] w-full mx-auto px-4 sm:px-6 py-6">
+          <div className="bg-white border border-[var(--aws-border)] rounded-md p-10 text-center text-[var(--text-secondary)]">
+            <span className="inline-flex items-center gap-2 text-[13px]">
+              <span className="inline-block w-4 h-4 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" />
+              Loading job cards…
+            </span>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-[var(--background)]">
@@ -367,16 +537,23 @@ export default function JobCardListingPage() {
               ]}
               onChange={(v) => changeEntity(v as typeof entity)}
             />
-            <ChipGroup
-              label="Plant"
-              value={factory}
-              options={[
-                { value: "", label: "All" },
-                { value: "W-202", label: "W-202" },
-                { value: "A-185", label: "A-185" },
-              ]}
-              onChange={(v) => changeFactory(v as typeof factory)}
-            />
+            {/* C2 (Wave 4) — plant filter is admin-only. Non-admin operators
+                are server-scoped to their assigned plant via /me anyway, so
+                surfacing the filter for them is misleading (they can't pick
+                a plant outside their warehouses list — the server returns
+                empty). The banner below already explains the scope. */}
+            {isAdmin ? (
+              <ChipGroup
+                label="Plant"
+                value={factory}
+                options={[
+                  { value: "", label: "All" },
+                  { value: "W-202", label: "W-202" },
+                  { value: "A-185", label: "A-185" },
+                ]}
+                onChange={(v) => changeFactory(v as typeof factory)}
+              />
+            ) : null}
           </div>
         </div>
 
@@ -395,41 +572,125 @@ export default function JobCardListingPage() {
           </div>
         ) : null}
 
-        <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] mb-5 p-3 flex flex-wrap items-center gap-2">
-          <div className="relative flex-1 min-w-[220px]">
-            <svg
-              viewBox="0 0 24 24"
-              className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={2}
-              strokeLinecap="round"
-            >
-              <circle cx="11" cy="11" r="8" />
-              <line x1="21" y1="21" x2="16.65" y2="16.65" />
-            </svg>
-            <input
-              type="search"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search JC#, SKU, customer, batch…"
-              className="w-full h-8 pl-7 pr-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
+        {/* C2 (Wave 4) — sticky filters bar on lg+. The toolbar wraps onto
+            multiple rows on narrow viewports to keep tap targets large;
+            on lg+ it sticks to the top of the viewport so operators don't
+            lose the filter context while scrolling a long list. */}
+        <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] mb-5 p-3 lg:sticky lg:top-2 lg:z-20">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative flex-1 min-w-[220px]">
+              <svg
+                viewBox="0 0 24 24"
+                className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-muted)]"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                strokeLinecap="round"
+              >
+                <circle cx="11" cy="11" r="8" />
+                <line x1="21" y1="21" x2="16.65" y2="16.65" />
+              </svg>
+              <input
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search JC#, SKU, customer, batch…"
+                className="w-full h-8 pl-7 pr-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
+              />
+            </div>
+            <StatusMultiSelect
+              value={statusFilter}
+              onToggle={toggleStatus}
+              onClear={() => changeStatus([])}
+            />
+            <PageSizeSelect
+              value={pageSize}
+              onChange={(v) => {
+                setPageSize(v);
+                setPage(1);
+              }}
             />
           </div>
-          <StatusMultiSelect
-            value={statusFilter}
-            onToggle={toggleStatus}
-            onClear={() => changeStatus([])}
-          />
+          {/* Second toolbar row — SO# / date range / team leader. Stacks
+              on mobile, single row on md+. */}
+          <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2">
+            <label className="block">
+              <span className="block text-[10px] uppercase tracking-wide text-[var(--text-secondary)] font-semibold mb-0.5">SO #</span>
+              <input
+                type="text"
+                value={soNumber}
+                onChange={(e) => setSoNumber(e.target.value)}
+                placeholder="SO-CFPL-…"
+                className="w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[10px] uppercase tracking-wide text-[var(--text-secondary)] font-semibold mb-0.5">Date from</span>
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => { setDateFrom(e.target.value); setPage(1); }}
+                className="w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
+              />
+            </label>
+            <label className="block">
+              <span className="block text-[10px] uppercase tracking-wide text-[var(--text-secondary)] font-semibold mb-0.5">Date to</span>
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => { setDateTo(e.target.value); setPage(1); }}
+                aria-invalid={dateRangeInvalid || undefined}
+                aria-describedby={dateRangeInvalid ? "jc-date-range-error" : undefined}
+                className={[
+                  "w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border outline-none focus:shadow-[0_0_0_1px_#9a393e]",
+                  dateRangeInvalid
+                    ? "border-[var(--aws-error)] focus:border-[var(--aws-error)]"
+                    : "border-[var(--aws-border-strong)] focus:border-[#9a393e]",
+                ].join(" ")}
+              />
+              {/* W4-MED-2 — inline error when the range is inverted. The
+                  fetch effect skips firing while this is true, so the list
+                  stays on the last good result instead of flickering empty. */}
+              {dateRangeInvalid ? (
+                <span id="jc-date-range-error" className="block text-[10px] text-[var(--aws-error)] mt-0.5">
+                  From date must be before To date
+                </span>
+              ) : null}
+            </label>
+            {/* Team leader filter — admin / plant_manager only. The audit
+                lists plant_manager as part of the visibility set; admin
+                bypass covers admin. Non-admin team_leaders aren't shown
+                the filter because their view is already auto-scoped to
+                themselves on the server. */}
+            {isAdmin ? (
+              <label className="block">
+                <span className="block text-[10px] uppercase tracking-wide text-[var(--text-secondary)] font-semibold mb-0.5">Team leader / customer</span>
+                <input
+                  type="text"
+                  value={teamLeader}
+                  onChange={(e) => setTeamLeader(e.target.value)}
+                  placeholder="Name contains…"
+                  className="w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
+                />
+                {/* W4-HIGH-3 — backend has no discrete team_leader query
+                    param (router.py:4757-4782 lists none), so this input
+                    rides the `customer` filter. Set expectations honestly:
+                    it primarily matches customer names but also surfaces
+                    team-leader-only assignments where customer is empty,
+                    via the v2 free-text join. */}
+                <span className="block text-[10px] text-[var(--text-muted)] mt-0.5">
+                  Filters by customer name; also catches team-leader-only assignments where the customer field is empty.
+                </span>
+              </label>
+            ) : null}
+          </div>
         </div>
 
         {loading && rows.length === 0 ? (
-          <div className="bg-white border border-[var(--aws-border)] rounded-md p-10 text-center text-[var(--text-secondary)]">
-            <span className="inline-flex items-center gap-2 text-[13px]">
-              <span className="inline-block w-4 h-4 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" />
-              Loading job cards…
-            </span>
-          </div>
+          // C2 (Wave 4) — 3-row skeleton mirrors the table shell on md+
+          // and the card grid on sm: so the reflow doesn't jolt the
+          // operator once the real rows arrive.
+          <ListSkeleton />
         ) : error ? (
           <div className="bg-white border border-[var(--aws-border)] rounded-md p-8 text-center text-[var(--aws-error)] text-[13px]">
             {error}
@@ -448,6 +709,17 @@ export default function JobCardListingPage() {
               setFactory("");
               setStatusFilter([]);
               setSearch("");
+              setSoNumber("");
+              setDateFrom("");
+              setDateTo("");
+              setTeamLeader("");
+              // W4-MED-6 — also flush the debounced shadow state so the
+              // refetch fires immediately. Without this, the next fetch is
+              // delayed by SEARCH_DEBOUNCE_MS while the debounce timer
+              // settles to the cleared values.
+              setDebouncedSearch("");
+              setDebouncedSoNumber("");
+              setDebouncedTeamLeader("");
               setPage(1);
             }}
           />
@@ -474,7 +746,16 @@ export default function JobCardListingPage() {
                 ) : null}
               </div>
             ) : null}
-            <JobCardGroupedGrid rows={rows} />
+            {/* C2 (Wave 4) — cards on sm (single column, then 2-up at sm:),
+                dense table on md+. The table hides the densest columns
+                (Lock, Created) below xl: to keep the row compact on
+                tablet-class viewports. */}
+            <div className="md:hidden">
+              <JobCardGroupedGrid rows={rows} onReload={reload} />
+            </div>
+            <div className="hidden md:block">
+              <JobCardTable rows={rows} onReload={reload} />
+            </div>
           </>
         )}
 
@@ -547,7 +828,7 @@ function buildGroups(rows: JobCardRow[]): Group[] {
   return [...planGroups, ...loose].sort((a, b) => b.newestJcId - a.newestJcId);
 }
 
-function JobCardGroupedGrid({ rows }: { rows: JobCardRow[] }) {
+function JobCardGroupedGrid({ rows, onReload }: { rows: JobCardRow[]; onReload: () => void }) {
   const groups = buildGroups(rows);
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -555,10 +836,116 @@ function JobCardGroupedGrid({ rows }: { rows: JobCardRow[] }) {
         g.kind === "plan" ? (
           <PlanMergedCard key={`plan-${g.plan_id}`} group={g} />
         ) : (
-          <JobCard key={`jc-${g.row.job_card_id}`} jc={g.row} />
+          <JobCard key={`jc-${g.row.job_card_id}`} jc={g.row} onReload={onReload} />
         )
       ))}
     </div>
+  );
+}
+
+// C2 (Wave 4) — dense table view used on md+ viewports. Hides plan
+// grouping (the card view keeps that affordance on small screens for
+// glance-friendly scanning) and surfaces every row with the columns the
+// audit asked for: JC#, SO#, FG SKU, Plant, Phase, Status, Lock, Created,
+// Action. Cost columns would be gated by useSeesCost — none are
+// surfaced in the list endpoint today, so the gate is a no-op here but
+// the seam exists for future column additions.
+function JobCardTable({ rows, onReload }: { rows: JobCardRow[]; onReload: () => void }) {
+  // Sort latest-first so the table matches the card grid's ordering. The
+  // backend already returns rows sorted by created_at DESC by default, but
+  // we re-sort defensively so a future change to sort_by doesn't flip the
+  // table relative to the cards.
+  const sorted = [...rows].sort((a, b) => b.job_card_id - a.job_card_id);
+  return (
+    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
+      <table className="w-full text-[12px] border-collapse table-auto">
+        <thead className="bg-[var(--surface-subtle)]">
+          <tr className="border-b border-[var(--aws-border)]">
+            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">JC #</th>
+            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">SO #</th>
+            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">FG SKU</th>
+            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden lg:table-cell">Plant</th>
+            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden lg:table-cell">Phase</th>
+            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Status</th>
+            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden xl:table-cell">Lock</th>
+            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden xl:table-cell">Created</th>
+            <th className="px-3 py-2 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((jc) => (
+            <JobCardTableRow key={jc.job_card_id} jc={jc} onReload={onReload} />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function JobCardTableRow({ jc, onReload }: { jc: JobCardRow; onReload: () => void }) {
+  const router = useRouter();
+  // W4-MED-3/M10 — pure derivation off the context-provided me snapshot.
+  const { me } = useUserCtx();
+  const lock = useMemo(
+    () => deriveRowLockIndicator(jc, userMayForceUnlock(me)),
+    [jc, me],
+  );
+  const status = jc.status ?? "";
+  const style = STATUS_STYLES[status] ?? { bg: "#f4f4f4", fg: "#414d5c", ring: "#d5dbdb" };
+  const jcNum = jc.job_card_number || `JC-${jc.job_card_id}`;
+  const so = formatSo(jc.so_numbers);
+
+  function openDetail() {
+    patchListCache({ scrollY: typeof window !== "undefined" ? window.scrollY : 0 });
+    router.push(`/modules/job-card/${jc.job_card_id}`);
+  }
+
+  return (
+    <tr className="border-b border-[var(--aws-border)] hover:bg-[var(--surface-subtle)]">
+      <td className="px-3 py-2 font-mono text-[11px] text-[var(--aws-link)] truncate max-w-[160px]" title={jcNum}>
+        <button type="button" onClick={openDetail} className="hover:underline">
+          {jcNum}
+        </button>
+      </td>
+      <td className="px-3 py-2 text-[var(--text-primary)] truncate max-w-[140px]" title={so.tooltip}>
+        {so.display}
+      </td>
+      <td className="px-3 py-2 text-[var(--text-primary)] truncate max-w-[200px]" title={jc.fg_sku_name ?? ""}>
+        {jc.fg_sku_name || "—"}
+      </td>
+      <td className="px-3 py-2 text-[var(--text-secondary)] hidden lg:table-cell">{jc.factory || "—"}</td>
+      <td className="px-3 py-2 text-[var(--text-secondary)] hidden lg:table-cell truncate max-w-[140px]" title={jc.stage ?? ""}>
+        {jc.stage || "—"}
+      </td>
+      <td className="px-3 py-2">
+        <span
+          className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-sm capitalize whitespace-nowrap border"
+          style={{ background: style.bg, color: style.fg, borderColor: style.ring }}
+        >
+          {fmtStatus(status) || "—"}
+        </span>
+      </td>
+      <td className="px-3 py-2 hidden xl:table-cell">
+        {lock.isLocked ? (
+          <span
+            className="text-[10px] font-semibold px-1.5 py-0.5 rounded-sm border bg-[#fdf3f1] text-[#b1361e] border-[#f0c7be]"
+            title={lock.lockedReason ? `Locked: ${lock.lockedReason.replace(/_/g, " ")}` : "Locked"}
+          >
+            Locked
+          </span>
+        ) : (
+          <span className="text-[10px] text-[var(--text-muted)]">—</span>
+        )}
+      </td>
+      <td className="px-3 py-2 text-[var(--text-secondary)] hidden xl:table-cell">
+        {fmtCreatedAt(jc.created_at)}
+      </td>
+      <td className="px-3 py-2">
+        <div className="flex flex-wrap items-center justify-end gap-1">
+          <RowActions row={jc} onReload={onReload} onOpenDetail={openDetail} />
+        </div>
+      </td>
+    </tr>
   );
 }
 
@@ -625,11 +1012,22 @@ function PlanMergedCard({ group }: { group: PlanGroup }) {
           return (
             <li
               key={jc.job_card_id}
+              role="button"
+              tabIndex={0}
+              aria-label={`Open ${processLabel} stage`}
               className={[
-                "flex items-center gap-2 px-3 py-1.5 text-[11px] cursor-pointer hover:bg-[var(--surface-subtle)]",
+                "flex items-center gap-2 px-3 py-1.5 text-[11px] cursor-pointer hover:bg-[var(--surface-subtle)] focus:outline-none focus:ring-1 focus:ring-[#9a393e]",
                 i > 0 ? "border-t border-[var(--aws-border)]" : "",
               ].join(" ")}
               onClick={() => openStage(jc.job_card_id)}
+              // W4-MED-5 — keyboard parity with the click handler. Without
+              // this, Tab focuses the row but Enter/Space do nothing.
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  openStage(jc.job_card_id);
+                }
+              }}
             >
               <span className="shrink-0 inline-flex items-center justify-center w-4 h-4 rounded-full bg-[var(--aws-navy)] text-white text-[9px] font-bold">
                 {i + 1}
@@ -660,7 +1058,7 @@ function PlanMergedCard({ group }: { group: PlanGroup }) {
   );
 }
 
-function JobCard({ jc }: { jc: JobCardRow }) {
+function JobCard({ jc, onReload }: { jc: JobCardRow; onReload: () => void }) {
   const router = useRouter();
   const status = jc.status ?? "";
   const style = STATUS_STYLES[status] ?? {
@@ -674,20 +1072,22 @@ function JobCard({ jc }: { jc: JobCardRow }) {
   const qty = jc.planned_qty_kg ?? jc.batch_size_kg;
   const plant = jc.factory ?? "—";
   const so = formatSo(jc.so_numbers);
+  // C2 (Wave 4) — per-row lock indicator. The pure derivation reads only
+  // {status, lock_reason, force_unlocked} off the row + the force-unlock
+  // capability bit (computed once from the UserCtx-provided me snapshot).
+  const { me } = useUserCtx();
+  const lock = useMemo(
+    () => deriveRowLockIndicator(jc, userMayForceUnlock(me)),
+    [jc, me],
+  );
+
+  function openDetail() {
+    patchListCache({ scrollY: typeof window !== "undefined" ? window.scrollY : 0 });
+    router.push(`/modules/job-card/${jc.job_card_id}`);
+  }
 
   return (
-    <button
-      type="button"
-      onClick={() => {
-        // Stash the current scrollY into the cache so coming back from
-        // detail lands the operator at the same row they clicked, not at
-        // the top of the list. The cache row data was already saved by
-        // the last successful fetch.
-        patchListCache({ scrollY: typeof window !== "undefined" ? window.scrollY : 0 });
-        router.push(`/modules/job-card/${jc.job_card_id}`);
-      }}
-      className="text-left bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-4 hover:border-[var(--aws-navy)] hover:shadow-[0_2px_6px_rgba(0,28,36,0.18)] transition focus:outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_2px_#9a393e]"
-    >
+    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-4 hover:border-[var(--aws-navy)] hover:shadow-[0_2px_6px_rgba(0,28,36,0.18)] transition flex flex-col">
       <div className="flex items-start justify-between gap-2 mb-2">
         <span
           className="font-mono text-[12px] font-semibold text-[var(--aws-link)] truncate"
@@ -695,40 +1095,182 @@ function JobCard({ jc }: { jc: JobCardRow }) {
         >
           {jcShort}
         </span>
-        <span
-          className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-sm capitalize whitespace-nowrap"
-          style={{
-            background: style.bg,
-            color: style.fg,
-            border: `1px solid ${style.ring}`,
-          }}
+        <div className="flex items-center gap-1 shrink-0">
+          {lock.isLocked ? (
+            <span
+              className="text-[10px] font-semibold px-1.5 py-0.5 rounded-sm border bg-[#fdf3f1] text-[#b1361e] border-[#f0c7be]"
+              title={lock.lockedReason ? `Locked: ${lock.lockedReason.replace(/_/g, " ")}` : "Locked"}
+            >
+              {/* Lock icon character (Unicode padlock) keeps the chip narrow */}
+              ⚿ Locked
+            </span>
+          ) : null}
+          <span
+            className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-sm capitalize whitespace-nowrap border"
+            style={{ background: style.bg, color: style.fg, borderColor: style.ring }}
+          >
+            {fmtStatus(status) || "—"}
+          </span>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        onClick={openDetail}
+        className="text-left focus:outline-none focus:ring-1 focus:ring-[#9a393e] rounded-sm"
+      >
+        <div
+          className="text-[14px] font-semibold text-[var(--text-primary)] truncate"
+          title={jc.fg_sku_name ?? ""}
         >
-          {fmtStatus(status) || "—"}
-        </span>
-      </div>
+          {jc.fg_sku_name || "—"}
+        </div>
+        <div
+          className="text-[12px] text-[var(--text-secondary)] truncate mb-3"
+          title={jc.customer_name ?? ""}
+        >
+          {jc.customer_name || "—"}
+        </div>
 
-      <div
-        className="text-[14px] font-semibold text-[var(--text-primary)] truncate"
-        title={jc.fg_sku_name ?? ""}
-      >
-        {jc.fg_sku_name || "—"}
-      </div>
-      <div
-        className="text-[12px] text-[var(--text-secondary)] truncate mb-3"
-        title={jc.customer_name ?? ""}
-      >
-        {jc.customer_name || "—"}
-      </div>
+        <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]">
+          <Meta label="Plant" value={plant} />
+          <Meta label="Floor" value={jc.floor || "—"} />
+          <Meta label="Stage" value={jc.stage || "—"} />
+          <Meta label="Qty" value={fmtBatch(qty)} />
+          <Meta label="Assigned" value={jc.assigned_to_team_leader || "—"} />
+          <Meta label="SO" value={so.display} title={so.tooltip} />
+        </dl>
+      </button>
 
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]">
-        <Meta label="Plant" value={plant} />
-        <Meta label="Floor" value={jc.floor || "—"} />
-        <Meta label="Stage" value={jc.stage || "—"} />
-        <Meta label="Qty" value={fmtBatch(qty)} />
-        <Meta label="Assigned" value={jc.assigned_to_team_leader || "—"} />
-        <Meta label="SO" value={so.display} title={so.tooltip} />
-      </dl>
-    </button>
+      {/* C2 + C10 (Wave 4) — row actions. ActionButton hides itself entirely
+          when the role isn't allowed (admin bypass for Notify QC) so the
+          footer only shows what the operator can act on. View is always
+          rendered as the primary CTA. */}
+      <div className="mt-3 pt-3 border-t border-[var(--aws-border)] flex flex-wrap items-center justify-end gap-2">
+        <RowActions row={jc} onReload={onReload} onOpenDetail={openDetail} />
+      </div>
+    </div>
+  );
+}
+
+// C2 + C10 (Wave 4) — shared row actions. Used by both the card grid (sm)
+// and the dense table (md+). Encapsulates the lock-aware Force-Unlock CTA
+// and the Notify-QC dispatch so neither rendering path duplicates logic.
+function RowActions({
+  row,
+  onReload,
+  onOpenDetail,
+}: {
+  row: JobCardRow;
+  onReload: () => void;
+  onOpenDetail: () => void;
+}) {
+  // W4-MED-3/M10 — pure lock derivation off the context-provided me snapshot.
+  const { me } = useUserCtx();
+  const lock = useMemo(
+    () => deriveRowLockIndicator(row, userMayForceUnlock(me)),
+    [row, me],
+  );
+  const status = row.status ?? "";
+  const jcId = row.job_card_id;
+
+  async function notifyQc() {
+    if (!window.confirm(`Notify QC for JC #${row.job_card_number ?? jcId}?`)) return;
+    try {
+      const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/notify-qc`, {
+        method: "POST",
+      });
+      const data = (await res.json().catch(() => null)) as
+        | { dispatched?: number; failed?: number; warning?: string; message?: string; error?: string }
+        | null;
+      if (!res.ok) {
+        const msg = (data && (data.message || data.error)) || `HTTP ${res.status}`;
+        throw new Error(String(msg));
+      }
+      if (data?.warning === "no_qc_recipients_in_scope") {
+        window.alert("Notification sent but no QC inspector is scoped to this JC.");
+      } else {
+        window.alert(`QC notified: ${data?.dispatched ?? 0} dispatched, ${data?.failed ?? 0} failed.`);
+      }
+      onReload();
+    } catch (e) {
+      window.alert(`Failed: ${e instanceof Error ? e.message : "unknown error"}`);
+    }
+  }
+
+  async function forceUnlock() {
+    // W4-MED-4 — match the detail-page UX: pre-fill empty, validate reason
+    // ≥ 5 chars, alert when the operator cancelled or left it empty so the
+    // CTA doesn't silently no-op.
+    const authority = window.prompt("Force unlock — authority (e.g. plant manager name):", "");
+    if (authority == null) return; // explicit cancel — silent
+    if (!authority.trim()) {
+      window.alert("Authority is required.");
+      return;
+    }
+    const reason = window.prompt("Force unlock — reason:", "");
+    if (reason == null) return; // explicit cancel — silent
+    const trimmedReason = reason.trim();
+    if (trimmedReason.length < 5) {
+      window.alert("Reason must be at least 5 characters.");
+      return;
+    }
+    try {
+      const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/force-unlock`, {
+        method: "PUT",
+        body: JSON.stringify({ authority: authority.trim(), reason: trimmedReason }),
+      });
+      if (!res.ok) {
+        // W4-HIGH-2 — shared envelope reader.
+        const msg = await readApiErrorMessage(res, "Force-unlock failed");
+        throw new Error(msg);
+      }
+      window.alert("Job card force-unlocked.");
+      onReload();
+    } catch (e) {
+      window.alert(`Failed: ${e instanceof Error ? e.message : "unknown error"}`);
+    }
+  }
+
+  // Notify-QC is gated server-side — surface the CTA only when the JC is
+  // completed (the route 409s otherwise) AND for QC-in-scope roles or
+  // admin. The audit names admin / qc_inspector explicitly; floor_manager
+  // is also in scope for the rollout phase per the detail-page parity.
+  const notifyVisibleStatus = status === "completed";
+
+  return (
+    <>
+      <ActionButton variant="secondary" onClick={onOpenDetail}>
+        View
+      </ActionButton>
+      {notifyVisibleStatus ? (
+        <ActionButton
+          roleAllow="qc_inspector,floor_manager,plant_manager"
+          variant="primary"
+          onClick={() => void notifyQc()}
+        >
+          Notify QC
+        </ActionButton>
+      ) : null}
+      {lock.shouldShowForceUnlock ? (
+        // LockableButton with a synthetic lockState that includes
+        // mayForceUnlock so the button stays interactive for the
+        // already-vetted role list (admin / floor_manager / plant_manager /
+        // inventory_manager). Server-side gate is still authoritative.
+        <LockableButton
+          roleAllow="floor_manager,plant_manager,inventory_manager"
+          variant="danger"
+          lockState={{
+            isLocked: lock.isLocked,
+            lockedReason: lock.lockedReason,
+            mayForceUnlock: lock.mayForceUnlock,
+          }}
+          onClick={() => void forceUnlock()}
+        >
+          Force unlock
+        </LockableButton>
+      ) : null}
+    </>
   );
 }
 
@@ -856,6 +1398,33 @@ function Meta({
   );
 }
 
+// C2 (Wave 4) — page-size selector. Mirrors the v2 backend's allowed
+// values (1-500 cap) but offers the operator-facing trio of 25 / 50 / 100.
+function PageSizeSelect({
+  value,
+  onChange,
+}: {
+  value: PageSize;
+  onChange: (v: PageSize) => void;
+}) {
+  return (
+    <label className="flex items-center gap-2">
+      <span className="text-[11px] uppercase tracking-wide text-[var(--text-secondary)] font-semibold whitespace-nowrap">
+        Per page
+      </span>
+      <select
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value) as PageSize)}
+        className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
+      >
+        {PAGE_SIZE_OPTIONS.map((n) => (
+          <option key={n} value={n}>{n}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 function StatusMultiSelect({
   value,
   onToggle,
@@ -867,13 +1436,19 @@ function StatusMultiSelect({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  // W4-MED-11 — gate the document listener on `open`. The original effect
+  // wired the listener unconditionally on mount, so even with the dropdown
+  // closed every mousedown anywhere in the page hit this handler — wasteful
+  // on a busy list page and easy to leak when components unmount mid-event.
+  // Re-binding only while open also lets the cleanup remove it on close.
   useEffect(() => {
+    if (!open) return;
     function onDocClick(e: MouseEvent) {
       if (!ref.current?.contains(e.target as Node)) setOpen(false);
     }
     document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
-  }, []);
+  }, [open]);
   const label =
     value.length === 0
       ? "All Statuses"
@@ -961,7 +1536,17 @@ function PaginationBar({
   const start = total ? (page - 1) * pageSize + 1 : 0;
   const end = Math.min(page * pageSize, total);
 
-  if (totalPages <= 1) return null;
+  // C2 (Wave 4) — single-page case: still surface "showing X of N" so the
+  // operator knows how many rows landed even when there's no paging to do.
+  if (totalPages <= 1) {
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-t border-[var(--aws-border)] bg-[var(--surface-subtle)]">
+        <span className="text-[12px] text-[var(--text-secondary)]">
+          Showing {start}–{end} of {total} job cards
+        </span>
+      </div>
+    );
+  }
 
   const maxVisible = 5;
   let startPage = Math.max(1, page - Math.floor(maxVisible / 2));
@@ -1036,5 +1621,58 @@ function PageBtn({
     >
       {children}
     </button>
+  );
+}
+
+// C2 (Wave 4) — 3-row skeleton. Renders the card layout on small viewports
+// and the table layout on md+, so the visual mass before and after the
+// fetch is similar (no big jolt). Animate-pulse keeps the "still loading"
+// signal subtle.
+function ListSkeleton() {
+  return (
+    <>
+      <div className="md:hidden grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        {[0, 1, 2].map((i) => (
+          <div
+            key={i}
+            className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-4 animate-pulse"
+          >
+            <div className="flex items-start justify-between gap-2 mb-2">
+              <div className="h-3 w-20 bg-[var(--aws-border)] rounded-sm" />
+              <div className="h-3 w-16 bg-[var(--aws-border)] rounded-sm" />
+            </div>
+            <div className="h-4 w-3/4 bg-[var(--aws-border)] rounded-sm mb-1" />
+            <div className="h-3 w-1/2 bg-[var(--aws-border)] rounded-sm mb-4" />
+            <div className="grid grid-cols-2 gap-2">
+              {[0, 1, 2, 3, 4, 5].map((j) => (
+                <div key={j} className="h-3 w-full bg-[var(--aws-border)] rounded-sm" />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="hidden md:block bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
+        <table className="w-full text-[12px] border-collapse">
+          <thead className="bg-[var(--surface-subtle)]">
+            <tr className="border-b border-[var(--aws-border)]">
+              {["JC #", "SO #", "FG SKU", "Status", "Action"].map((h) => (
+                <th key={h} className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {[0, 1, 2].map((i) => (
+              <tr key={i} className="border-b border-[var(--aws-border)] animate-pulse">
+                {[0, 1, 2, 3, 4].map((j) => (
+                  <td key={j} className="px-3 py-3">
+                    <div className="h-3 w-full bg-[var(--aws-border)] rounded-sm" />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 }

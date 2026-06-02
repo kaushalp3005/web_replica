@@ -11,6 +11,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { computeLineTotals, lookupSku, round3, type SkuLookupResponse } from "@/lib/so";
+import { useSeesCost } from "@/lib/cost-gate";
 
 export interface LineRow {
   // The wire shape mirrors lib/so.SoLine; we store strings for inputs so
@@ -93,6 +94,30 @@ export function lineToWire(l: LineRow): import("@/lib/so").SoLine {
   };
 }
 
+// C12-fix H3: when the operator is in a deny-list role, the cost-bearing
+// fields on a LineRow may still hold stale values — either left over from
+// a previous edit session by an allow-listed teammate (drafts persist
+// across users on the same device, e.g. a shared kiosk), or because the
+// auto-compute effect populated `amount_inr` / `total_amount_inr` off a
+// zeroed-out rate. Stripping at the boundary keeps those values from ever
+// leaving the page and prevents the server's create/update endpoints from
+// recording numbers the operator can't actually see.
+//
+// Drained fields mirror the cost-gate's COST_BEARING_FIELDS subset that
+// LineRow exposes — rate_inr, amount_inr, total_amount_inr, and every
+// `*_amount` tax/charge column.
+const LINE_COST_KEYS = [
+  "rate_inr", "amount_inr", "total_amount_inr",
+  "igst_amount", "sgst_amount", "cgst_amount",
+  "apmc_amount", "packing_amount", "freight_amount", "processing_amount",
+] as const;
+
+export function stripLineCostFields(l: LineRow): LineRow {
+  const next: LineRow = { ...l };
+  for (const k of LINE_COST_KEYS) next[k] = "";
+  return next;
+}
+
 // ── SKU lookup helpers ───────────────────────────────────────────────────
 
 interface LookupState {
@@ -154,6 +179,7 @@ export function SoLineEditor({
   disabled?: boolean;
 }) {
   const { state, refresh } = useSkuLookup(line);
+  const { seesCost } = useSeesCost();
 
   // Particulars autocomplete — 350 ms debounce, mirrors the original.
   const [particularSuggestions, setParticularSuggestions] = useState<string[]>([]);
@@ -312,29 +338,48 @@ export function SoLineEditor({
         </div>
       </Subsection>
 
-      {/* ── Quantity & pricing ─────────────────────────── */}
-      <Subsection label="Quantity & Pricing">
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+      {/* ── Quantity & pricing ───────────────────────────
+          The pack-count / weight fields stay visible for every role —
+          they're operational metrics. The Rate and Amount inputs are
+          gated by `seesCost` so deny-list roles (team_leader,
+          qc_inspector, floor_manager, viewer) don't see any ₹ chrome.
+          The grid collapses gracefully on narrow viewports: 2-up on
+          phones, 3-/4-up on tablets+ depending on column count. */}
+      <Subsection label={seesCost ? "Quantity & Pricing" : "Quantity"}>
+        <div className={[
+          "grid gap-2",
+          seesCost ? "grid-cols-2 lg:grid-cols-4" : "grid-cols-2",
+        ].join(" ")}>
           <Field label="Pack Count *"     value={line.quantity}        onChange={(v) => set({ quantity: v })}        disabled={disabled} type="number" />
           <Field label="Quantity (Kg)"    value={line.quantity_units}  onChange={(v) => set({ quantity_units: v })}  disabled={disabled} type="number" />
-          <Field label="Rate (₹) *"       value={line.rate_inr}        onChange={(v) => set({ rate_inr: v })}        disabled={disabled} type="number" />
-          <Field label="Amount (₹)"       value={line.amount_inr}      onChange={(v) => set({ amount_inr: v })}      disabled={disabled} type="number" readOnly />
+          {seesCost ? (
+            <>
+              <Field label="Rate (₹) *"       value={line.rate_inr}        onChange={(v) => set({ rate_inr: v })}        disabled={disabled} type="number" />
+              <Field label="Amount (₹)"       value={line.amount_inr}      onChange={(v) => set({ amount_inr: v })}      disabled={disabled} type="number" readOnly />
+            </>
+          ) : null}
         </div>
       </Subsection>
 
-      {/* ── Tax & charges ─────────────────────────────── */}
-      <Subsection label="Tax & Charges">
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
-          <Field label="IGST"        value={line.igst_amount}       onChange={(v) => set({ igst_amount: v })}       disabled={disabled} type="number" />
-          <Field label="SGST"        value={line.sgst_amount}       onChange={(v) => set({ sgst_amount: v })}       disabled={disabled} type="number" />
-          <Field label="CGST"        value={line.cgst_amount}       onChange={(v) => set({ cgst_amount: v })}       disabled={disabled} type="number" />
-          <Field label="APMC"        value={line.apmc_amount}       onChange={(v) => set({ apmc_amount: v })}       disabled={disabled} type="number" />
-          <Field label="Packing"     value={line.packing_amount}    onChange={(v) => set({ packing_amount: v })}    disabled={disabled} type="number" />
-          <Field label="Freight"     value={line.freight_amount}    onChange={(v) => set({ freight_amount: v })}    disabled={disabled} type="number" />
-          <Field label="Processing"  value={line.processing_amount} onChange={(v) => set({ processing_amount: v })} disabled={disabled} type="number" />
-          <Field label="Total (₹)"   value={line.total_amount_inr}  onChange={(v) => set({ total_amount_inr: v })}  disabled={disabled} type="number" readOnly />
-        </div>
-      </Subsection>
+      {/* ── Tax & charges ───────────────────────────────
+          The IGST / SGST / CGST / APMC / Packing / Freight / Processing
+          columns are all currency amounts (the `*_amount` keys are part
+          of `COST_BEARING_FIELDS`). The whole subsection collapses for
+          deny-list roles because there's nothing left to show. */}
+      {seesCost ? (
+        <Subsection label="Tax & Charges">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+            <Field label="IGST"        value={line.igst_amount}       onChange={(v) => set({ igst_amount: v })}       disabled={disabled} type="number" />
+            <Field label="SGST"        value={line.sgst_amount}       onChange={(v) => set({ sgst_amount: v })}       disabled={disabled} type="number" />
+            <Field label="CGST"        value={line.cgst_amount}       onChange={(v) => set({ cgst_amount: v })}       disabled={disabled} type="number" />
+            <Field label="APMC"        value={line.apmc_amount}       onChange={(v) => set({ apmc_amount: v })}       disabled={disabled} type="number" />
+            <Field label="Packing"     value={line.packing_amount}    onChange={(v) => set({ packing_amount: v })}    disabled={disabled} type="number" />
+            <Field label="Freight"     value={line.freight_amount}    onChange={(v) => set({ freight_amount: v })}    disabled={disabled} type="number" />
+            <Field label="Processing"  value={line.processing_amount} onChange={(v) => set({ processing_amount: v })} disabled={disabled} type="number" />
+            <Field label="Total (₹)"   value={line.total_amount_inr}  onChange={(v) => set({ total_amount_inr: v })}  disabled={disabled} type="number" readOnly />
+          </div>
+        </Subsection>
+      ) : null}
     </div>
   );
 }

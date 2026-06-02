@@ -188,6 +188,87 @@ export async function updatePlan(
   return await res.json();
 }
 
+// ── Approved-plan field-change amendment (R8) ───────────────────────────
+//
+// When a plan is in status='approved', direct PUTs are no longer the
+// right path — the operator-stated rule is "edits to an approved plan
+// require admin approval". Per the R8 framework, the edit becomes a
+// `plan_field_change` amendment request. Admin approval triggers the
+// apply step (server-side `_apply_plan_field_change`), which:
+//   • updates production_plan_v2 with the supplied plan_fields
+//   • updates production_plan_line_v2 for each line_changes[].fields
+//   • cascades qty + deadline to JCs in status locked / unlocked /
+//     assigned; JCs past that point stay frozen (the response carries
+//     `jcs_cascaded` + `jcs_skipped` for the operator's audit).
+//
+// Drafts continue to use the direct PUT helpers above — no maker-checker
+// loop adds value before initial approval.
+
+export interface PlanFieldChangePayload {
+  plan_id: number;
+  /** Plan-level fields. Allow-list mirrors UpdatePlanBody. */
+  plan_fields?: Pick<UpdatePlanBody, "plan_date" | "date_from" | "date_to" | "plan_type">;
+  /** Per-line patches. Allow-list mirrors UpdatePlanLineBody. */
+  line_changes?: Array<{
+    plan_line_id: number;
+    fields: UpdatePlanLineBody;
+  }>;
+}
+
+export async function submitPlanFieldChangeAmendment(
+  payload: PlanFieldChangePayload,
+  reason: string,
+): Promise<unknown> {
+  // Strip undefined / empty strings from the nested objects so the
+  // server sees only fields the operator actually touched.
+  const cleanFields = (obj: Record<string, unknown> | undefined) => {
+    if (!obj) return undefined;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (v !== undefined && v !== "") out[k] = v;
+    }
+    return Object.keys(out).length > 0 ? out : undefined;
+  };
+  const cleanedPlanFields = cleanFields(payload.plan_fields as Record<string, unknown> | undefined);
+  const cleanedLineChanges = (payload.line_changes ?? [])
+    .map((lc) => ({
+      plan_line_id: lc.plan_line_id,
+      fields: cleanFields(lc.fields as Record<string, unknown>),
+    }))
+    .filter((lc) => lc.fields !== undefined) as Array<{ plan_line_id: number; fields: Record<string, unknown> }>;
+
+  if (!cleanedPlanFields && cleanedLineChanges.length === 0) {
+    throw new Error("Nothing to change");
+  }
+  if (!reason || reason.trim().length < 20) {
+    throw new Error("Reason must be at least 20 characters");
+  }
+
+  const res = await apiFetch(`/api/v1/production/amendments`, {
+    method: "POST",
+    body: JSON.stringify({
+      request_type: "plan_field_change",
+      payload: {
+        plan_id: payload.plan_id,
+        plan_fields:  cleanedPlanFields ?? {},
+        line_changes: cleanedLineChanges,
+      },
+      reason: reason.trim(),
+    }),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const j = (await res.json()) as { detail?: { message?: string } | string; message?: string };
+      if (typeof j.detail === "string") detail = j.detail;
+      else if (j.detail?.message) detail = j.detail.message;
+      else if (j.message) detail = j.message;
+    } catch { /* non-JSON */ }
+    throw new Error(detail);
+  }
+  return await res.json();
+}
+
 // ── Per-line + per-step partial updates ─────────────────────────────────
 //
 // Mirror the planning page's editing model end-to-end. Server routes (all

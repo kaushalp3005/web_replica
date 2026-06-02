@@ -11,13 +11,29 @@
 // Field set + categories + computed Process Loss % match the fragments line
 // for line so the operator sees the same form on web as on mobile.
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
+import {
+  consumptionStateFromDetail,
+  balanceStateFromDetail,
+  rejectionsFromDetail,
+  controlSampleFromDetail,
+  pmVarianceFromDetail,
+  type PmVarianceState,
+  type RejectionRow,
+} from "./outputAccounting";
 import { useParams, useRouter } from "next/navigation";
-import { apiFetch, userStore } from "@/lib/auth";
-import { useRequireAuth, useUserInitial } from "@/lib/user";
+import { apiFetch, readApiErrorMessage, userStore } from "@/lib/auth";
+import { useMe, useRequireAuth, useUserInitial } from "@/lib/user";
 import { BALANCE_TOLERANCE_KG, WEIGHT_SAMPLE_COUNT } from "@/lib/constants";
 import { BackLink } from "@/components/BackLink";
+import { LockBanner } from "../_LockBanner";
+import { lockBannerId, useLockState, userMayForceUnlock } from "../_useLockState";
+// C10 / C11 (Wave 4) — canonical role-gated action button + amendments tab.
+import { ActionButton, LockableButton } from "../_ActionButton";
+import { AmendmentsTab } from "../_AmendmentsTab";
+// W4-MED-3/M10 — single subscription via context (see _UserContext.tsx).
+import { UserProvider } from "../_UserContext";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -96,6 +112,10 @@ type ByproductRow = {
   qty_kg?: number | string | null;
   uom?: string | null;
   remarks?: string | null;
+  // Migration 034 — article attribution. NULL for non-attributable
+  // categories (control_sample, pm_*, dust, etc.).
+  material_name?: string | null;
+  bom_line_id?: number | null;
 };
 
 type AnnexureRow = Record<string, unknown>;
@@ -126,7 +146,10 @@ type JobCardDetail = {
   team_members: string[] | null;
   // Lock + chain navigation. Needed by ActionBar to decide whether to render
   // START vs DISPATCH-TO-NEXT vs CLOSE, mirroring JobCardDetailActivity.updateActionButton.
+  // `locked_reason` powers the C3 LockBanner shown above every operational
+  // form section (string returned by the server; null on legacy rows).
   is_locked?: boolean | null;
+  locked_reason?: string | null;
   force_unlocked?: boolean | null;
   next_job_card_id?: number | null;
   prev_job_card_id?: number | null;
@@ -155,6 +178,36 @@ type JobCardDetail = {
     created_at?: string | null;
   } | null;
 
+  // C3-CRIT-2 + C3-H3 — the backend now surfaces the BOM-header's
+  // allowed_balance_tolerance_pct on the JC detail payload (server default
+  // 0.001 = 0.1 %, NOT the 0.5 % that the live-preview hardcoded before this
+  // fix) along with the canonical R9 summary row written by
+  // jc_accounting_v2.save_accounting. We re-fetch this block after a save
+  // so the SummaryCard renders server-authoritative numbers; before the
+  // first save, the live preview reproduces the server formulas locally.
+  accounting?: {
+    allowed_balance_tolerance_pct?: number | null;
+    carried_in_kg?: number | string | null;
+    // Authoritative R9 percentages written by the server. When present we
+    // prefer these over the live-preview math.
+    process_loss_pct?: number | string | null;
+    invisible_loss_pct?: number | string | null;
+    total_loss_pct?: number | string | null;
+    other_loss_pct?: number | string | null;
+    rejection_pct?: number | string | null;
+    offgrade_pct?: number | string | null;
+    ega_loss_pct?: number | string | null;
+    balance_diff_kg?: number | string | null;
+    balance_diff_pct?: number | string | null;
+    is_balanced?: boolean | null;
+    [k: string]: unknown;
+  } | null;
+
+  /** Qty carried in from the previous stage (only > 0 for stages 2+). Used
+   *  by the server's loss formulas as part of `total_input = rm_issued +
+   *  carried_in` — see jc_accounting_v2.save_accounting. */
+  carried_qty_kg?: number | string | null;
+
   rm_indents?: IndentLine[];
   pm_indents?: IndentLine[];
   outputs?: Array<Record<string, unknown>>;
@@ -178,7 +231,7 @@ type JobCardDetail = {
 // Materials + Shifts (which existed on the web prototype) intentionally don't
 // have Android counterparts; the equivalent info lives inside Accounting
 // (BOM articles, consumption) and the toolbar/header time strip respectively.
-type TabKey = "chain" | "overview" | "accounting" | "quality" | "signoffs" | "remarks";
+type TabKey = "chain" | "overview" | "accounting" | "quality" | "signoffs" | "remarks" | "amendments";
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "chain",      label: "Stage Chain" },
@@ -187,6 +240,10 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "quality",    label: "Quality" },
   { key: "signoffs",   label: "Sign-offs" },
   { key: "remarks",    label: "Remarks" },
+  // Amendments tab hidden per operator request. The 'amendments' route
+  // case is kept below so a stale ?tab=amendments URL doesn't 404, and
+  // AmendmentsTab + the backend endpoints remain untouched — only the
+  // tab strip entry is suppressed.
 ];
 
 const STATUS_STYLES: Record<string, { bg: string; fg: string; ring: string }> = {
@@ -200,9 +257,19 @@ const STATUS_STYLES: Record<string, { bg: string; fg: string; ring: string }> = 
   cancelled:         { bg: "#f4f4f4", fg: "#687078", ring: "#d5dbdb" },
 };
 
-// Rejection / Off-grade categories — mirror OutputAccountingFragment.REJ_KEYS
-// / REJ_LABELS. "control_sample" reroutes to balance_materials, the rest go
-// to byproducts on save.
+// Factory for a blank off-grade row. Centralised so the default seed,
+// the "+ Add another" handler, and any future reset code all start from
+// the same shape (and adding a new field on RejectionRow updates one
+// place instead of three).
+function BLANK_REJECTION_ROW(): RejectionRow {
+  return { category: "", bomLineId: null, materialName: "", qty: "", remarks: "" };
+}
+
+// Off-Grade categories (renamed from "Rejection" per operator) — mirror
+// OutputAccountingFragment.REJ_KEYS / REJ_LABELS. R10/C6 — control_sample
+// is no longer an off-grade category; it has a dedicated "QC Sample" input
+// on Output & Accounting that wires to byproducts (category='control_sample')
+// directly.
 const REJECTION_OPTIONS: { value: string; label: string }[] = [
   { value: "",                label: "— Select —" },
   { value: "tukda",           label: "Tukda (Broken)" },
@@ -212,9 +279,78 @@ const REJECTION_OPTIONS: { value: string; label: string }[] = [
   { value: "empty_shells",    label: "Empty Shells" },
   { value: "dust",            label: "Dust" },
   { value: "rejection",       label: "Rejection" },
-  { value: "control_sample",  label: "Control Sample (QC)" },
+  // C3-H3 — wastage is a recognised byproduct bucket on the server
+  // (jc_accounting_v2 routes it the same way as rejection / off-grade for
+  // loss-pct accounting). Surfacing it here so operators don't have to
+  // pick "Other" + free-text a wastage remark.
+  { value: "wastage",         label: "Wastage" },
   { value: "other",           label: "Other" },
 ];
+
+// R11/C7 — packing-stage detection mirrors the backend's is_packing_stage
+// helper at server_replica/app/modules/production/services/job_card_v2.py:91.
+// Only packing stages may record EGA (extra giveaway) or PM variance.
+const PACKING_STAGE_TOKENS = ["packaging", "packing"] as const;
+
+function isPackingStageJc(stage: string | null | undefined): boolean {
+  if (!stage) return false;
+  const s = stage.toLowerCase();
+  return PACKING_STAGE_TOKENS.some((t) => s.includes(t));
+}
+
+// R11/C7 — PM variance categories. The backend's R11 work persists each of
+// these as a byproducts row with category=pm_*; UoM is one of PCS/NOS/ROLL/
+// SETS/BUNDLE (no KGS — PM variance is always counted, never weighed).
+const PM_VARIANCE_CATEGORIES: { key: string; label: string }[] = [
+  { key: "pm_torn",      label: "Torn" },
+  { key: "pm_damaged",   label: "Damaged" },
+  { key: "pm_misprint",  label: "Misprint" },
+  { key: "pm_rejection", label: "Rejection" },
+  { key: "pm_wasted",    label: "Wasted" },
+];
+
+const PM_VARIANCE_UOMS = ["PCS", "NOS", "ROLL", "SETS", "BUNDLE"] as const;
+
+// R12/C8 — roles allowed to tick the QC Verification Passed checkbox. Mirrors
+// the server-side gating on the /sign-off endpoint when role='qc_inspector'.
+//
+// W3-HIGH-3 — admin detection now matches the cost-gate pattern (see
+// lib/cost-gate.ts extractRoleName): a role envelope can carry
+// `is_admin: true` in addition to / instead of `code === 'admin'`.
+// Without this an admin user whose `/me` payload only flagged the
+// per-role envelope (but not the top-level is_admin) failed the QC gate
+// and couldn't tick QC Verification Passed.
+type MeShape = {
+  is_admin?: boolean;
+  role_name?: string;
+  roles?: (string | { code?: string; role_name?: string; is_admin?: boolean })[];
+};
+
+function userIsAdmin(me: MeShape | null): boolean {
+  if (!me) return false;
+  if (me.is_admin === true) return true;
+  const rs = Array.isArray(me.roles) ? me.roles : null;
+  if (!rs) return false;
+  return rs.some((r) => {
+    if (typeof r === "string") return r === "admin";
+    if (r?.is_admin === true) return true;
+    const code = r?.code ?? r?.role_name ?? "";
+    return code === "admin";
+  });
+}
+
+function userIsQcOrAdmin(me: MeShape | null): boolean {
+  if (!me) return false;
+  if (userIsAdmin(me)) return true;
+  if (me.role_name === "qc_inspector") return true;
+  const rs = Array.isArray(me.roles) ? me.roles : null;
+  if (!rs) return false;
+  for (const r of rs) {
+    const code = typeof r === "string" ? r : (r?.code ?? r?.role_name ?? "");
+    if (code === "qc_inspector") return true;
+  }
+  return false;
+}
 
 const METAL_CHECK_TYPES: { value: string; label: string }[] = [
   { value: "pre_packaging",  label: "Pre-packaging" },
@@ -257,9 +393,56 @@ function num(v: string | null | undefined): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+// C3-H1 + H2 — shared Force Unlock flow used by both the OverflowMenu and
+// every LockBanner instance below. Hoisted to module scope so the banner CTA
+// runs the EXACT same prompts + PUT /force-unlock call as the page-header
+// menu (previously the banner only scroll-to-top'd, which sent the operator
+// to the menu without actually triggering the flow). authority + reason are
+// collected via window.prompt — matching the legacy Android dialog UX — and
+// a successful unlock fires the caller's onReload so the JC payload refetches
+// and `is_locked` flips off.
+async function runForceUnlockJc(
+  jobCardId: number,
+  defaultAuthority: string,
+  onReload: () => void,
+): Promise<void> {
+  const authority = window.prompt("Force unlock — authority (e.g. plant manager name):", defaultAuthority);
+  if (authority == null || !authority.trim()) return;
+  const reason = window.prompt("Force unlock — reason:");
+  if (reason == null || !reason.trim()) return;
+  try {
+    const res = await apiFetch(`/api/v1/production/job-cards-v2/${jobCardId}/force-unlock`, {
+      method: "PUT",
+      body: JSON.stringify({ authority: authority.trim(), reason: reason.trim() }),
+    });
+    if (!res.ok) {
+      // W4-HIGH-2 — share the canonical envelope reader so a JSON error body
+      // ({message} / {error}) surfaces verbatim and a stray HTML response
+      // falls back to the friendly default instead of being alert()-ed raw.
+      const msg = await readApiErrorMessage(res, "Force-unlock failed");
+      throw new Error(msg);
+    }
+    window.alert("Job card force-unlocked.");
+    onReload();
+  } catch (e) {
+    window.alert(`Failed: ${e instanceof Error ? e.message : "unknown error"}`);
+  }
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────
 
+// W4-MED-3/M10 — wraps the body in <UserProvider> so every nested
+// ActionButton / LockableButton / row helper consumes a single shared user
+// snapshot via context instead of subscribing to userStore on every render.
 export default function JobCardDetailPage() {
+  return (
+    <UserProvider>
+      <JobCardDetailPageBody />
+    </UserProvider>
+  );
+}
+
+function JobCardDetailPageBody() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
   const jcId = Number(params?.id);
@@ -344,6 +527,45 @@ export default function JobCardDetailPage() {
     };
   }, [jcId, router, reloadKey, authed]);
 
+  // C3-H5 — window-focus revalidation. When the operator tabs back to the
+  // app (or the laptop wakes from sleep) we re-fetch the JC so the lock
+  // banner reflects any out-of-band state change (a plant manager
+  // force-unlocked from another device, the upstream stage dispatched and
+  // flipped is_locked off, etc.). A soft 60s poll runs while the tab is
+  // visible as a backstop — the listener fires `reload()` on focus, and a
+  // visibility-driven setInterval picks up changes the user doesn't tab
+  // away from. Both are no-ops when authed === false.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!authed) return;
+    const onFocus = () => reload();
+    window.addEventListener("focus", onFocus);
+    let pollId: ReturnType<typeof setInterval> | null = null;
+    const startPoll = () => {
+      if (pollId != null) return;
+      pollId = setInterval(() => {
+        if (typeof document !== "undefined" && !document.hidden) reload();
+      }, 60_000);
+    };
+    const stopPoll = () => {
+      if (pollId != null) { clearInterval(pollId); pollId = null; }
+    };
+    const onVisibility = () => {
+      if (typeof document === "undefined") return;
+      if (document.hidden) stopPoll(); else startPoll();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    if (typeof document !== "undefined" && !document.hidden) startPoll();
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+      stopPoll();
+    };
+    // `reload` is a stable closure over setReloadKey — safe to depend on
+    // `authed` only. Capturing reload itself would re-bind the listener
+    // every render because setReloadKey returns a new identity each call.
+  }, [authed]);
+
   return (
     <div className="min-h-screen flex flex-col bg-[var(--background)]">
       <header className="bg-[var(--aws-navy)] h-[45px] flex items-center px-6 gap-4">
@@ -399,6 +621,8 @@ export default function JobCardDetailPage() {
               onReload={reload}
             />
             <ActionBar detail={detail} onReload={reload} />
+            {/* R13 — the phased-closure controls + table now live inside the
+                Accounting Summary card (Output & Accounting tab), not here. */}
             <TabStrip value={tab} onChange={setTab} />
             <TabPanel
               detail={detail}
@@ -632,21 +856,606 @@ function ActionBar({ detail, onReload }: { detail: JobCardDetail; onReload: () =
 
   if (!label || !onClick) return null;
 
+  // C10 (Wave 4) — migrated to LockableButton. Lock state goes through the
+  // shared hook so the disabled / tooltip behaviour matches every other
+  // action surface (force-unlock-capable users still get an interactive
+  // button — the server is the authority). The action is hidden entirely
+  // when status doesn't permit it via the early return above; here we just
+  // honour the lock + busy gating.
+  const lockState = { isLocked, lockedReason: detail.locked_reason ?? null };
   return (
     <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] px-4 py-2 mb-4 flex justify-end">
-      <button
-        type="button"
+      <LockableButton
+        lockState={lockState}
+        busy={busy}
         onClick={onClick}
-        disabled={busy}
-        className={[
-          "h-9 px-4 rounded-[2px] text-[13px] font-bold border tracking-wide",
-          busy
-            ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
-            : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
-        ].join(" ")}
+        variant="primary"
+        className="h-9 px-4 text-[13px] font-bold tracking-wide"
       >
-        {busy ? "Working…" : label}
-      </button>
+        {label}
+      </LockableButton>
+    </div>
+  );
+}
+
+// ── R13/C9 Phased closure band ───────────────────────────────────────────
+//
+// Surfaces the current phase + history for the JC and exposes Open / Close
+// phase controls. Backed by:
+//   GET  /job-cards-v2/{id}/phases
+//   POST /job-cards-v2/{id}/phase/open
+//   POST /job-cards-v2/{id}/phase/{phase_id}/close
+//
+// The auto-dispatch downstream (B9) is handled by the server on close — we
+// just refresh the JC payload + the phase list after the modal confirms.
+
+type PhaseRow = {
+  phase_id: number;
+  phase_number: number;
+  phase_date: string | null;
+  status: string;
+  planned_qty_kg: number | string | null;
+  produced_qty_kg: number | string | null;
+  rm_consumed_kg: number | string | null;
+  extra_give_away_qty: number | string | null;
+  opened_at: string | null;
+  closed_at: string | null;
+  ended_at: string | null;
+  notes: string | null;
+};
+
+function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () => void }) {
+  const [phases, setPhases] = useState<PhaseRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [openingNotes, setOpeningNotes] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
+  const [closeModal, setCloseModal] = useState<PhaseRow | null>(null);
+
+  const isPackingStage = isPackingStageJc(detail.stage);
+
+  // W3-MED-6 — AbortController per call so a remount or rapid JC switch
+  // doesn't leave a stale request racing the current one. The current
+  // controller is captured in a closure and the caller can cancel it on
+  // unmount via the cleanup returned from useEffect.
+  const refresh = useMemo(() => {
+    const fn = async (signal?: AbortSignal) => {
+      setLoading(true);
+      setLoadError(null);
+      try {
+        const res = await apiFetch(
+          `/api/v1/production/job-cards-v2/${detail.job_card_id}/phases`,
+          { signal },
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = (await res.json()) as { phases?: PhaseRow[] };
+        setPhases(Array.isArray(data.phases) ? data.phases : []);
+      } catch (e) {
+        // Aborts are expected on unmount — don't surface those as errors.
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        if (signal?.aborted) return;
+        setPhases([]);
+        setLoadError("failed to load phases");
+      } finally {
+        if (!signal?.aborted) setLoading(false);
+      }
+    };
+    return fn;
+  }, [detail.job_card_id]);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    // W4-HIGH-5 — defer refresh() past the synchronous effect body. refresh()
+    // calls setLoading(true) inline, which trips react-hooks/set-state-in-effect
+    // when invoked directly from inside useEffect. Wrapping the CALL (rather
+    // than the inner setLoading) keeps refresh()'s reuse from other call sites
+    // — they pass an explicit signal and don't need the deferral.
+    queueMicrotask(() => { void refresh(ctrl.signal); });
+    return () => ctrl.abort();
+  }, [refresh]);
+
+  const openPhase = phases.find((p) => p.status === "open") ?? null;
+  const closedCount = phases.filter((p) => p.status === "closed").length;
+  const totalCount = phases.length;
+
+  // Column totals for the phasewise table footer.
+  const phaseTotals = useMemo(() => {
+    let produced = 0, rm = 0, ega = 0;
+    for (const p of phases) {
+      produced += num(String(p.produced_qty_kg ?? ""));
+      rm += num(String(p.rm_consumed_kg ?? ""));
+      ega += num(String(p.extra_give_away_qty ?? ""));
+    }
+    return { produced, rm, ega };
+  }, [phases]);
+
+  // Open Today's Phase eligibility — the server itself enforces the heavier
+  // rules; here we surface the button when no phase is currently open AND
+  // the JC is in one of the statuses the backend accepts. W3-MED-5 — switched
+  // from a deny-list (!closed && !cancelled) to an allow-list so future
+  // terminal statuses (e.g. 'rejected') don't leak the button through. We
+  // also gate on the lock state — a locked JC must be unlocked first.
+  const status = detail.status ?? "";
+  const lockState = useLockState(detail);
+  const canOpen =
+    !openPhase &&
+    (status === "assigned" || status === "material_received" || status === "in_progress") &&
+    !lockState.isLocked;
+
+  async function doOpenPhase() {
+    setFeedback(null);
+    setBusy(true);
+    try {
+      const body: Record<string, unknown> = {};
+      if (openingNotes.trim()) body.notes = openingNotes.trim();
+      const res = await apiFetch(`/api/v1/production/job-cards-v2/${detail.job_card_id}/phase/open`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        let txt: string; try { txt = await res.text(); } catch { txt = `HTTP ${res.status}`; }
+        throw new Error(txt || `HTTP ${res.status}`);
+      }
+      setOpeningNotes("");
+      setFeedback({ kind: "ok", msg: "Phase opened." });
+      await refresh();
+      onReload();
+    } catch (e) {
+      setFeedback({ kind: "err", msg: e instanceof Error ? e.message : "Failed to open phase." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)]">Phase</div>
+          {loading ? (
+            <div className="text-[12px] text-[var(--text-muted)] italic">Loading phases…</div>
+          ) : loadError ? (
+            // W3-MED-6 — surface a retry affordance when the phases call
+            // failed. The previous behaviour silently degraded to "No
+            // open phase" which mis-led the operator into thinking the
+            // JC had no phase activity at all.
+            <div className="text-[12px] text-[var(--aws-error)] flex items-center gap-2">
+              <span>{loadError}</span>
+              <button
+                type="button"
+                onClick={() => void refresh()}
+                className="underline text-[var(--text-link)] hover:no-underline"
+              >
+                retry
+              </button>
+            </div>
+          ) : openPhase ? (
+            <div className="text-[13px] text-[var(--text-primary)]">
+              <span className="font-semibold">Phase {openPhase.phase_number}</span>
+              {openPhase.phase_date ? (
+                <span className="ml-2 text-[var(--text-secondary)]">· {openPhase.phase_date}</span>
+              ) : null}
+              <span className="ml-2 text-[var(--text-muted)] text-[11px]">
+                {closedCount} of {totalCount} closed
+              </span>
+            </div>
+          ) : (
+            <div className="text-[13px] text-[var(--text-secondary)]">
+              No open phase
+              {totalCount > 0 ? (
+                <span className="ml-2 text-[var(--text-muted)] text-[11px]">
+                  · {closedCount} of {totalCount} closed
+                </span>
+              ) : null}
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+          {canOpen ? (
+            <>
+              <input
+                type="text"
+                placeholder="Notes (optional)"
+                value={openingNotes}
+                onChange={(e) => setOpeningNotes(e.target.value)}
+                disabled={busy}
+                className={`${inputCls} sm:max-w-[220px]`}
+              />
+              {/* C10 (Wave 4) — Open / Close Phase via LockableButton so the
+                  lock CTA tooltip + role-aware enable matches the rest of
+                  the surface. */}
+              <LockableButton
+                lockState={lockState}
+                busy={busy}
+                busyLabel="Opening…"
+                onClick={() => void doOpenPhase()}
+              >
+                Open Today&apos;s Phase
+              </LockableButton>
+            </>
+          ) : openPhase ? (
+            <LockableButton
+              lockState={lockState}
+              busy={busy}
+              onClick={() => setCloseModal(openPhase)}
+            >
+              Close Phase
+            </LockableButton>
+          ) : null}
+        </div>
+      </div>
+
+      {feedback ? (
+        <div
+          className={[
+            "mt-2 text-[12px]",
+            feedback.kind === "ok" ? "text-[var(--text-success)]" : "text-[var(--aws-error)]",
+          ].join(" ")}
+        >
+          {feedback.msg}
+        </div>
+      ) : null}
+
+      {/* Phasewise Output — detailed per-phase produced / RM / EGA + total. */}
+      {phases.length > 0 ? (
+        <div className="mt-3">
+          <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)] mb-1">
+            Phasewise Output
+          </div>
+          <table className="w-full text-[12px] border-collapse">
+            <thead className="bg-[var(--surface-subtle)]">
+              <tr className="border-b border-[var(--aws-border)]">
+                <th className="px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Phase</th>
+                <th className="px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Date</th>
+                <th className="px-2 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Produced (kg)</th>
+                <th className="px-2 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden sm:table-cell">RM (kg)</th>
+                <th className="px-2 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden sm:table-cell">EGA</th>
+              </tr>
+            </thead>
+            <tbody>
+              {phases.map((p) => (
+                <tr key={p.phase_id} className="border-b border-[var(--aws-border)]">
+                  <td className="px-2 py-1 font-semibold text-[var(--text-primary)]">
+                    {p.phase_number}
+                    {p.status === "open" ? (
+                      <span className="ml-1 text-[10px] font-normal text-[var(--text-muted)]">(open)</span>
+                    ) : null}
+                  </td>
+                  <td className="px-2 py-1 text-[var(--text-secondary)]">{fmtPhaseDate(p.phase_date)}</td>
+                  <td className="px-2 py-1 text-right font-mono">{fmtNum(p.produced_qty_kg)}</td>
+                  <td className="px-2 py-1 text-right font-mono hidden sm:table-cell">{fmtNum(p.rm_consumed_kg)}</td>
+                  <td className="px-2 py-1 text-right font-mono hidden sm:table-cell">{fmtNum(p.extra_give_away_qty)}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="border-t border-[var(--aws-border-strong)] font-semibold">
+                <td className="px-2 py-1" colSpan={2}>Total</td>
+                <td className="px-2 py-1 text-right font-mono">{fmtNum(phaseTotals.produced)}</td>
+                <td className="px-2 py-1 text-right font-mono hidden sm:table-cell">{fmtNum(phaseTotals.rm)}</td>
+                <td className="px-2 py-1 text-right font-mono hidden sm:table-cell">{fmtNum(phaseTotals.ega)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      ) : null}
+
+      {closeModal ? (() => {
+        // Compute the close-modal defaults + snapshot from JC detail.
+        // What the server actually stores on /phase/close is small —
+        // see the close_phase docstring in services/job_card_phase_v2.py.
+        // The modal pre-populates from the operator's last Output save:
+        //   - producedKg ← detail.section_5_output.fg_actual_kg
+        //   - rmConsumedKg ← Σ detail.consumption_lines[].actual_consumed_qty
+        //                     (only RM rows — PM doesn't convert into FG)
+        //   - extraGiveAway ← accounting.extra_give_away_qty, with a
+        //                     balance_materials fallback for JCs whose
+        //                     accounting summary hasn't been saved yet
+        //                     (PUT /accounting/summary is a separate
+        //                     endpoint; today the Save Output button
+        //                     doesn't auto-fire it, so accounting.* can
+        //                     legitimately be NULL even after a save).
+        const consLines = detail.consumption_lines ?? [];
+        const balMats   = detail.balance_materials ?? [];
+        const bps       = detail.byproducts ?? [];
+
+        // RM-only consumption sum. PM rows excluded because they don't
+        // count toward FG mass balance.
+        const rmConsumedSum = consLines.reduce((acc, c) => {
+          const isRm = (c.input_kind ?? "").toUpperCase() === "RM"
+            || (!c.input_kind && true);
+          return acc + (isRm && c.actual_consumed_qty != null
+            ? Number(c.actual_consumed_qty) : 0);
+        }, 0);
+
+        // EGA hydration — accounting first, balance_materials fallback.
+        const egaFromAcct = detail.accounting?.extra_give_away_qty;
+        const egaFromBal  = balMats.find(b => b.balance_type === "extra_given");
+        const egaResolved =
+          egaFromAcct != null && Number(egaFromAcct) > 0
+            ? Number(egaFromAcct)
+            : (egaFromBal?.qty_kg != null && Number(egaFromBal.qty_kg) > 0
+                ? Number(egaFromBal.qty_kg)
+                : null);
+
+        // Snapshot fallback: compute Balance Diff + Is Balanced
+        // client-side when the accounting row hasn't been saved.
+        // Mirrors the AccountingTab preview formula so the operator
+        // sees the same number in both places.
+        const fgKg = detail.section_5_output?.fg_actual_kg != null
+          ? Number(detail.section_5_output.fg_actual_kg) : null;
+        const processLossKg = detail.section_5_output?.process_loss_kg != null
+          ? Number(detail.section_5_output.process_loss_kg) : 0;
+        const balMatTotal = balMats
+          .filter(b => b.balance_type === "returned")
+          .reduce((a, b) => a + (b.qty_kg != null ? Number(b.qty_kg) : 0), 0);
+        const offgradeTotal = bps
+          .filter(b => b.category && !["control_sample", "balance_material"].includes(b.category) && !b.category.startsWith("pm_") && b.category !== "wastage")
+          .reduce((a, b) => a + (b.qty_kg != null ? Number(b.qty_kg) : 0), 0);
+        const wastageKg = bps
+          .filter(b => b.category === "wastage")
+          .reduce((a, b) => a + (b.qty_kg != null ? Number(b.qty_kg) : 0), 0);
+        const ctrlSampleKg = bps
+          .filter(b => b.category === "control_sample")
+          .reduce((a, b) => a + (b.qty_kg != null ? Number(b.qty_kg) : 0), 0);
+
+        const totalInput = rmConsumedSum;  // RM-only — matches AccountingTab rule
+        const totalAccounted = (fgKg ?? 0) + processLossKg + balMatTotal
+                             + offgradeTotal + wastageKg + ctrlSampleKg
+                             + (egaResolved ?? 0);
+        const computedBalanceDiff = totalInput > 0
+          ? totalInput - totalAccounted
+          : null;
+        const tolerancePct = detail.accounting?.allowed_balance_tolerance_pct != null
+          ? Number(detail.accounting.allowed_balance_tolerance_pct) * 100
+          : 0.10;
+        const computedIsBalanced = computedBalanceDiff != null
+          ? Math.abs(computedBalanceDiff) < 0.05
+            || (totalInput > 0
+                && (Math.abs(computedBalanceDiff) / totalInput) * 100 <= tolerancePct)
+          : null;
+        const computedTotalLossPct = fgKg && fgKg > 0
+          ? ((processLossKg + wastageKg + (egaResolved ?? 0) + offgradeTotal) / fgKg) * 100
+          : null;
+
+        return (
+          <PhaseCloseModal
+            phase={closeModal}
+            jcId={detail.job_card_id}
+            isPackingStage={isPackingStage}
+            defaults={{
+              producedKg: fgKg != null ? String(fgKg) : "",
+              rmConsumedKg: rmConsumedSum > 0 ? rmConsumedSum.toFixed(3) : "",
+              extraGiveAway: egaResolved != null ? String(egaResolved) : "",
+            }}
+            summarySnapshot={{
+              fgActualKg:   fgKg,
+              // Prefer server-saved values when present, else client-computed.
+              balanceDiff:  detail.accounting?.balance_diff_kg != null
+                ? Number(detail.accounting.balance_diff_kg) : computedBalanceDiff,
+              isBalanced:   detail.accounting?.is_balanced ?? computedIsBalanced,
+              tolerancePct,
+              totalLossPct: detail.accounting?.total_loss_pct != null
+                ? Number(detail.accounting.total_loss_pct) : computedTotalLossPct,
+            }}
+            onClose={() => setCloseModal(null)}
+            onDone={async () => {
+              setCloseModal(null);
+              await refresh();
+              onReload();
+            }}
+          />
+        );
+      })() : null}
+    </div>
+  );
+}
+
+function PhaseCloseModal({
+  phase, jcId, isPackingStage, defaults, summarySnapshot, onClose, onDone,
+}: {
+  phase: PhaseRow;
+  jcId: number;
+  isPackingStage: boolean;
+  /** Pre-fill values pulled from the JC detail (last saved output +
+   *  consumption sum + persisted EGA). Empty strings show as blank
+   *  placeholders. The operator can still type over them. */
+  defaults: {
+    producedKg: string;
+    rmConsumedKg: string;
+    extraGiveAway: string;
+  };
+  /** Compact accounting snapshot rendered above the form so the
+   *  operator can re-check balance/tolerance before confirming the
+   *  close. nulls render as "—" — same convention as the main
+   *  AccountingSummaryCard. */
+  summarySnapshot: {
+    fgActualKg: number | null;
+    balanceDiff: number | null;
+    isBalanced: boolean | null;
+    tolerancePct: number;
+    totalLossPct: number | null;
+  };
+  onClose: () => void;
+  onDone: () => Promise<void> | void;
+}) {
+  const [producedKg, setProducedKg] = useState(defaults.producedKg);
+  const [rmConsumedKg, setRmConsumedKg] = useState(defaults.rmConsumedKg);
+  const [extraGiveAway, setExtraGiveAway] = useState(defaults.extraGiveAway);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const produced = parseFloat(producedKg);
+    if (!Number.isFinite(produced) || produced < 0) {
+      setError("Produced qty (kg) is required.");
+      return;
+    }
+    // W3-MED-7 — guard zero-production close. A 0-kg close is legitimate
+    // (e.g. an aborted batch) but uncommon enough that we want the
+    // operator to acknowledge it before the row writes through. Without
+    // this the most common UX failure here was leaving the input blank,
+    // parseFloat'ing "" → NaN, falling through the validation above as
+    // "Produced qty is required" — but typing "0" by accident silently
+    // closed the phase with zero output.
+    if (produced === 0) {
+      if (!window.confirm("Close this phase with produced_qty_kg = 0? This will mark the phase as closed with no output recorded.")) {
+        return;
+      }
+    }
+    const body: Record<string, unknown> = { produced_qty_kg: produced };
+    if (rmConsumedKg.trim() !== "") {
+      const v = parseFloat(rmConsumedKg);
+      if (Number.isFinite(v)) body.rm_consumed_kg = v;
+    }
+    if (isPackingStage && extraGiveAway.trim() !== "") {
+      const v = parseFloat(extraGiveAway);
+      if (Number.isFinite(v)) body.extra_give_away_qty = v;
+    }
+    setBusy(true);
+    try {
+      const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/phase/${phase.phase_id}/close`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        let txt: string; try { txt = await res.text(); } catch { txt = `HTTP ${res.status}`; }
+        throw new Error(txt || `HTTP ${res.status}`);
+      }
+      await onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to close phase.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <form
+        onSubmit={submit}
+        className="bg-white border border-[var(--aws-border)] rounded-md shadow-lg w-full max-w-md p-5"
+      >
+        <h3 className="text-[14px] font-semibold text-[var(--text-primary)] mb-3">
+          Close Phase {phase.phase_number}
+        </h3>
+
+        {/* Re-check snapshot from the last saved accounting. Read-only.
+            Lets the operator confirm balance + loss before committing
+            the close — most-common "did I save everything?" check. */}
+        <div className="mb-3 border border-[var(--aws-border)] rounded-md bg-[var(--surface-subtle)] px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wide font-bold text-[var(--text-muted)] mb-1.5">
+            Saved Accounting Snapshot
+          </div>
+          <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]">
+            <div>
+              <dt className="text-[var(--text-muted)]">FG Output</dt>
+              <dd className="font-mono">
+                {summarySnapshot.fgActualKg != null
+                  ? `${summarySnapshot.fgActualKg.toFixed(2)} kg`
+                  : <span className="italic text-[var(--text-muted)]">not saved</span>}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-[var(--text-muted)]">Balanced</dt>
+              <dd>
+                {summarySnapshot.isBalanced == null ? (
+                  <span className="italic text-[var(--text-muted)]">—</span>
+                ) : summarySnapshot.isBalanced ? (
+                  <span className="text-[var(--text-success)] font-semibold">Yes</span>
+                ) : (
+                  <span className="text-[var(--aws-error)] font-semibold">No</span>
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-[var(--text-muted)]">Balance Diff</dt>
+              <dd className={`font-mono ${summarySnapshot.isBalanced === false ? "text-[var(--aws-error)] font-semibold" : ""}`}>
+                {summarySnapshot.balanceDiff != null
+                  ? `${summarySnapshot.balanceDiff.toFixed(2)} kg`
+                  : "—"}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-[var(--text-muted)]">Tolerance</dt>
+              <dd className="font-mono">{summarySnapshot.tolerancePct.toFixed(2)}%</dd>
+            </div>
+            <div className="col-span-2">
+              <dt className="text-[var(--text-muted)]">Total Loss</dt>
+              <dd className="font-mono">
+                {summarySnapshot.totalLossPct != null
+                  ? `${summarySnapshot.totalLossPct.toFixed(2)}%`
+                  : "—"}
+              </dd>
+            </div>
+          </dl>
+          {summarySnapshot.isBalanced === false ? (
+            <p className="mt-2 text-[10px] text-[var(--aws-error)]">
+              Saved accounting is unbalanced — fix before closing or the /complete gate may reject.
+            </p>
+          ) : null}
+        </div>
+
+        <div className="space-y-3">
+          <FormNumber
+            label="Produced qty (kg) *"
+            value={producedKg}
+            onChange={setProducedKg}
+            disabled={busy}
+            placeholder="0.00"
+          />
+          <FormNumber
+            label="RM consumed (kg)"
+            value={rmConsumedKg}
+            onChange={setRmConsumedKg}
+            disabled={busy}
+            placeholder="0.00"
+          />
+          {isPackingStage ? (
+            <FormNumber
+              label="Extra give-away qty"
+              value={extraGiveAway}
+              onChange={setExtraGiveAway}
+              disabled={busy}
+              placeholder="0.00"
+            />
+          ) : null}
+        </div>
+        {error ? (
+          <p className="mt-3 text-[12px] text-[var(--aws-error)]">{error}</p>
+        ) : null}
+        <div className="mt-4 flex flex-col sm:flex-row sm:justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="h-8 px-3 rounded-[2px] text-[12px] font-semibold border border-[var(--aws-border-strong)] bg-white hover:bg-[var(--surface-subtle)] disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={busy}
+            className={[
+              "h-8 px-3 rounded-[2px] text-[12px] font-bold border",
+              busy
+                ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
+                : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
+            ].join(" ")}
+          >
+            {busy ? "Closing…" : "Close Phase"}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
@@ -664,14 +1473,21 @@ function ActionBar({ detail, onReload }: { detail: JobCardDetail; onReload: () =
 // the web stubs surface an explanatory alert until those screens land.
 function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: () => void }) {
   const [open, setOpen] = useState(false);
-  const me = userStore.load();
-  const isAdmin = !!me?.is_admin;
+  // C1 (Wave 4) — switched from userStore.load() (one-shot, not reactive)
+  // to useMe() (subscribes to userStore + storage events) so the menu
+  // re-evaluates the Force-Unlock gate when /me refreshes mid-session.
+  const me = useMe();
   const status = detail.status ?? "";
 
   const editable    = status !== "completed" && status !== "closed" && status !== "cancelled";
   const cancellable = status === "locked" || status === "unlocked" || status === "assigned";
   const closeable   = status === "completed";
-  const showForceUnlock = !!detail.is_locked && isAdmin;
+  // C3-H1 + H2 — use the shared util so the menu agrees with the LockBanner
+  // CTA on who's allowed to force-unlock (admin / floor_manager /
+  // plant_manager / inventory_manager). Previously this gated on `is_admin`
+  // alone, so plant/floor/inventory managers saw the banner CTA but the
+  // menu item was hidden — a confusing dead end.
+  const showForceUnlock = !!detail.is_locked && userMayForceUnlock(me);
 
   const items: { label: string; enabled: boolean; onClick: () => void }[] = [];
   items.push({
@@ -726,16 +1542,10 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
     void callApi("PUT", `/api/v1/production/job-cards-v2/${detail.job_card_id}/close`, undefined, "Job card closed.");
   }
   function forceUnlockJc() {
-    const authority = window.prompt("Force unlock — authority (e.g. plant manager name):", me?.full_name ?? "");
-    if (authority == null || !authority.trim()) return;
-    const reason = window.prompt("Force unlock — reason:");
-    if (reason == null || !reason.trim()) return;
-    void callApi(
-      "PUT",
-      `/api/v1/production/job-cards-v2/${detail.job_card_id}/force-unlock`,
-      { authority: authority.trim(), reason: reason.trim() },
-      "Job card force-unlocked.",
-    );
+    // Delegates to the module-scope shared runner so the LockBanner CTA
+    // hits the SAME prompts + RPC path — no behavioural drift between the
+    // two entry points (C3-H1 + H2).
+    void runForceUnlockJc(detail.job_card_id, me?.full_name ?? "", onReload);
   }
   function cancelJc() {
     const reason = window.prompt("Cancel Job Card — reason:");
@@ -929,17 +1739,22 @@ function TabPanel({
     case "quality":    return <QualityTab detail={detail} onReload={onReload} />;
     case "signoffs":   return <SignOffsTab detail={detail} onReload={onReload} />;
     case "remarks":    return <RemarksTab detail={detail} onReload={onReload} />;
+    case "amendments": return <AmendmentsTab jcId={detail.job_card_id} />;
   }
 }
 
 // ── Read-only tabs ────────────────────────────────────────────────────────
 
 function Panel({ children, title, action }: { children: React.ReactNode; title?: string; action?: React.ReactNode }) {
+  // Padding scales with viewport so mobile doesn't waste ~40 % of width
+  // on chrome; overflow-x-hidden is the no-horizontal-scroll guarantee
+  // — any rogue inner grid that overflows gets clipped instead of
+  // forcing the page to scroll sideways.
   return (
-    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-5 mb-4">
+    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-3 sm:p-4 lg:p-5 mb-4 overflow-x-hidden">
       {title || action ? (
-        <div className="flex items-center justify-between mb-3">
-          {title ? <h3 className="text-[12px] uppercase tracking-wide font-semibold text-[var(--text-secondary)]">{title}</h3> : <span />}
+        <div className="flex items-center justify-between mb-3 gap-2">
+          {title ? <h3 className="text-[12px] uppercase tracking-wide font-semibold text-[var(--text-secondary)] truncate">{title}</h3> : <span />}
           {action ?? null}
         </div>
       ) : null}
@@ -948,7 +1763,11 @@ function Panel({ children, title, action }: { children: React.ReactNode; title?:
   );
 }
 
-function KV({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
+function KV({ label, value, mono }: { label: React.ReactNode; value: React.ReactNode; mono?: boolean }) {
+  // label accepts ReactNode so callers can render multi-line labels
+  // (e.g. "Process Loss" with a smaller "incl. wastage" subline) without
+  // truncating critical context. The `truncate` on the value keeps
+  // overlong numeric strings from forcing horizontal scroll on mobile.
   return (
     <div className="min-w-0">
       <div className="uppercase tracking-wide font-semibold text-[var(--text-muted)] text-[10px]">{label}</div>
@@ -1179,6 +1998,9 @@ function RemarksTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
   const [content, setContent] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
+  // C3: lock gate. /remarks 409s when JC is locked — disable inputs + submit.
+  const lock = useLockState(detail);
+  const inputsDisabled = submitting || lock.isLocked;
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -1213,21 +2035,35 @@ function RemarksTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           <RowTable
             rows={rows}
             columns={[
-              { key: "recorded_at",  label: "When", render: (v) => fmtDateTime(String(v ?? "")) },
-              { key: "remark_type",  label: "Type", render: (v) => String(v ?? "").replace(/_/g, " ") },
+              { key: "recorded_at",  label: "When", render: (v) => fmtDateTime(String(v ?? "")), hideBelow: "sm" },
+              { key: "remark_type",  label: "Type", render: (v) => String(v ?? "").replace(/_/g, " "), hideBelow: "sm" },
               { key: "content",      label: "Content" },
-              { key: "recorded_by",  label: "By" },
+              { key: "recorded_by",  label: "By", hideBelow: "md" },
             ]}
           />
         )}
       </Panel>
       <Panel title="Add remark">
+        <LockBanner
+          isLocked={lock.isLocked}
+          lockedReason={lock.lockedReason}
+          status={lock.status}
+          jcId={detail.job_card_id}
+          // C3-H1 — clicking the banner CTA runs the same prompts +
+          // PUT /force-unlock the page-header OverflowMenu uses.
+          onForceUnlockClick={() => void runForceUnlockJc(
+            detail.job_card_id,
+            userStore.load()?.full_name ?? "",
+            onReload,
+          )}
+        />
         <form onSubmit={onSubmit}>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-            <FormSelect label="Type" value={remarkType} onChange={setRemarkType} disabled={submitting} options={REMARK_TYPES} />
+            <FormSelect label="Type" value={remarkType} onChange={setRemarkType} disabled={inputsDisabled} options={REMARK_TYPES} />
           </div>
-          <FormText label="Content" value={content} onChange={setContent} disabled={submitting} />
-          <FormFooter feedback={feedback} submitting={submitting} submitLabel="Add remark" />
+          <FormText label="Content" value={content} onChange={setContent} disabled={inputsDisabled} />
+          {/* C3-MED-6 — disable Save when lock OR submit is in flight. */}
+          <FormFooter feedback={feedback} submitting={submitting} submitLabel="Add remark" disabled={inputsDisabled} />
         </form>
       </Panel>
     </>
@@ -1243,20 +2079,35 @@ const SIGNOFF_ROLE = "production_head";
 
 function SignOffsTab({ detail, onReload }: { detail: JobCardDetail; onReload: () => void }) {
   const rows = detail.sign_offs ?? [];
-  const headEntry = rows.find((r) => {
+  // W3-MED-4 — sort the production-head candidates by signed_at DESC,
+  // secondary by sign_off_id, before picking the head row. Same rationale
+  // as qcSignOff in QualityTab: a re-signed JC otherwise surfaced the OLD
+  // signature.
+  const headCandidates = rows.filter((r) => {
     const role = String(r["role"] ?? "");
     // Match the canonical role first, then the legacy slot names that some
     // older JCs were signed under (production_manager / warehouse_incharge),
     // mirroring Section6Signoffs.getProductionHead on Android.
     return role === SIGNOFF_ROLE || role === "production_manager" || role === "warehouse_incharge";
   });
+  const headSorted = [...headCandidates].sort((a, b) => {
+    const at = String(a["signed_at"] ?? "");
+    const bt = String(b["signed_at"] ?? "");
+    if (at !== bt) return at < bt ? 1 : -1;
+    const aid = Number(a["sign_off_id"] ?? 0);
+    const bid = Number(b["sign_off_id"] ?? 0);
+    return bid - aid;
+  });
+  const headEntry = headSorted[0];
   const signedBy = headEntry ? String(headEntry["signed_by"] ?? "") : "";
   const signedAt = headEntry ? String(headEntry["signed_at"] ?? "") : "";
   const isSigned = !!signedBy.trim();
   const status = detail.status ?? "";
   const canSign = status === "completed";
 
-  const me = userStore.load();
+  // C1 (Wave 4) — useMe() so the cached name re-renders the form when
+  // /me refreshes (admin renamed the operator, etc.).
+  const me = useMe();
   const defaultName = me?.full_name?.trim() ?? "";
 
   const [submitting, setSubmitting] = useState(false);
@@ -1323,19 +2174,18 @@ function SignOffsTab({ detail, onReload }: { detail: JobCardDetail; onReload: ()
               )}
             </div>
             {!isSigned ? (
-              <button
-                type="button"
+              // C10 (Wave 4) — Sign-off via ActionButton. canSign already
+              // encodes status === "completed"; we keep that as the
+              // disabled gate so the button stays visible (but inert) when
+              // production hasn't completed yet.
+              <ActionButton
+                busy={submitting}
+                busyLabel="Signing…"
+                disabled={!canSign}
                 onClick={promptAndSign}
-                disabled={!canSign || submitting}
-                className={[
-                  "h-8 px-3 rounded-[2px] text-[12px] font-semibold border",
-                  !canSign || submitting
-                    ? "bg-[var(--surface-disabled)] border-[var(--aws-border)] text-[var(--text-disabled)] cursor-not-allowed"
-                    : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
-                ].join(" ")}
               >
-                {submitting ? "Signing…" : "Sign"}
-              </button>
+                Sign
+              </ActionButton>
             ) : null}
           </div>
         </div>
@@ -1353,8 +2203,8 @@ function SignOffsTab({ detail, onReload }: { detail: JobCardDetail; onReload: ()
             columns={[
               { key: "role",      label: "Role" },
               { key: "signed_by", label: "Signed by" },
-              { key: "signed_at", label: "Signed at", render: (v) => fmtDateTime(String(v ?? "")) },
-              { key: "notes",     label: "Notes" },
+              { key: "signed_at", label: "Signed at", render: (v) => fmtDateTime(String(v ?? "")), hideBelow: "sm" },
+              { key: "notes",     label: "Notes", hideBelow: "md" },
             ]}
           />
         </Panel>
@@ -1382,9 +2232,14 @@ function SignOffsTab({ detail, onReload }: { detail: JobCardDetail; onReload: ()
 //    Card 3 (Accounting Summary) — read-only reconciliation.
 // ═════════════════════════════════════════════════════════════════════════════
 
-type RejectionRow = { category: string; bomLineId: number | null; materialName: string; qty: string; remarks: string };
-
 function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: () => void }) {
+  // C3: lock gate. When isLocked, every operational input + the SAVE OUTPUT
+  // button below take `disabled = submitting || lock.isLocked`. The save
+  // path remains untouched — if a stale form is somehow submitted, the
+  // server still 409s and we surface the message via the existing feedback
+  // pipeline.
+  const lock = useLockState(detail);
+
   // ── Catalogue: every RM+PM article on the BOM. Primary source is the
   // backend's bom_lines (surfaced on every stage); fallback is the per-JC
   // indent rows (rm_indents + pm_indents) — same fallback the Java code
@@ -1396,7 +2251,12 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
         return bom.map((b) => ({
           bom_line_id: b.bom_line_id,
           material_sku_name: b.material_sku_name,
-          item_type: b.item_type || "RM",
+          // W3-CRIT-1 — normalise to canonical UPPERCASE so the EGA-RM
+          // filter (rmArticles) and the rm/pm consumption split below
+          // both agree. A lowercase 'pm' from the backend used to fall
+          // through the `=== 'PM'` test and silently route into
+          // rm_consumed, corrupting the variance / cost split.
+          item_type: (b.item_type || "RM").toUpperCase(),
           uom: b.uom || "kg",
         }));
       }
@@ -1420,30 +2280,162 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
   const [fgActualKg,    setFgActualKg]    = useState(fgKgFromServer);
   const [processLoss,   setProcessLoss]   = useState(lossFromServer);
 
-  // Re-sync on detail reload. Matches Android: every detail observer fire
-  // re-prefills the EditTexts. Deferred past the effect body so the
-  // react-hooks/set-state-in-effect rule doesn't fire on the cascading
-  // setStates.
+  // formDirty guards the auto-poll / focus-refetch path: the page-level
+  // window-focus listener + 60s visibility poll re-fetch the JC detail
+  // for fresh lock-state. Each fetch rebuilds the *FromServer memos
+  // below, which previously fired the resync effects and clobbered any
+  // input the operator was mid-typing. The dirty flag lets us skip the
+  // form-state portion of the resync while still letting the rest of
+  // the page (lock banner, status badges, sign-offs, header KVs) update.
+  //
+  // useRef instead of useState — we don't want re-renders, we want a
+  // read-during-effect sentinel. Cleared at the END of every successful
+  // save handler, just before onReload() fires.
+  const formDirty = useRef(false);
+  const markDirty = useCallback(() => { formDirty.current = true; }, []);
+
+  // Re-sync on detail reload. Skipped when the operator has unsaved
+  // input (formDirty.current === true) so an auto-poll doesn't wipe the
+  // form mid-entry. Save handlers reset formDirty before reload, so a
+  // post-save reload resyncs cleanly.
   useEffect(() => {
+    if (formDirty.current) return;
     queueMicrotask(() => {
       setFgActualKg(fgKgFromServer);
       setFgActualUnits(fgUnitsFromServer);
       setProcessLoss(lossFromServer);
     });
   }, [fgKgFromServer, fgUnitsFromServer, lossFromServer]);
-  const [extraGiveawayBom,  setExtraGiveawayBom]  = useState("");
-  const [extraGiveawayQty,  setExtraGiveawayQty]  = useState("");
 
-  // One consumption qty per BOM article. Empty string ⇒ not recorded;
-  // 0 is a valid explicit zero. (Backend skips zero/empty on save.)
-  const [consumption, setConsumption] = useState<Record<string, string>>({});
-  // One balance qty per BOM article. Defaults to 0 on save when blank —
-  // the operator's explicit ask per the Android comment.
-  const [balance, setBalance] = useState<Record<string, string>>({});
-  const [rejections, setRejections] = useState<RejectionRow[]>([]);
+  // EGA hydration. Prefer the accounting aggregate (single source of
+  // truth for the summed value); fall back to the consolidated row in
+  // balance_materials (material_name='CONSOLIDATED', balance_type=
+  // 'extra_given') for JCs saved before /accounting was refetched, or
+  // when /accounting is absent on older payloads.
+  const egaFromServer = useMemo(() => {
+    const fromAcct = detail.accounting?.extra_give_away_qty;
+    if (fromAcct != null && fromAcct !== "" && Number(fromAcct) > 0) {
+      return String(fromAcct);
+    }
+    const fromBal = (detail.balance_materials ?? []).find(
+      (b) => b.balance_type === "extra_given",
+    );
+    if (fromBal && fromBal.qty_kg != null && Number(fromBal.qty_kg) > 0) {
+      return String(fromBal.qty_kg);
+    }
+    return "";
+  }, [detail.accounting?.extra_give_away_qty, detail.balance_materials]);
+  const [extraGiveawayQty, setExtraGiveawayQty] = useState(egaFromServer);
+  useEffect(() => {
+    if (formDirty.current) return;
+    queueMicrotask(() => {
+      setExtraGiveawayQty(egaFromServer);
+    });
+  }, [egaFromServer]);
+
+  // Per-line inputs re-hydrated from the saved detail, the same way the scalar
+  // FG fields above are. Without this, a successful save followed by onReload()
+  // left these inputs blank even though the values persisted — the operator
+  // saw their Material Consumption / Balance / Rejection entries vanish on the
+  // refresh. Derived with useMemo so the re-sync effect below only fires when
+  // the server data actually changes (a fresh detail fetch), not per keystroke.
+  // One consumption qty per BOM article (actual_consumed_qty); empty ⇒ not
+  // recorded. One balance qty per BOM article (returned rows; defaults to 0 on
+  // save when blank). Rejection rows = off-grade byproducts + control_sample.
+  const consumptionFromServer = useMemo(
+    () => consumptionStateFromDetail(detail.consumption_lines),
+    [detail.consumption_lines],
+  );
+  // C3-MED-7 — track which keys have a saved consumption row on the
+  // server so the VarianceChip can stay quiet when the operator has
+  // typed nothing AND nothing's persisted yet (avoids the "BOM X kg ·
+  // actual —" hint screaming on a fresh JC that hasn't started).
+  const hasSavedConsumptionByKey = useMemo<Record<string, boolean>>(() => {
+    const out: Record<string, boolean> = {};
+    for (const k of Object.keys(consumptionFromServer)) {
+      out[k] = consumptionFromServer[k]?.trim() !== "";
+    }
+    return out;
+  }, [consumptionFromServer]);
+  const balanceFromServer = useMemo(
+    () => balanceStateFromDetail(detail.balance_materials),
+    [detail.balance_materials],
+  );
+  const rejectionsFromServer = useMemo(
+    () => rejectionsFromDetail(detail.byproducts, detail.balance_materials),
+    [detail.byproducts, detail.balance_materials],
+  );
+
+  const [consumption, setConsumption] = useState<Record<string, string>>(consumptionFromServer);
+  const [balance, setBalance] = useState<Record<string, string>>(balanceFromServer);
+  // Operator-stated: keep an empty Off-Grade row visible by default so
+  // the operator doesn't have to click "+ Add another" to start entering
+  // a single off-grade record. If server-side rows exist, use those;
+  // otherwise seed one blank row.
+  const [rejections, setRejections] = useState<RejectionRow[]>(
+    rejectionsFromServer.length > 0 ? rejectionsFromServer : [BLANK_REJECTION_ROW()],
+  );
+
+  // R10/C6 — dedicated QC Sample input. Wire value is always kg; the
+  // displayUnit toggle is state-only and flips between kg ↔ g for the
+  // input field. Saved as a byproducts row category='control_sample' on
+  // submit (matches the backend save path unchanged).
+  const controlSampleFromServer = useMemo(
+    () => controlSampleFromDetail(detail.byproducts, detail.balance_materials),
+    [detail.byproducts, detail.balance_materials],
+  );
+  const [controlSampleKg, setControlSampleKg] = useState<string>(controlSampleFromServer);
+  const [qcSampleDisplayUnit, setQcSampleDisplayUnit] = useState<"kg" | "g">("kg");
+
+  // R11/C7 — PM Variance categories (pm_torn etc.). Each maps to a
+  // byproducts row with category=pm_* and uom=<chosen pcs uom>. Filtered
+  // out of the generic rejections list by rejectionsFromDetail.
+  const pmVarianceFromServer = useMemo(
+    () => pmVarianceFromDetail(detail.byproducts, "PCS"),
+    [detail.byproducts],
+  );
+  const [pmVariance, setPmVariance] = useState<PmVarianceState>(pmVarianceFromServer);
+
+  // Re-sync on detail reload. Deferred past the effect body so the
+  // react-hooks/set-state-in-effect rule doesn't fire on the cascading
+  // setStates (matches the FG-field effect above).
+  useEffect(() => {
+    // Same dirty-guard as the FG state effect above — skip the resync
+    // when the operator is mid-entry so the auto-poll doesn't wipe
+    // typed-but-unsaved consumption / off-grade / control-sample / PM
+    // variance values.
+    if (formDirty.current) return;
+    queueMicrotask(() => {
+      setConsumption(consumptionFromServer);
+      setBalance(balanceFromServer);
+      // Keep the default-blank-row behaviour on reload too — if the
+      // server has nothing for off-grade, surface a single empty row.
+      setRejections(
+        rejectionsFromServer.length > 0
+          ? rejectionsFromServer
+          : [BLANK_REJECTION_ROW()],
+      );
+      setControlSampleKg(controlSampleFromServer);
+      setPmVariance(pmVarianceFromServer);
+    });
+  }, [
+    consumptionFromServer, balanceFromServer, rejectionsFromServer,
+    controlSampleFromServer, pmVarianceFromServer,
+  ]);
 
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
+  // C3-H3 — server-canonical R9 row, populated after a successful save by
+  // re-fetching GET /accounting. Preferred over detail.accounting (which
+  // comes from the broader JC detail payload) when present because it
+  // reflects post-save server math without waiting for the page-level
+  // refetch to round-trip. Reset whenever the JC payload changes so a
+  // navigation between JCs doesn't carry stale numbers across.
+  const [serverAccounting, setServerAccounting] = useState<NonNullable<JobCardDetail["accounting"]> | null>(null);
+  useEffect(() => {
+    queueMicrotask(() => setServerAccounting(null));
+  }, [detail.job_card_id]);
+  const effectiveAccounting = serverAccounting ?? detail.accounting ?? null;
 
   // Helpers ─────────────────────────────────────────────────────────────────
   const expectedUnits = detail.section_1_product?.expected_units ?? null;
@@ -1456,8 +2448,69 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
     return (detail.rm_indents ?? []).reduce((acc, r) => acc + num(String(r.issued_qty ?? 0)), 0);
   }, [detail.rm_indents]);
 
+  // Per-BOM-line prescribed qty for the variance chip (qty only — no
+  // cost). Mirrors the server computation in
+  // server_replica/app/modules/production/services/jc_accounting_v2.py
+  // (resolve_bom_multiplier + multiplier × quantity_per_unit).
+  //
+  // Multiplier source: FG ACTUAL output (live as the operator types),
+  // falling back to FG planned/expected when no actual is entered yet.
+  // Variance is meaningful against the qty you ACTUALLY produced — "for
+  // that output, BOM says you should have used X, you used Y".
+  //
+  // Units-vs-kg basis: all_sku.uom is the per-unit kg of the FG SKU.
+  // When uom != 1.000 (per-piece SKU, e.g. 500 gm pouch with uom = 0.5),
+  // bom_line.quantity_per_unit is interpreted as 'per FG unit' and the
+  // multiplier is FG units. When uom == 1.000 (1 piece = 1 kg) or uom is
+  // missing, units and kg are numerically equal, so either yields the
+  // same prescribed qty; we use kg as the back-compat default.
+  const bomPrescribedByKey = useMemo<Record<string, number | null>>(() => {
+    const out: Record<string, number | null> = {};
+    const skuUom = netWtPerUnit != null ? Number(netWtPerUnit) : null;
+    const plannedKg = num(String(detail.planned_qty_kg ?? 0));
+    const plannedUnits =
+      expectedUnits != null
+        ? Number(expectedUnits)
+        : skuUom != null && skuUom > 0
+        ? plannedKg / skuUom
+        : null;
+    // Prefer actual FG output when the operator has entered/saved any;
+    // fall back to planned when fresh.
+    const actualKg    = num(fgActualKg);
+    const actualUnits = num(fgActualUnits);
+    const effKg    = actualKg    > 0 ? actualKg    : plannedKg;
+    const effUnits = actualUnits > 0 ? actualUnits : plannedUnits;
+    // uom != 1 AND we have a units value → per-FG-unit basis. Else fall
+    // back to per-kg-of-FG basis.
+    const usesUnits =
+      skuUom != null
+      && skuUom > 0
+      && Math.abs(skuUom - 1.0) > 1e-9
+      && effUnits != null
+      && effUnits > 0;
+    const multiplier = usesUnits ? (effUnits as number) : effKg;
+    for (const bl of detail.bom_lines ?? []) {
+      const key = bl.bom_line_id != null ? `b${bl.bom_line_id}` : `n${bl.material_sku_name}`;
+      const qpu = bl.quantity_per_unit != null ? Number(bl.quantity_per_unit) : null;
+      if (qpu == null || !Number.isFinite(qpu) || multiplier <= 0) {
+        out[key] = null;
+        continue;
+      }
+      out[key] = qpu * multiplier;
+    }
+    return out;
+  }, [
+    detail.bom_lines,
+    detail.planned_qty_kg,
+    netWtPerUnit,
+    expectedUnits,
+    fgActualKg,
+    fgActualUnits,
+  ]);
+
   // Auto-fill kg when the operator enters units (Android: autoCalcFgActualKg).
   function onChangeUnits(v: string) {
+    markDirty();
     setFgActualUnits(v);
     if (netWtPerUnit && netWtPerUnit > 0) {
       const u = parseInt(v, 10);
@@ -1465,38 +2518,228 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
     }
   }
 
+  // Operator-stated: Process Loss % should read off FG Actual Kg, not
+  // rm_issued + carried_in. The previous total-input denominator went to
+  // "—" whenever the JC had no RM indent (common when testing), which the
+  // operator read as "the field isn't calculating". Anchoring on the FG
+  // output gives a meaningful loss % the moment the operator records FG
+  // qty, regardless of upstream indent state.
   const processLossPct = useMemo(() => {
     const pl = num(processLoss);
-    if (rmIssuedKg <= 0 || !pl) return null;
-    return (pl / rmIssuedKg) * 100;
-  }, [processLoss, rmIssuedKg]);
+    const fgKg = num(fgActualKg);
+    if (fgKg <= 0 || !pl) return null;
+    return (pl / fgKg) * 100;
+  }, [processLoss, fgActualKg]);
 
   // Accounting Summary computed totals ─────────────────────────────────────
-  const summary = useMemo(() => {
-    const rejTotal = rejections.reduce((acc, r) => acc + (r.category !== "control_sample" ? num(r.qty) : 0), 0);
-    const ctrlSample = rejections.reduce((acc, r) => acc + (r.category === "control_sample" ? num(r.qty) : 0), 0);
-    const balTotal = Object.values(balance).reduce((acc, v) => acc + num(v), 0);
-    const offgradeTotal = rejTotal; // off-grade = sum of non-control_sample rejections
-    const fgOutKg = num(fgActualKg);
-    const lossKg  = num(processLoss);
-    const totalAccounted = fgOutKg + lossKg + balTotal + offgradeTotal + ctrlSample;
-    const balanceDiff = rmIssuedKg > 0 ? rmIssuedKg - totalAccounted : null;
-    const isBalanced = balanceDiff != null ? Math.abs(balanceDiff) < BALANCE_TOLERANCE_KG : null;
-    const totalLossPct = rmIssuedKg > 0 ? ((lossKg + offgradeTotal + ctrlSample) / rmIssuedKg) * 100 : null;
-    return {
-      fgOutKg, lossKg, balTotal, offgradeTotal, ctrlSample,
-      processLossPct, totalLossPct, balanceDiff, isBalanced,
-    };
-  }, [fgActualKg, processLoss, processLossPct, balance, rejections, rmIssuedKg]);
+  // C3-H3 — rewrites the live preview to byte-for-byte match the server
+  // formulas in jc_accounting_v2.save_accounting:
+  //
+  //   total_input        = rm_issued_kg + carried_in_kg     (NOT rm alone)
+  //   process_loss_pct   = process_loss / total_input * 100
+  //   ega_loss_pct       = ega_loss / total_input * 100     (from /accounting)
+  //   invisible_loss_pct = process_loss_pct + ega_loss_pct
+  //   total_loss_pct     = (process + ega + rejection + offgrade) / total_input * 100
+  //                        (NOTE: NO wastage, NO balance, NO control_sample)
+  //
+  // Balance-tolerance also comes from the server now (C3-CRIT-2): the
+  // backend exposes accounting.allowed_balance_tolerance_pct (BOM-header
+  // setting, default 0.001 = 0.1 %). The hardcoded 0.5 % the previous
+  // implementation used was wrong by 5×. BALANCE_TOLERANCE_KG (50 g)
+  // remains the absolute floor for very small batches.
+  //
+  // Two-phase rendering:
+  //   1. Before a save, the preview reproduces these formulas locally
+  //      (operator sees a faithful estimate as they type).
+  //   2. After a save, AccountingTab refetches GET /accounting and we
+  //      prefer the server's authoritative R9 row whenever it's present
+  //      in detail.accounting.
+  const tolerancePctFromServer =
+    effectiveAccounting?.allowed_balance_tolerance_pct != null
+      ? Number(effectiveAccounting.allowed_balance_tolerance_pct)
+      : null;
+  // Server stores tolerance as a fraction (0.001 = 0.1 %). Fall back to
+  // 0.001 when the backend hasn't surfaced it yet; convert to %-units for
+  // comparison against balanceDiffPct.
+  const allowedToleranceFrac =
+    tolerancePctFromServer != null && Number.isFinite(tolerancePctFromServer)
+      ? tolerancePctFromServer
+      : 0.001;
+  const allowedTolerancePctUnits = allowedToleranceFrac * 100;
 
-  // Rejection row mutators ─────────────────────────────────────────────────
+  const carriedInKg = num(String(effectiveAccounting?.carried_in_kg ?? detail.carried_qty_kg ?? 0));
+  const egaLossPctFromServer =
+    effectiveAccounting?.ega_loss_pct != null ? num(String(effectiveAccounting.ega_loss_pct)) : 0;
+
+  const summary = useMemo(() => {
+    // R10/C6 — control_sample is no longer a rejection category; it has its
+    // own input. Wastage is still a rejection-category bucket.
+    const rejTotal = rejections.reduce(
+      (acc, r) => acc + (r.category !== "wastage" ? num(r.qty) : 0),
+      0,
+    );
+    const ctrlSample = num(controlSampleKg);
+    const wastageTotal = rejections.reduce(
+      (acc, r) => acc + (r.category === "wastage" ? num(r.qty) : 0),
+      0,
+    );
+    const balTotal = Object.values(balance).reduce((acc, v) => acc + num(v), 0);
+    const offgradeTotal = rejTotal; // off-grade = non-control, non-wastage rejections
+    const fgOutKg = num(fgActualKg);
+    const rawProcessLoss = num(processLoss);
+    // Operator-stated: wastage rolls into Process Loss as a display
+    // aggregate. Storage stays split (wastage_qty + process_loss_qty
+    // remain separate columns server-side for the conservation
+    // identity), but the summary card shows a single combined number.
+    const lossKg = rawProcessLoss + wastageTotal;
+
+    // total_input — the conservation denominator. Canonical source is
+    // (rm_issued + carried_in) per the server. But operators frequently
+    // skip the indent flow and type consumption directly into the
+    // Material Consumption grid, leaving rm_issued = 0 → the previous
+    // code surfaced "—" for Is Balanced and Balance Difference.
+    //
+    // Fallback: when canonical input is 0, sum the typed RM consumption
+    // as the stand-in. Operator-stated rule: PM rows are packaging —
+    // they don't convert into FG mass, so they MUST NOT count toward
+    // the conservation identity. Only item_type='rm' lines are summed.
+    const articleByKey = new Map<string, typeof articles[number]>();
+    for (const a of articles) {
+      const key = a.bom_line_id != null
+        ? `b${a.bom_line_id}`
+        : `n${a.material_sku_name}`;
+      articleByKey.set(key, a);
+    }
+    const isRmKey = (key: string) => {
+      const a = articleByKey.get(key);
+      // Defensive: when an article isn't found in the BOM catalog,
+      // treat as RM (older JCs may carry off-BOM rows). PM-tagged rows
+      // are the only ones explicitly excluded.
+      if (!a) return true;
+      return (a.item_type || "").toUpperCase() !== "PM";
+    };
+    const rmConsumptionTotal = Object.entries(consumption).reduce(
+      (acc, [key, v]) => acc + (isRmKey(key) ? num(v) : 0),
+      0,
+    );
+    const canonicalInput = rmIssuedKg + carriedInKg;
+    const totalInput = canonicalInput > 0 ? canonicalInput : rmConsumptionTotal;
+    const inputBasis: "indent" | "consumption" | "none" =
+      canonicalInput > 0 ? "indent" : rmConsumptionTotal > 0 ? "consumption" : "none";
+
+    // EGA — operator's typed value is the truth source while the
+    // accounting summary row remains absent (PUT /accounting/summary
+    // isn't wired into Save Output yet, so server-side ega_loss_pct is
+    // NULL on most JCs). Fall back to the server projection only when
+    // the operator hasn't typed an EGA yet.
+    const egaTypedKg = num(extraGiveawayQty);
+    const egaAbsKg =
+      egaTypedKg > 0
+        ? egaTypedKg
+        : (egaLossPctFromServer > 0 && totalInput > 0
+            ? (egaLossPctFromServer / 100) * totalInput
+            : 0);
+
+    // Conservation identity. EGA was previously missing from the
+    // output side, so a JC with EGA = 3 kg silently looked "balanced"
+    // even when the typed-but-unsaved EGA value exceeded the 0.1 %
+    // tolerance. Adding it here closes the gap. Raw process_loss +
+    // wastage still tracked separately so the math matches the server
+    // byte-for-byte; the display aggregate (`lossKg`) doesn't
+    // double-count.
+    const totalAccounted = fgOutKg + rawProcessLoss + balTotal + offgradeTotal + ctrlSample + wastageTotal + egaAbsKg;
+    const balanceDiff = totalInput > 0 ? totalInput - totalAccounted : null;
+    const balanceDiffPct = balanceDiff != null && totalInput > 0
+      ? Math.abs(balanceDiff / totalInput) * 100
+      : null;
+    const isBalanced = balanceDiff != null
+      ? Math.abs(balanceDiff) < BALANCE_TOLERANCE_KG
+        || (balanceDiffPct != null && balanceDiffPct <= allowedTolerancePctUnits)
+      : null;
+
+    // Loss percentages anchor on FG Actual Kg (operator rule).
+    // egaAbsKg above is the truth source — used by both the % strip
+    // numerators and the conservation identity, so the two are
+    // self-consistent.
+    const lossDenom = fgOutKg;
+    // lossKg already includes wastage (rolled into Process Loss above),
+    // so the loss-pct numerators just reuse it directly. Off-grade is
+    // counted ONCE in total_loss_pct (rejection / off-grade are the
+    // same operational bucket). "Other Loss" is retired entirely.
+    const pct = (n: number) => lossDenom > 0 ? (n / lossDenom) * 100 : null;
+    const localProcessLossPct = pct(lossKg);
+    const localInvisibleLossPct = lossDenom > 0
+      ? ((lossKg + egaAbsKg) / lossDenom) * 100
+      : null;
+    const localTotalLossPct = lossDenom > 0
+      ? ((lossKg + egaAbsKg + offgradeTotal) / lossDenom) * 100
+      : null;
+
+    // Prefer server-authoritative numbers when the JC payload has them
+    // (i.e. after at least one save and an /accounting refetch on the
+    // page). Falls back to the locally-computed preview otherwise.
+    const acc = effectiveAccounting;
+    const numFromServer = (k: keyof NonNullable<JobCardDetail["accounting"]>) =>
+      acc && acc[k] != null && Number.isFinite(Number(acc[k]))
+        ? Number(acc[k])
+        : null;
+
+    const processLossPctSrv   = numFromServer("process_loss_pct");
+    const invisibleLossPctSrv = numFromServer("invisible_loss_pct");
+    const totalLossPctSrv     = numFromServer("total_loss_pct");
+    const egaLossPctSrv       = numFromServer("ega_loss_pct");
+    // other_loss_pct + rejection_pct retired per operator policy
+    // (server still emits them as NULL for back-compat; no longer read).
+    const offgradePctSrv      = numFromServer("offgrade_pct");
+    const balanceDiffSrv      = numFromServer("balance_diff_kg");
+    const balanceDiffPctSrv   = numFromServer("balance_diff_pct");
+    const isBalancedSrv       = acc?.is_balanced;
+
+    // EGA Loss % anchored on FG output, matching the other loss pcts.
+    // Server emits ega_loss_pct rooted in total_input; we prefer the
+    // server value when present, otherwise reconstruct on FG-output
+    // basis like the rest of the local preview.
+    const localEgaLossPct = lossDenom > 0 && egaAbsKg > 0
+      ? (egaAbsKg / lossDenom) * 100
+      : null;
+
+    return {
+      // RM consumed surfaces operator's typed RM total (excludes PM) —
+      // used by the qty strip "RM Consumed" KV and as the conservation
+      // input when the canonical indent flow was skipped.
+      rmConsumedKg: canonicalInput > 0 ? canonicalInput : rmConsumptionTotal,
+      fgOutKg, lossKg, balTotal, offgradeTotal, ctrlSample,
+      // R9 percentages — server-authoritative when available, live preview otherwise.
+      processLossPct:   processLossPctSrv   ?? localProcessLossPct,
+      egaLossPct:       egaLossPctSrv       ?? localEgaLossPct,
+      invisibleLossPct: invisibleLossPctSrv ?? localInvisibleLossPct,
+      totalLossPct:     totalLossPctSrv     ?? localTotalLossPct,
+      offgradePct:      offgradePctSrv      ?? pct(offgradeTotal),
+      balanceDiff:      balanceDiffSrv      ?? balanceDiff,
+      balanceDiffPct:   balanceDiffPctSrv   ?? balanceDiffPct,
+      isBalanced:       typeof isBalancedSrv === "boolean" ? isBalancedSrv : isBalanced,
+      tolerancePct:     allowedTolerancePctUnits,
+      inputBasis,
+    };
+  }, [
+    fgActualKg, processLoss, balance, rejections, controlSampleKg, rmIssuedKg,
+    carriedInKg, egaLossPctFromServer, allowedTolerancePctUnits, effectiveAccounting,
+    consumption, extraGiveawayQty,
+  ]);
+
+  // Off-Grade row mutators ─────────────────────────────────────────────────
+  // All three mark the form dirty so the auto-poll guard above skips
+  // resync until the operator saves.
   function addRejection() {
-    setRejections((rs) => [...rs, { category: "", bomLineId: null, materialName: "", qty: "", remarks: "" }]);
+    markDirty();
+    setRejections((rs) => [...rs, BLANK_REJECTION_ROW()]);
   }
   function updateRejection(i: number, patch: Partial<RejectionRow>) {
+    markDirty();
     setRejections((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   }
   function removeRejection(i: number) {
+    markDirty();
     setRejections((rs) => rs.filter((_, j) => j !== i));
   }
 
@@ -1533,19 +2776,77 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
     body.rm_consumed = rmCons;
     body.pm_consumed = pmCons;
 
-    // Rejections → split: control_sample reroutes to balance_materials,
-    // others go to byproducts. Same routing as Android.
+    // Rejections → byproducts. R10/C6: control_sample is no longer carried
+    // here; it's recorded via the dedicated QC Sample input and pushed below
+    // as a single byproducts row category='control_sample'. R11/C7: pm_*
+    // categories aren't in this list either — they ship from `pmVariance`.
+    //
+    // W3-MED-8 — wire-field note: the byproducts row's quantity field is
+    // ALWAYS `qty_kg` on the wire, regardless of the row's UoM (which can
+    // be 'kg', 'PCS', 'NOS', 'ROLL', 'SETS', 'BUNDLE'). The name is a
+    // historical artefact (the table originally only held kg-denominated
+    // wastage/control_sample rows). The server stores the raw quantity
+    // and treats `uom` as the unit; it does NOT convert via density or
+    // pack size. Do not rename this field client-side — the server
+    // schema is what callers must match.
     const byproducts: Array<Record<string, unknown>> = [];
     const balanceMaterials: Array<Record<string, unknown>> = [];
     for (const r of rejections) {
       const q = num(r.qty);
       if (!r.category || q <= 0) continue;
-      if (r.category === "control_sample") {
-        balanceMaterials.push({ bom_line_id: r.bomLineId, balance_type: "control_sample", material_name: r.materialName || "Unknown", qty_kg: q, remarks: r.remarks || null });
-      } else {
-        byproducts.push({ category: r.category, qty_kg: q, remarks: r.remarks || null });
+      // Migration 034 — persist the article picked in the dropdown so
+      // the row round-trips on reload. material_name is what the unique
+      // index keys off (NULL collapsed to ''); bom_line_id is the FK
+      // when available. Both nullable: a rejection without a chosen
+      // article still saves cleanly.
+      byproducts.push({
+        category:      r.category,
+        qty_kg:        q,
+        remarks:       r.remarks || null,
+        material_name: r.materialName || null,
+        bom_line_id:   r.bomLineId ?? null,
+      });
+    }
+
+    // R10/C6 — control sample byproduct row. Submitted only when > 0; a 0
+    // input clears the previous row (server replace-style write).
+    //
+    // W3-CRIT-2 — additionally, if the operator CLEARED a previously-saved
+    // control_sample (server had a value, the input now reads empty or 0),
+    // emit an explicit zero row so save_byproducts upserts qty_kg=0 instead
+    // of leaving the stale row on the server. The previous code only
+    // pushed a row when > 0, so a clear was silently dropped.
+    const ctrlSampleKg = num(controlSampleKg);
+    const prevCtrlKg = num(controlSampleFromServer);
+    if (ctrlSampleKg > 0) {
+      byproducts.push({ category: "control_sample", qty_kg: ctrlSampleKg, uom: "kg", remarks: null });
+    } else if (prevCtrlKg > 0) {
+      byproducts.push({ category: "control_sample", qty_kg: 0, uom: "kg", remarks: null });
+    }
+
+    // R11/C7 — PM variance rows. Each pm_* category becomes a byproducts row
+    // tagged with the chosen pcs UoM. Only emitted on packing stages.
+    //
+    // W3-CRIT-2 — same clear-semantics as control_sample: if a pm_* row had
+    // a prior saved value and the operator has cleared it (qty <= 0), emit
+    // qty_kg=0 so save_byproducts upserts the zero instead of orphaning the
+    // server row. Without this the row stays on the JC forever once typed.
+    const isPackingStage = isPackingStageJc(detail.stage);
+    if (isPackingStage) {
+      for (const cat of PM_VARIANCE_CATEGORIES) {
+        const row = pmVariance[cat.key];
+        const q = row ? num(row.qty) : 0;
+        const prevRow = pmVarianceFromServer[cat.key];
+        const prevQ = prevRow ? num(prevRow.qty) : 0;
+        const uom = row?.uom || prevRow?.uom || "PCS";
+        if (q > 0) {
+          byproducts.push({ category: cat.key, qty_kg: q, uom, remarks: null });
+        } else if (prevQ > 0) {
+          byproducts.push({ category: cat.key, qty_kg: 0, uom, remarks: null });
+        }
       }
     }
+
     body.byproducts = byproducts;
 
     // Balance materials: one entry per BOM article (empty → 0), balance_type="returned".
@@ -1555,13 +2856,24 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
       balanceMaterials.push({ bom_line_id: a.bom_line_id, balance_type: "returned", material_name: a.material_sku_name, qty_kg: v, remarks: null });
     }
 
-    // Extra giveaway (final stage only)
-    const isFinalStage = isFinalStageJc(detail);
-    if (isFinalStage) {
+    // Extra giveaway (EGA) — R11/C7: packing stages only. Mirrors the
+    // backend's is_packing_stage gate at job_card_v2.py:107.
+    //
+    // Per-article attribution is unknowable post-run, so EGA submits a
+    // single consolidated row with the sentinel material_name the server
+    // recognises (job_card_v2.EGA_CONSOLIDATED_SENTINEL). bom_line_id
+    // stays null. The packing-stage gate is the only check the server
+    // runs for this row; the per-material item_type gate is skipped.
+    if (isPackingStage) {
       const extraKg = num(extraGiveawayQty);
       if (extraKg > 0) {
-        const a = articles.find((x) => (x.bom_line_id != null ? `b${x.bom_line_id}` : `n${x.material_sku_name}`) === extraGiveawayBom);
-        balanceMaterials.push({ bom_line_id: a?.bom_line_id ?? null, balance_type: "extra_given", material_name: a?.material_sku_name ?? "Unknown", qty_kg: extraKg, remarks: null });
+        balanceMaterials.push({
+          bom_line_id: null,
+          balance_type: "extra_given",
+          material_name: "CONSOLIDATED",
+          qty_kg: extraKg,
+          remarks: null,
+        });
       }
     }
     // `balance_materials` is a first-class field on the v2 outputs endpoint
@@ -1585,6 +2897,29 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
         throw new Error(String(msg));
       }
       setFeedback({ kind: "ok", msg: "Output saved." });
+      // C3-H3 — re-fetch GET /accounting so the SummaryCard renders the
+      // server-canonical R9 row (process / invisible / total / other loss
+      // pct etc.) instead of leaving the live preview as the source of
+      // truth. Folded into local state — onReload() also fires below to
+      // refresh the rest of the JC payload (consumption lines, balance
+      // materials, etc.). If the /accounting fetch fails (e.g. backend
+      // hasn't shipped the endpoint yet on this env) we swallow silently
+      // and let the live preview keep rendering.
+      try {
+        const accRes = await apiFetch(`/api/v1/production/job-cards-v2/${detail.job_card_id}/accounting`);
+        if (accRes.ok) {
+          const accJson = (await accRes.json().catch(() => null)) as
+            | NonNullable<JobCardDetail["accounting"]>
+            | null;
+          if (accJson) setServerAccounting(accJson);
+        }
+      } catch {
+        /* preview keeps rendering — non-fatal */
+      }
+      // Clear the dirty guard BEFORE onReload so the upcoming detail
+      // fetch resyncs the form state from the server (operator's edits
+      // are now persisted, the server response is canonical).
+      formDirty.current = false;
       onReload();
     } catch (err) {
       setFeedback({ kind: "err", msg: err instanceof Error ? err.message : "Failed to save output." });
@@ -1593,10 +2928,43 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
     }
   }
 
-  const isFinalStage = isFinalStageJc(detail);
+  // R11/C7 — EGA only renders on packing stages. PM Variance block also
+  // gated on packing-stage detection (PM stocks are only consumed there).
+  // EGA is now consolidated (no per-article picker), so the rmArticles
+  // memo that previously filtered for the dropdown is gone.
+  const isPackingStage = isPackingStageJc(detail.stage);
+  // C3: any operational input is disabled when locked. We compute this
+  // OR with submitting so the save-in-flight state still wins (you can't
+  // edit mid-flight either).
+  const inputsDisabled = submitting || lock.isLocked;
+  // C3-MED-1 — stable banner id for inputs to point aria-describedby at.
+  const bannerId = lockBannerId(detail.job_card_id);
+  const describedBy = inputsDisabled && lock.isLocked ? bannerId : undefined;
 
   return (
-    <form onSubmit={onSubmit}>
+    <form
+      onSubmit={onSubmit}
+      // Catch-all dirty marker — every input/select/textarea inside the
+      // form bubbles its native `input` event up here. Setting one ref
+      // covers FG fields, consumption, balance, off-grade, control
+      // sample, PM variance, EGA, process loss — no need to thread
+      // markDirty() into 20+ individual onChange handlers.
+      onInput={markDirty}
+    >
+      {/* C3 lock banner — explains why the form is read-only. Renders only
+          when `lock.isLocked`; invisible otherwise. The CTA runs the same
+          force-unlock flow as the OverflowMenu (C3-H1). */}
+      <LockBanner
+        isLocked={lock.isLocked}
+        lockedReason={lock.lockedReason}
+        status={lock.status}
+        jcId={detail.job_card_id}
+        onForceUnlockClick={() => void runForceUnlockJc(
+          detail.job_card_id,
+          userStore.load()?.full_name ?? "",
+          onReload,
+        )}
+      />
       {/* ── FG Output ───────────────────────────────────────────────────── */}
       <Panel title="FG Output">
         <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3 mb-4">
@@ -1605,8 +2973,8 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
           <KV label="RM Issued (kg)"    value={fmtKg(rmIssuedKg)} />
         </dl>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-          <FormNumber label="FG Actual Units" value={fgActualUnits} onChange={onChangeUnits} disabled={submitting} />
-          <FormNumber label="FG Actual Kg"    value={fgActualKg}    onChange={setFgActualKg}    disabled={submitting} />
+          <FormNumber label="FG Actual Units" value={fgActualUnits} onChange={onChangeUnits} disabled={inputsDisabled} />
+          <FormNumber label="FG Actual Kg"    value={fgActualKg}    onChange={setFgActualKg}    disabled={inputsDisabled} />
         </div>
 
         {/* Material Consumption — one row per BOM article */}
@@ -1619,74 +2987,140 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
               const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
               return (
                 <div key={key} className="grid grid-cols-12 gap-2 items-center">
-                  <div className="col-span-7 text-[13px] text-[var(--text-primary)] truncate" title={a.material_sku_name}>
+                  <div className="col-span-7 lg:col-span-5 text-[13px] text-[var(--text-primary)] truncate" title={a.material_sku_name}>
                     {a.material_sku_name} <span className="text-[var(--text-muted)] text-[11px]">({a.item_type})</span>
                   </div>
                   <input
                     type="number" step="any" placeholder={`Qty (${a.uom})`}
-                    className={`${inputCls} col-span-3`}
+                    className={`${inputCls} col-span-3 lg:col-span-2`}
                     value={consumption[key] ?? ""}
                     onChange={(e) => setConsumption((c) => ({ ...c, [key]: e.target.value }))}
-                    disabled={submitting}
+                    onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
+                    disabled={inputsDisabled}
+                    aria-disabled={inputsDisabled}
+                    aria-describedby={describedBy}
                   />
-                  <span className="col-span-2 text-[11px] text-[var(--text-muted)]">{a.uom}</span>
+                  <span className="col-span-2 lg:col-span-1 text-[11px] text-[var(--text-muted)]">{a.uom}</span>
+                  {/* C5: per-material variance chip — wraps to its own line
+                      on mobile (col-span-12 forces a full new row) and
+                      inlines next to the uom on lg:+ where there's room. */}
+                  <div className="col-span-12 lg:col-span-4 mt-1 lg:mt-0">
+                    <VarianceChip
+                      materialName={a.material_sku_name}
+                      bomPrescribedQty={bomPrescribedByKey[key] ?? null}
+                      actualQty={num(consumption[key] ?? "")}
+                      uom={a.uom}
+                      hasSavedConsumption={!!hasSavedConsumptionByKey[key]}
+                      plannedKg={num(String(detail.planned_qty_kg ?? 0))}
+                    />
+                  </div>
                 </div>
               );
             })}
           </div>
         )}
 
-        {/* Rejection / Off-grade — dynamic rows */}
-        <SubsectionLabel>Rejection / Off-grade</SubsectionLabel>
+        {/* Off-Grade — dynamic rows. A blank row is always seeded so the
+            operator can enter a single off-grade record without first
+            clicking "+ Add another". */}
+        <SubsectionLabel>Off-Grade</SubsectionLabel>
         {rejections.length === 0 ? (
-          <EmptyHint>No rejection entries. Click + Add another to record one.</EmptyHint>
+          <EmptyHint>No off-grade entries. Click + Add another to record one.</EmptyHint>
         ) : (
           <div className="space-y-2 mb-2">
             {rejections.map((r, i) => (
               <div key={i} className="grid grid-cols-12 gap-2 items-start">
                 <select
-                  className={`${inputCls} col-span-3`}
+                  className={`${inputCls} col-span-12 sm:col-span-3`}
                   value={r.category}
                   onChange={(e) => updateRejection(i, { category: e.target.value })}
-                  disabled={submitting}
+                  disabled={inputsDisabled}
+                  aria-disabled={inputsDisabled}
+                  aria-describedby={describedBy}
                 >
                   {REJECTION_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
-                <select
-                  className={`${inputCls} col-span-4`}
-                  value={r.bomLineId != null ? `b${r.bomLineId}` : (r.materialName ? `n${r.materialName}` : "")}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    const a = articles.find((x) => (x.bom_line_id != null ? `b${x.bom_line_id}` : `n${x.material_sku_name}`) === v);
-                    updateRejection(i, { bomLineId: a?.bom_line_id ?? null, materialName: a?.material_sku_name ?? "" });
-                  }}
-                  disabled={submitting}
-                >
-                  <option value="">— Article —</option>
-                  {articles.map((a) => {
-                    const v = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
-                    return <option key={v} value={v}>{a.material_sku_name}</option>;
-                  })}
-                </select>
+                {(() => {
+                  const selectedValue =
+                    r.bomLineId != null
+                      ? `b${r.bomLineId}`
+                      : (r.materialName ? `n${r.materialName}` : "");
+                  // Defensive: if the saved row carries an article that
+                  // no longer appears in the BOM catalog (a BOM
+                  // revision dropped it, or the row was saved on a
+                  // different BOM version), render an extra synthetic
+                  // option so the dropdown still surfaces the saved
+                  // value instead of silently falling back to
+                  // "— Article —" and losing the attribution on the
+                  // next save.
+                  const hasSelectedInCatalog =
+                    selectedValue === "" ||
+                    articles.some(
+                      (a) =>
+                        (a.bom_line_id != null
+                          ? `b${a.bom_line_id}`
+                          : `n${a.material_sku_name}`) === selectedValue,
+                    );
+                  return (
+                    <select
+                      className={`${inputCls} col-span-12 sm:col-span-4`}
+                      value={selectedValue}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        const a = articles.find(
+                          (x) =>
+                            (x.bom_line_id != null
+                              ? `b${x.bom_line_id}`
+                              : `n${x.material_sku_name}`) === v,
+                        );
+                        updateRejection(i, {
+                          bomLineId: a?.bom_line_id ?? null,
+                          materialName: a?.material_sku_name ?? "",
+                        });
+                      }}
+                      disabled={inputsDisabled}
+                      aria-disabled={inputsDisabled}
+                      aria-describedby={describedBy}
+                    >
+                      <option value="">— Article —</option>
+                      {!hasSelectedInCatalog && r.materialName ? (
+                        <option value={selectedValue}>
+                          {r.materialName} (saved — not in current BOM)
+                        </option>
+                      ) : null}
+                      {articles.map((a) => {
+                        const v = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
+                        return <option key={v} value={v}>{a.material_sku_name}</option>;
+                      })}
+                    </select>
+                  );
+                })()}
                 <input
                   type="number" step="any" placeholder="Qty (kg)"
-                  className={`${inputCls} col-span-2`}
+                  className={`${inputCls} col-span-6 sm:col-span-2`}
                   value={r.qty}
                   onChange={(e) => updateRejection(i, { qty: e.target.value })}
-                  disabled={submitting}
+                  onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
+                  disabled={inputsDisabled}
+                  aria-disabled={inputsDisabled}
+                  aria-describedby={describedBy}
                 />
                 <input
                   type="text" placeholder="Remarks"
-                  className={`${inputCls} col-span-2`}
+                  className={`${inputCls} col-span-5 sm:col-span-2`}
                   value={r.remarks}
                   onChange={(e) => updateRejection(i, { remarks: e.target.value })}
-                  disabled={submitting}
+                  disabled={inputsDisabled}
+                  aria-disabled={inputsDisabled}
+                  aria-describedby={describedBy}
                 />
                 <button
                   type="button"
                   onClick={() => removeRejection(i)}
-                  disabled={submitting}
-                  className="col-span-1 h-8 text-[12px] text-[var(--aws-error)] hover:underline"
+                  disabled={inputsDisabled}
+                  aria-disabled={inputsDisabled}
+                  aria-describedby={describedBy}
+                  className="col-span-1 h-8 text-[12px] text-[var(--aws-error)] hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
                   title="Remove row"
                 >
                   ×
@@ -1698,15 +3132,17 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
         <button
           type="button"
           onClick={addRejection}
-          disabled={submitting}
-          className="text-[12px] text-[var(--aws-link)] hover:underline mb-4"
+          disabled={inputsDisabled}
+          aria-disabled={inputsDisabled}
+          aria-describedby={describedBy}
+          className="text-[12px] text-[var(--aws-link)] hover:underline mb-4 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           + Add another
         </button>
 
         {/* Process Loss + computed % */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2">
-          <FormNumber label="Process Loss (kg)" value={processLoss} onChange={setProcessLoss} disabled={submitting} />
+          <FormNumber label="Process Loss (kg)" value={processLoss} onChange={setProcessLoss} disabled={inputsDisabled} />
           <div>
             <FormLabel>Process Loss %</FormLabel>
             <div className={`${inputCls} bg-[var(--surface-subtle)] flex items-center`}>
@@ -1715,32 +3151,96 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
           </div>
         </div>
 
-        {/* Extra Giveaway — final stage only */}
-        {isFinalStage ? (
+        {/* Extra Giveaway (EGA) — R11/C7: packing stages only.
+            Consolidated capture (operator-stated): per-RM attribution is
+            unknowable post-run, so the dropdown is removed and the qty
+            posts as a single sentinel row to the server. */}
+        {isPackingStage ? (
           <>
-            <SubsectionLabel className="mt-4">Extra Giveaway</SubsectionLabel>
+            <SubsectionLabel className="mt-4">Extra Giveaway (EGA)</SubsectionLabel>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <FormSelect
-                label="Article"
-                value={extraGiveawayBom}
-                onChange={setExtraGiveawayBom}
-                disabled={submitting}
-                options={[
-                  { value: "", label: "— Article —" },
-                  ...articles.map((a) => ({
-                    value: a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`,
-                    label: a.material_sku_name,
-                  })),
-                ]}
-              />
-              <FormNumber label="Qty (kg)" value={extraGiveawayQty} onChange={setExtraGiveawayQty} disabled={submitting} />
+              <FormNumber label="Qty (kg)" value={extraGiveawayQty} onChange={setExtraGiveawayQty} disabled={inputsDisabled} />
             </div>
+            <p className="mt-1 text-[10px] text-[var(--text-muted)] italic">
+              Consolidated across RM articles — per-material attribution isn&apos;t captured.
+            </p>
           </>
-        ) : null}
+        ) : (
+          <p className="mt-4 text-[11px] text-[var(--text-muted)] italic">
+            EGA only on packing stages.
+          </p>
+        )}
       </Panel>
 
       {/* ── Balance Material ────────────────────────────────────────────── */}
       <Panel title="Balance Material">
+        {/* R10/C6 — QC Sample subsection. Wire value is always kg; the
+            g↔kg toggle is state-only (the input displays × 1000 in g mode).
+            Persisted on save as a byproducts row category='control_sample'. */}
+        <SubsectionLabel>QC Sample</SubsectionLabel>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+          <div>
+            <FormLabel>Control Sample ({qcSampleDisplayUnit})</FormLabel>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                step="any"
+                placeholder="0"
+                className={inputCls}
+                value={
+                  // Display raw typed value in kg mode (the source of
+                  // truth IS kg). Reformatting on every keystroke broke
+                  // entry of values like 0.5 — toFixed(3) jumped to 0.500
+                  // mid-typing and stranded the cursor. In g mode we still
+                  // show integer grams (state is held as kg, so multiply
+                  // by 1000 and round to integer for display).
+                  //
+                  // Round-trip integrity is preserved by parseFloat in
+                  // onChange; we never persist the formatted view.
+                  controlSampleKg === ""
+                    ? ""
+                    : qcSampleDisplayUnit === "kg"
+                      ? controlSampleKg
+                      : String(Math.round(num(controlSampleKg) * 1000))
+                }
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v.trim() === "") {
+                    setControlSampleKg("");
+                    return;
+                  }
+                  const n = parseFloat(v);
+                  if (!Number.isFinite(n)) return;
+                  setControlSampleKg(
+                    qcSampleDisplayUnit === "kg" ? v : String(n / 1000),
+                  );
+                }}
+                onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
+                disabled={inputsDisabled}
+                aria-disabled={inputsDisabled}
+                aria-describedby={describedBy}
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  setQcSampleDisplayUnit((u) => (u === "kg" ? "g" : "kg"))
+                }
+                disabled={inputsDisabled}
+                aria-disabled={inputsDisabled}
+                aria-describedby={describedBy}
+                title={`Toggle display unit (currently ${qcSampleDisplayUnit})`}
+                className="h-8 px-2 rounded-[2px] text-[11px] font-semibold border border-[var(--aws-border-strong)] bg-white hover:bg-[var(--surface-subtle)] disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+              >
+                g↔kg
+              </button>
+            </div>
+            <p className="mt-1 text-[10px] text-[var(--text-muted)] italic">
+              Saved as kg{qcSampleDisplayUnit === "g" && controlSampleKg !== "" ? ` — wire value ${num(controlSampleKg)} kg` : ""}.
+            </p>
+          </div>
+        </div>
+
+        <SubsectionLabel>Returned to store</SubsectionLabel>
         {articles.length === 0 ? (
           <EmptyHint>No BOM articles attached to this job card.</EmptyHint>
         ) : (
@@ -1749,15 +3249,18 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
               const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
               return (
                 <div key={key} className="grid grid-cols-12 gap-2 items-center">
-                  <div className="col-span-8 text-[13px] text-[var(--text-primary)] truncate" title={a.material_sku_name}>
+                  <div className="col-span-7 sm:col-span-8 text-[13px] text-[var(--text-primary)] truncate" title={a.material_sku_name}>
                     {a.material_sku_name} <span className="text-[var(--text-muted)] text-[11px]">({a.item_type})</span>
                   </div>
                   <input
                     type="number" step="any" placeholder="0"
-                    className={`${inputCls} col-span-3`}
+                    className={`${inputCls} col-span-4 sm:col-span-3`}
                     value={balance[key] ?? ""}
                     onChange={(e) => setBalance((b) => ({ ...b, [key]: e.target.value }))}
-                    disabled={submitting}
+                    onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
+                    disabled={inputsDisabled}
+                    aria-disabled={inputsDisabled}
+                    aria-describedby={describedBy}
                   />
                   <span className="col-span-1 text-[11px] text-[var(--text-muted)]">{a.uom}</span>
                 </div>
@@ -1767,39 +3270,408 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
         )}
       </Panel>
 
-      {/* ── Accounting Summary ──────────────────────────────────────────── */}
-      <Panel title="Accounting Summary">
-        <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
-          <KV label="FG Output (kg)"      value={fmtNum(summary.fgOutKg)} />
-          <KV label="Process Loss"        value={fmtNum(summary.lossKg)} />
-          <KV label="Balance Material"    value={fmtNum(summary.balTotal)} />
-          <KV label="Off-grade Total"     value={fmtNum(summary.offgradeTotal)} />
-          <KV label="Control Sample"      value={fmtNum(summary.ctrlSample)} />
-          <KV label="Process Loss %"      value={summary.processLossPct != null ? `${summary.processLossPct.toFixed(2)}%` : "—"} />
-          <KV label="Total Loss %"        value={summary.totalLossPct != null ? `${summary.totalLossPct.toFixed(2)}%` : "—"} />
-          <KV label="Balance Difference"  value={summary.balanceDiff != null ? `${summary.balanceDiff.toFixed(2)} kg` : "—"} />
-          <KV
-            label="Is Balanced"
-            value={
-              summary.isBalanced == null ? "—" :
-              summary.isBalanced
-                ? <span className="text-[var(--text-success)] font-semibold">Yes</span>
-                : <span className="text-[var(--aws-error)] font-semibold">No</span>
-            }
-          />
-        </dl>
-      </Panel>
+      {/* ── PM Variance (R11/C7) — packing stages only ──────────────────── */}
+      {isPackingStage ? (
+        <Panel title="PM Variance">
+          <p className="text-[11px] text-[var(--text-muted)] italic mb-3">
+            Packaging material variance categories. Each is recorded as a
+            byproducts row with the chosen unit (no kg — PM is always counted).
+          </p>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+            {PM_VARIANCE_CATEGORIES.map((cat) => {
+              const row = pmVariance[cat.key] ?? { qty: "", uom: "PCS" };
+              return (
+                <div key={cat.key}>
+                  <FormLabel>{cat.label}</FormLabel>
+                  <input
+                    type="number"
+                    step="any"
+                    placeholder="0"
+                    className={`${inputCls} mb-1`}
+                    value={row.qty}
+                    onChange={(e) =>
+                      setPmVariance((s) => ({
+                        ...s,
+                        [cat.key]: { qty: e.target.value, uom: row.uom },
+                      }))
+                    }
+                    onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
+                    disabled={inputsDisabled}
+                    aria-disabled={inputsDisabled}
+                    aria-describedby={describedBy}
+                  />
+                  <select
+                    className={inputCls}
+                    value={row.uom}
+                    onChange={(e) =>
+                      setPmVariance((s) => ({
+                        ...s,
+                        [cat.key]: { qty: row.qty, uom: e.target.value },
+                      }))
+                    }
+                    disabled={inputsDisabled}
+                    aria-disabled={inputsDisabled}
+                    aria-describedby={describedBy}
+                  >
+                    {PM_VARIANCE_UOMS.map((u) => (
+                      <option key={u} value={u}>{u}</option>
+                    ))}
+                  </select>
+                </div>
+              );
+            })}
+          </div>
+        </Panel>
+      ) : null}
 
-      <FormFooter feedback={feedback} submitting={submitting} submitLabel="SAVE OUTPUT" />
+      {/* ── Accounting Summary ──────────────────────────────────────────── */}
+      <AccountingSummaryCard summary={summary} detail={detail} onReload={onReload} />
+
+      <FormFooter
+        feedback={feedback}
+        submitting={submitting}
+        submitLabel="SAVE OUTPUT"
+        // C3-MED-6 — disable on lock OR submit. FormFooter ORs with
+        // `submitting` internally too but passing the merged flag keeps
+        // the aria-describedby story consistent with the inputs above.
+        disabled={inputsDisabled}
+      />
     </form>
   );
 }
 
-function isFinalStageJc(d: JobCardDetail): boolean {
-  // Final stage = output_kind == 'FG'. The Android version computes this via
-  // total_stages == step_number, but output_kind is a clean proxy that
-  // doesn't require the chain length.
-  return (d.output_kind || "").toUpperCase() === "FG";
+// R11/C7 — `isFinalStageJc` was retired; EGA now keys on packing-stage
+// detection (`isPackingStageJc`) so non-final packing stages also accept
+// extra-giveaway entries, and final non-packing stages don't.
+
+// ── C5: Accounting Summary card + variance chip ──────────────────────────
+//
+// SummaryCard mirrors the server's R9 persisted summary row (process_loss_pct,
+// invisible_loss_pct, total_loss_pct, other_loss_pct, rejection / off-grade
+// pct, balance_difference qty + %, is_balanced). When unbalanced beyond the
+// 0.5 % tolerance, a red banner urges the operator to resolve before closing.
+//
+// Responsive: single column on mobile (< sm), two columns at sm:, three at lg:.
+// Status banner spans the full grid on every viewport.
+
+type SummaryCardData = {
+  /** RM consumption mass (kg). Prefers canonical (rm_issued +
+   *  carried_in) when the indent flow ran; falls back to sum of typed
+   *  RM consumption_lines when the operator entered values directly.
+   *  PM rows are NEVER counted — they're packaging, not RM-to-FG mass.
+   *  Drives the "RM Consumed" KV and the balance-difference denominator. */
+  rmConsumedKg: number;
+  fgOutKg: number;
+  lossKg: number;
+  balTotal: number;
+  offgradeTotal: number;
+  ctrlSample: number;
+  processLossPct: number | null;
+  /** EGA Loss % anchored on FG output. Server emits ega_loss_pct
+   *  against total_input; we prefer the server value when present,
+   *  otherwise reconstruct on FG-output basis to match the rest of
+   *  the local preview. */
+  egaLossPct: number | null;
+  invisibleLossPct: number | null;
+  totalLossPct: number | null;
+  offgradePct: number | null;
+  balanceDiff: number | null;
+  balanceDiffPct: number | null;
+  isBalanced: boolean | null;
+  /** Closure tolerance (%-units). Server stores 0.001 = 0.1 %; we
+   *  surface it as a number like 0.10 so the SummaryCard can render
+   *  "Tolerance: 0.10 %" alongside Is Balanced. */
+  tolerancePct: number;
+  /** Which input source the balance check is using. "indent" =
+   *  canonical rm_issued + carried_in. "consumption" = operator-typed
+   *  sum of RM consumption_lines (fallback when no indent). "none" =
+   *  insufficient data, balance check skipped. */
+  inputBasis: "indent" | "consumption" | "none";
+};
+
+// Deterministic DD Mon YYYY for a phase_date ('YYYY-MM-DD' string). Avoids
+// locale/timezone-dependent Date formatting. Returns "—" when absent.
+const _PHASE_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function fmtPhaseDate(d: string | null | undefined): string {
+  if (!d) return "—";
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d));
+  if (!m) return String(d);
+  const mi = parseInt(m[2], 10) - 1;
+  return mi >= 0 && mi <= 11 ? `${m[3]} ${_PHASE_MONTHS[mi]} ${m[1]}` : String(d);
+}
+
+function AccountingSummaryCard({
+  summary,
+  detail,
+  onReload,
+}: {
+  summary: SummaryCardData;
+  /** Full JC detail + reload — passed to the embedded PhaseBand, which owns
+   *  the phasewise table + Open/Close phase controls (moved here from the
+   *  former top-of-page band) and the /phase open + close wiring. */
+  detail: JobCardDetail;
+  onReload: () => void;
+}) {
+  const unbalanced = summary.isBalanced === false;
+  const balanceDiffAbs = summary.balanceDiff != null ? Math.abs(summary.balanceDiff) : 0;
+
+  // Render the headline IS BALANCED chip with a tick / cross glyph.
+  const balancedChip =
+    summary.isBalanced == null ? (
+      <span className="text-[var(--text-muted)]">—</span>
+    ) : summary.isBalanced ? (
+      <span className="inline-flex items-center gap-1 text-[var(--text-success)] font-semibold">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="currentColor">
+          <path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" />
+        </svg>
+        Balanced
+      </span>
+    ) : (
+      <span className="inline-flex items-center gap-1 text-[var(--aws-error)] font-semibold">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="currentColor">
+          <path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
+        </svg>
+        Not balanced
+      </span>
+    );
+
+  return (
+    <Panel title="Accounting Summary">
+      {unbalanced ? (
+        <div
+          role="alert"
+          className={[
+            "mb-3 rounded-md border px-3 py-2 sm:px-4 sm:py-3",
+            "bg-[#fdf3f1] border-[#f0c7be] text-[#b1361e]",
+            "text-[13px]",
+          ].join(" ")}
+        >
+          <span className="font-semibold">Unbalanced by {balanceDiffAbs.toFixed(2)} kg</span>
+          {summary.balanceDiffPct != null ? (
+            <span className="ml-1">({summary.balanceDiffPct.toFixed(2)}%)</span>
+          ) : null}
+          <span className="ml-1">— resolve before closing this job card.</span>
+        </div>
+      ) : null}
+
+      {/* ── Headline status strip ────────────────────────────────────
+          Is Balanced · Balance Difference · Closure Tolerance.
+          • mobile:     1-col stack (avoids ellipsised values)
+          • sm (640+):  3-col equal split — three labels are short
+                        enough to fit comfortably
+          The tolerance KV reads bom_header.allowed_balance_tolerance_pct
+          (or the system default 0.10 %); it's the threshold the
+          /complete endpoint uses for |diff| / total_input — surfacing
+          it lets the operator self-verify before hitting Close. */}
+      <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 sm:gap-x-4 gap-y-3 mb-3 pb-3 border-b border-[var(--aws-border)]">
+        <KV label="Is Balanced"          value={balancedChip} />
+        <KV
+          label="Balance Difference"
+          value={
+            summary.balanceDiff == null
+              ? (
+                <span className="text-[var(--text-muted)] italic text-[11px]">
+                  no input recorded
+                </span>
+              )
+              : (
+                <span className={unbalanced ? "text-[var(--aws-error)] font-semibold" : ""}>
+                  {summary.balanceDiff.toFixed(2)} kg
+                  {summary.balanceDiffPct != null ? (
+                    <span className="text-[var(--text-muted)] ml-1 font-normal">
+                      ({summary.balanceDiffPct.toFixed(2)}%)
+                    </span>
+                  ) : null}
+                </span>
+              )
+          }
+        />
+      </dl>
+
+      {/* ── Phasewise output + controls (R13) — the phase status, Open/Close
+          buttons, close modal, and the per-phase produced / RM / EGA table,
+          moved here from the former top-of-page band. PhaseBand owns the
+          /phases fetch and the /phase/open + /phase/{id}/close wiring. ──── */}
+      <div className="mb-3 pb-3 border-b border-[var(--aws-border)]">
+        <PhaseBand detail={detail} onReload={onReload} />
+      </div>
+
+      {/* ── Quantity row ─────────────────────────────────────────────
+          RM Consumed leads (operator-stated), then FG Output, then the
+          loss buckets. Breakpoints scale gradually so labels never
+          truncate uncomfortably:
+          • mobile:   2-col (3 rows × 2)
+          • sm 640:   3-col (2 rows × 3)
+          • md 768:   3-col (still readable on tablets in portrait)
+          • lg 1024:  6-col (single line on desktop) */}
+      <dl className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-x-3 sm:gap-x-4 gap-y-3 mb-3">
+        <KV label="RM Consumed"
+            value={<span><span>{fmtNum(summary.rmConsumedKg)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>} />
+        <KV label="FG Output"
+            value={<span><span>{fmtNum(summary.fgOutKg)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>} />
+        <KV
+          label={
+            <span className="block leading-tight">
+              Process Loss
+              <span className="block text-[8px] normal-case font-normal text-[var(--text-muted)] tracking-normal mt-0">
+                incl. wastage
+              </span>
+            </span>
+          }
+          value={<span><span>{fmtNum(summary.lossKg)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>}
+        />
+        <KV label="Balance Material"
+            value={<span><span>{fmtNum(summary.balTotal)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>} />
+        <KV label="Off-grade Total"
+            value={<span><span>{fmtNum(summary.offgradeTotal)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>} />
+        <KV label="Control Sample"
+            value={<span><span>{fmtNum(summary.ctrlSample)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>} />
+      </dl>
+
+      {/* ── Percentages row ──────────────────────────────────────────
+          R9 block with operator-stated thresholds. Values above the
+          threshold render bold + red — display-only, the /complete
+          gate still rests on is_balanced. PL+EGA Loss % = Process
+          Loss % + EGA Loss %.
+          • mobile:   2-col (3 rows — last row half-full)
+          • sm 640:   3-col (2 rows — last row 2/3 full)
+          • md 768:   5-col (single line) */}
+      <dl className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-x-3 sm:gap-x-4 gap-y-3 pt-3 border-t border-[var(--aws-border)]">
+        <KV label="Process Loss %"      value={lossPctChip(summary.processLossPct, 1.5)} />
+        <KV label="EGA Loss %"          value={lossPctChip(summary.egaLossPct,     1.0)} />
+        <KV label="PL+EGA Loss %"       value={lossPctChip(summary.invisibleLossPct, 2.5)} />
+        <KV label="Off-grade %"         value={lossPctChip(summary.offgradePct,    1.0)} />
+        <KV label="Total Loss %"        value={lossPctChip(summary.totalLossPct,   3.0)} />
+      </dl>
+    </Panel>
+  );
+}
+
+function pctOrDash(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return `${v.toFixed(2)}%`;
+}
+
+// Threshold-aware loss-pct chip. Returns a coloured / bold span when
+// the value exceeds `threshold`, plain text otherwise. Display-only —
+// the /complete closure gate uses is_balanced, not these thresholds.
+//
+// Caller passes the threshold in %-units (e.g. 1.5 for "1.5 %"); rule
+// is strict-greater-than so a value sitting AT the threshold stays
+// neutral (e.g. exactly 1.50 % Process Loss is still in band).
+function lossPctChip(
+  v: number | null | undefined,
+  threshold: number,
+): React.ReactNode {
+  if (v == null || !Number.isFinite(v)) {
+    return <span className="text-[var(--text-muted)]">—</span>;
+  }
+  const over = v > threshold;
+  return (
+    <span
+      className={over ? "text-[var(--aws-error)] font-semibold" : ""}
+      title={over ? `Exceeds operator threshold of ${threshold.toFixed(2)} %` : undefined}
+    >
+      {v.toFixed(2)}%
+    </span>
+  );
+}
+
+// VarianceChip — small inline chip per consumption row showing BOM vs actual.
+// Colour bands (asymmetric on purpose — see framework spec C3-H4):
+//   |variance%| ≤ 5  → neutral grey  (within expected operating noise)
+//   diff > 0 & ≤ 15  → amber          (over-consumed, worth a look)
+//   diff > 0 & > 15  → red            (over-consumed, likely needs investigation)
+//   diff < 0         → neutral grey   (under-consumption is informational only)
+// Under-consumption is intentionally left neutral: the operator may have
+// genuinely measured short (legitimate yield win, or pre-tare on the scale)
+// and the variance chip is a QTY-only informational widget per the framework
+// spec — it must NOT imply a quality / costing alarm. Costing concerns sit
+// elsewhere (see memory: consumption-variance-staging). Qty-only — no
+// currency. The tooltip below explains the asymmetric colour choice.
+function VarianceChip({
+  materialName, bomPrescribedQty, actualQty, uom, hasSavedConsumption, plannedKg,
+}: {
+  materialName: string;
+  bomPrescribedQty: number | null;
+  actualQty: number;
+  uom: string;
+  /** True when the server already has a consumption_lines row for this
+   *  material. Used to suppress the "BOM X · actual —" hint on fresh JCs
+   *  where the operator hasn't typed anything yet AND nothing's saved
+   *  (C3-MED-7). */
+  hasSavedConsumption: boolean;
+  /** planned_qty_kg on the JC. When this is 0 / missing the server can't
+   *  compute a prescribed qty either, so we surface a more specific hint
+   *  than "no BOM variance available" (C3-MED-8). */
+  plannedKg: number;
+}) {
+  // C3-MED-8 — distinguish the two reasons the chip can't show variance:
+  //   (a) planned_qty_kg on the JC is missing / zero (BOM math has no
+  //       multiplier)
+  //   (b) the BOM line is missing quantity_per_unit altogether
+  // The previous unified message hid an actionable signal — a missing
+  // planned_qty is fixable from the SO / plan, but a missing BOM
+  // quantity_per_unit needs a BOM amendment.
+  if (bomPrescribedQty == null || !Number.isFinite(bomPrescribedQty) || bomPrescribedQty <= 0) {
+    const hint = plannedKg <= 0
+      ? "planned qty missing"
+      : "no BOM variance available";
+    return (
+      <span className="inline-block text-[10px] text-[var(--text-muted)] italic">
+        {hint}
+      </span>
+    );
+  }
+  // C3-MED-7 — operator hasn't typed anything AND nothing's saved on the
+  // server. Suppress the chip entirely; it would otherwise read "BOM X kg
+  // · actual —" on every consumption row of a freshly-opened JC.
+  if (!Number.isFinite(actualQty) || actualQty <= 0) {
+    if (!hasSavedConsumption) return null;
+    return (
+      <span className="inline-block text-[10px] text-[var(--text-muted)] italic">
+        BOM {bomPrescribedQty.toFixed(2)} {uom} · actual —
+      </span>
+    );
+  }
+  const diff = actualQty - bomPrescribedQty;
+  const pct = (diff / bomPrescribedQty) * 100;
+  const sign = diff > 0 ? "+" : "";
+  const absPct = Math.abs(pct);
+
+  // Colour band — under-consumption (diff < 0) is always neutral. See the
+  // tooltip below for the rationale.
+  let cls = "bg-[#f4f4f4] border-[#d5dbdb] text-[var(--text-secondary)]";
+  if (diff > 0 && absPct > 15) {
+    cls = "bg-[#fdf3f1] border-[#f0c7be] text-[#b1361e]";
+  } else if (diff > 0 && absPct > 5) {
+    cls = "bg-[#fff4e5] border-[#f4d4a0] text-[#9a5b00]";
+  }
+
+  // C3-H4 — the asymmetric tooltip clarifies WHY under-consumption stays
+  // neutral. Visible on hover + announced by AT (title is read after a
+  // brief delay on most screen readers). Keeps the rule discoverable
+  // without bloating the chip itself.
+  const asymmetryNote = diff < 0
+    ? " · under-consumption is informational only (no colour band)"
+    : "";
+
+  return (
+    <span
+      title={`${materialName} · BOM ${bomPrescribedQty.toFixed(2)} ${uom} · Actual ${actualQty.toFixed(2)} ${uom}${asymmetryNote}`}
+      className={[
+        "inline-block text-[10px] sm:text-[11px] rounded-full border px-2 py-0.5 leading-tight whitespace-normal",
+        cls,
+      ].join(" ")}
+    >
+      <span className="font-semibold">BOM</span> {bomPrescribedQty.toFixed(2)} {uom}
+      <span className="mx-1 text-[var(--text-muted)]">·</span>
+      <span className="font-semibold">Actual</span> {actualQty.toFixed(2)} {uom}
+      <span className="mx-1 text-[var(--text-muted)]">·</span>
+      <span className="font-semibold">{sign}{diff.toFixed(2)} {uom}</span>
+      <span className="ml-1">({sign}{pct.toFixed(1)}%)</span>
+    </span>
+  );
 }
 
 function SubsectionLabel({ children, className }: { children: React.ReactNode; className?: string }) {
@@ -1829,6 +3701,10 @@ function SubsectionLabel({ children, className }: { children: React.ReactNode; c
 function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () => void }) {
   const metalRecords = detail.annexure_a_b_metal_detection ?? [];
   const envRecords   = detail.annexure_c_environment ?? [];
+  // C3: lock gate. /metal-detection /weight-checks /environment /remarks all
+  // 409 when locked. Combine with the per-section busy flags so the existing
+  // submit-in-flight UI keeps working unchanged when the JC is unlocked.
+  const lock = useLockState(detail);
 
   // ── Metal Detection (single-add form) ──────────────────────────────────
   const [mdCheckType, setMdCheckType] = useState<string>(METAL_CHECK_TYPES[1].value); // post_packaging default
@@ -1858,11 +3734,105 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
   const [envValues, setEnvValues] = useState<Record<string, string>>({});
 
   // ── QC Sample Consumed ────────────────────────────────────────────────
-  const [qcSampleGm, setQcSampleGm] = useState("");
+  // R10/C6 — replaced with a read-only summary pulled from the saved
+  // byproducts (category='control_sample'). The single source of truth
+  // for the value is the Output & Accounting tab.
+  const controlSampleKgSaved = useMemo(
+    () => controlSampleFromDetail(detail.byproducts, detail.balance_materials),
+    [detail.byproducts, detail.balance_materials],
+  );
 
   // ── QC Verification ────────────────────────────────────────────────────
   const [qcPassed, setQcPassed] = useState<boolean | null>(null);
   const [qcFindings, setQcFindings] = useState("");
+
+  // R12/C8 — server-stamped QC sign-off. job_card_sign_off_v2 holds the
+  // role='qc_inspector' row written when QC ticks the box; we surface it
+  // read-only here so the operator can see who verified and when.
+  //
+  // W3-MED-4 — sort by signed_at DESC, secondary by sign_off_id, before
+  // picking [0]. Without this we'd surface whichever qc_inspector row
+  // happened to land first in the array — for re-verified JCs that's the
+  // OLD sign-off, not the latest one.
+  const qcSignOff = useMemo(() => {
+    const rows = (detail.sign_offs ?? []).filter((r) => {
+      const role = String((r as Record<string, unknown>)["role"] ?? "");
+      return role === "qc_inspector";
+    });
+    if (rows.length === 0) return null;
+    const sorted = [...rows].sort((a, b) => {
+      const ar = a as Record<string, unknown>;
+      const br = b as Record<string, unknown>;
+      const at = String(ar["signed_at"] ?? "");
+      const bt = String(br["signed_at"] ?? "");
+      if (at !== bt) return at < bt ? 1 : -1;
+      const aid = Number(ar["sign_off_id"] ?? 0);
+      const bid = Number(br["sign_off_id"] ?? 0);
+      return bid - aid;
+    });
+    const r = sorted[0] as Record<string, unknown>;
+    return {
+      signedBy: String(r["signed_by"] ?? ""),
+      signedAt: String(r["signed_at"] ?? ""),
+    };
+  }, [detail.sign_offs]);
+
+  // R12/C8 — role-gating for the QC Verification Passed checkbox.
+  // C1 (Wave 4) — useMe() so a role change mid-session flips the gate
+  // without a reload.
+  const me = useMe();
+  const canVerifyQc = userIsQcOrAdmin(me);
+
+  // R12/C8 — "Notify QC" CTA only renders on completed JCs.
+  //
+  // W3-HIGH-4 — `notifyFeedback` is namespaced separately from the shared
+  // `feedback` slot used by Save Quality. Without this they fought each
+  // other (a Notify QC success transient overwrote a Save Quality error
+  // and vice-versa).
+  // W3-HIGH-2 — parse the JSON response. The backend returns
+  // { dispatched, failed, warning? }; when no QC inspector is scoped to
+  // the JC the route returns 200 with warning='no_qc_recipients_in_scope'
+  // (no rows actually dispatched). We surface that distinctly as an
+  // orange/warn toast rather than a generic green "notified" so the
+  // operator escalates instead of assuming QC was paged.
+  const [notifyingQc, setNotifyingQc] = useState(false);
+  const [notifyFeedback, setNotifyFeedback] = useState<{ kind: "ok" | "err" | "warn"; msg: string } | null>(null);
+  async function notifyQc() {
+    setNotifyFeedback(null);
+    setNotifyingQc(true);
+    try {
+      const res = await apiFetch(`/api/v1/production/job-cards-v2/${detail.job_card_id}/notify-qc`, {
+        method: "POST",
+      });
+      const data = (await res.json().catch(() => null)) as
+        | { dispatched?: number; failed?: number; warning?: string; message?: string; error?: string }
+        | null;
+      if (!res.ok) {
+        const msg = (data && (data.message || data.error)) || `HTTP ${res.status}`;
+        throw new Error(String(msg));
+      }
+      const dispatched = typeof data?.dispatched === "number" ? data.dispatched : 0;
+      const failed     = typeof data?.failed     === "number" ? data.failed     : 0;
+      if (data?.warning === "no_qc_recipients_in_scope") {
+        setNotifyFeedback({
+          kind: "warn",
+          msg: "Notification sent but no QC inspector is scoped to this JC.",
+        });
+      } else {
+        setNotifyFeedback({
+          kind: "ok",
+          msg: `Notify QC: ${dispatched} dispatched, ${failed} failed`,
+        });
+      }
+    } catch (e) {
+      setNotifyFeedback({
+        kind: "err",
+        msg: e instanceof Error ? e.message : "Failed to notify QC.",
+      });
+    } finally {
+      setNotifyingQc(false);
+    }
+  }
 
   const [savingQuality, setSavingQuality] = useState(false);
   const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
@@ -1908,6 +3878,20 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
   // one row at a time and surfaces a "saving X of N" progress hint between
   // requests. A failure mid-chain aborts and leaves earlier successful
   // writes intact on the server (operator can retry the failed phase).
+  //
+  // W3-MED-2 — read the server's JSON error envelope on !ok. The QC routes
+  // return { error, message } on a 403 (qc_scope_mismatch). Surfacing the
+  // message verbatim is materially better than "HTTP 403" because it
+  // tells the operator exactly which scope is mismatched.
+  async function readErrMsg(res: Response, fallback: string): Promise<string> {
+    try {
+      const data = (await res.json()) as { message?: string; error?: string } | null;
+      if (data && (data.message || data.error)) {
+        return String(data.message || data.error);
+      }
+    } catch { /* fall through */ }
+    return fallback;
+  }
   async function saveQuality() {
     setFeedback(null);
     setSavingQuality(true);
@@ -1929,7 +3913,10 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           method: "POST",
           body: JSON.stringify(body),
         });
-        if (!res.ok) throw new Error(`Sample ${s.idx} failed: HTTP ${res.status}`);
+        if (!res.ok) {
+          const msg = await readErrMsg(res, `HTTP ${res.status}`);
+          throw new Error(`Sample ${s.idx} failed: ${msg}`);
+        }
       }
 
       // ── Environment params ────────────────────────────────────────
@@ -1950,7 +3937,10 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           method: "POST",
           body: JSON.stringify(body),
         });
-        if (!res.ok) throw new Error(`Environment "${paramKey}" failed: HTTP ${res.status}`);
+        if (!res.ok) {
+          const msg = await readErrMsg(res, `HTTP ${res.status}`);
+          throw new Error(`Environment "${paramKey}" failed: ${msg}`);
+        }
       }
 
       // ── QC Verification (recorded as a remark on v2) ──────────────
@@ -1967,7 +3957,10 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           method: "POST",
           body: JSON.stringify(body),
         });
-        if (!res.ok) throw new Error(`QC verdict remark failed: HTTP ${res.status}`);
+        if (!res.ok) {
+          const msg = await readErrMsg(res, `HTTP ${res.status}`);
+          throw new Error(`QC verdict remark failed: ${msg}`);
+        }
       }
 
       setFeedback({ kind: "ok", msg: "Quality saved." });
@@ -1980,8 +3973,63 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
     }
   }
 
+  // Per-section disabled flags — combined with the lock state.
+  const metalDisabled = addingMetal || lock.isLocked;
+  const qualityDisabled = savingQuality || lock.isLocked;
+
   return (
     <>
+      {/* C3 lock banner — sits above every Quality form below. Only renders
+          when the JC is operationally locked. The CTA runs the same
+          force-unlock flow as the OverflowMenu (C3-H1). */}
+      <LockBanner
+        isLocked={lock.isLocked}
+        lockedReason={lock.lockedReason}
+        status={lock.status}
+        jcId={detail.job_card_id}
+        onForceUnlockClick={() => void runForceUnlockJc(
+          detail.job_card_id,
+          userStore.load()?.full_name ?? "",
+          onReload,
+        )}
+      />
+
+      {/* R12/C8 — Notify QC CTA. Only renders when the JC is completed
+          (the backend rejects this on any other status). The route
+          POST /notify-qc fans out the in-app notification to QC users.
+          W3-HIGH-4 — `notifyFeedback` is rendered next to the button so it
+          doesn't clobber the shared `feedback` slot used by Save Quality. */}
+      {detail.status === "completed" ? (
+        <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-end gap-2">
+          {notifyFeedback ? (
+            <p
+              className={[
+                "text-[12px]",
+                notifyFeedback.kind === "ok"
+                  ? "text-[var(--text-success)]"
+                  : notifyFeedback.kind === "warn"
+                    ? "text-[var(--aws-orange-active)]"
+                    : "text-[var(--aws-error)]",
+              ].join(" ")}
+            >
+              {notifyFeedback.msg}
+            </p>
+          ) : null}
+          {/* C10 (Wave 4) — Notify QC via LockableButton. Lock disables for
+              non-force-unlock users; admin / floor_manager / plant_manager /
+              inventory_manager still see an enabled button. */}
+          <LockableButton
+            lockState={lock}
+            busy={notifyingQc}
+            busyLabel="Notifying…"
+            onClick={() => void notifyQc()}
+            title="Notify the QC team that this job card is ready for verification."
+          >
+            Notify QC
+          </LockableButton>
+        </div>
+      ) : null}
+
       {/* ── 1. Metal Detection records ──────────────────────────────────── */}
       <Panel title={`Metal Detection · ${metalRecords.length} record${metalRecords.length === 1 ? "" : "s"}`}>
         {metalRecords.length === 0 ? (
@@ -1991,12 +4039,12 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
             rows={metalRecords}
             columns={[
               { key: "recorded_at",  label: "When", render: (v) => fmtDateTime(String(v ?? "")) },
-              { key: "check_type",   label: "Type" },
+              { key: "check_type",   label: "Type", hideBelow: "sm" },
               { key: "fe_pass",      label: "Fe",  render: (v) => renderPass(v) },
               { key: "nfe_pass",     label: "NFe", render: (v) => renderPass(v) },
               { key: "ss_pass",      label: "SS",  render: (v) => renderPass(v) },
-              { key: "failed_units", label: "Failed" },
-              { key: "remarks",      label: "Remarks" },
+              { key: "failed_units", label: "Failed", hideBelow: "sm" },
+              { key: "remarks",      label: "Remarks", hideBelow: "md" },
             ]}
           />
         )}
@@ -2005,38 +4053,35 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
       {/* ── 2. Add Metal Check ──────────────────────────────────────────── */}
       <Panel title="Add Metal Check">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-3">
-          <FormSelect label="Check type" value={mdCheckType} onChange={setMdCheckType} disabled={addingMetal} options={METAL_CHECK_TYPES} />
+          <FormSelect label="Check type" value={mdCheckType} onChange={setMdCheckType} disabled={metalDisabled} options={METAL_CHECK_TYPES} />
         </div>
         <div className="grid grid-cols-3 gap-3 mb-3">
-          <FormCheckbox label="Fe"  value={mdFe}  onChange={setMdFe}  disabled={addingMetal} />
-          <FormCheckbox label="NFe" value={mdNfe} onChange={setMdNfe} disabled={addingMetal} />
-          <FormCheckbox label="SS"  value={mdSs}  onChange={setMdSs}  disabled={addingMetal} />
+          <FormCheckbox label="Fe"  value={mdFe}  onChange={setMdFe}  disabled={metalDisabled} />
+          <FormCheckbox label="NFe" value={mdNfe} onChange={setMdNfe} disabled={metalDisabled} />
+          <FormCheckbox label="SS"  value={mdSs}  onChange={setMdSs}  disabled={metalDisabled} />
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
-          <FormNumber label="Failed units" value={mdFailed} onChange={setMdFailed} disabled={addingMetal} />
-          <FormCheckbox label="Seal Check" value={mdSeal} onChange={setMdSeal} disabled={addingMetal} />
-          <FormCheckbox label="Wt Check"   value={mdWt}   onChange={setMdWt}   disabled={addingMetal} />
+          <FormNumber label="Failed units" value={mdFailed} onChange={setMdFailed} disabled={metalDisabled} />
+          <FormCheckbox label="Seal Check" value={mdSeal} onChange={setMdSeal} disabled={metalDisabled} />
+          <FormCheckbox label="Wt Check"   value={mdWt}   onChange={setMdWt}   disabled={metalDisabled} />
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
-          <FormNumber label="Dough Temp (°C)"  value={mdDough}  onChange={setMdDough}  disabled={addingMetal} />
-          <FormNumber label="Oven Temp (°C)"   value={mdOven}   onChange={setMdOven}   disabled={addingMetal} />
-          <FormNumber label="Baking Temp (°C)" value={mdBaking} onChange={setMdBaking} disabled={addingMetal} />
+          <FormNumber label="Dough Temp (°C)"  value={mdDough}  onChange={setMdDough}  disabled={metalDisabled} />
+          <FormNumber label="Oven Temp (°C)"   value={mdOven}   onChange={setMdOven}   disabled={metalDisabled} />
+          <FormNumber label="Baking Temp (°C)" value={mdBaking} onChange={setMdBaking} disabled={metalDisabled} />
         </div>
-        <FormText label="Remarks" value={mdRemarks} onChange={setMdRemarks} disabled={addingMetal} />
+        <FormText label="Remarks" value={mdRemarks} onChange={setMdRemarks} disabled={metalDisabled} />
         <div className="mt-3 flex items-center justify-end">
-          <button
-            type="button"
-            onClick={addMetalCheck}
+          {/* C10 (Wave 4) — Add metal check via LockableButton. */}
+          <LockableButton
+            lockState={lock}
+            busy={addingMetal}
+            busyLabel="Saving…"
             disabled={addingMetal}
-            className={[
-              "h-8 px-3 rounded-[2px] text-[13px] font-semibold border",
-              addingMetal
-                ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
-                : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
-            ].join(" ")}
+            onClick={addMetalCheck}
           >
-            {addingMetal ? "Saving…" : "Add metal check"}
-          </button>
+            Add metal check
+          </LockableButton>
         </div>
       </Panel>
 
@@ -2047,18 +4092,21 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           backend stores the samples but not the target/tolerance header.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-          <FormNumber label="Target wt (g)" value={targetWt} onChange={setTargetWt} disabled={savingQuality} />
-          <FormNumber label="Tolerance (±g)" value={tolerance} onChange={setTolerance} disabled={savingQuality} />
+          <FormNumber label="Target wt (g)" value={targetWt} onChange={setTargetWt} disabled={qualityDisabled} />
+          <FormNumber label="Tolerance (±g)" value={tolerance} onChange={setTolerance} disabled={qualityDisabled} />
         </div>
         <SubsectionLabel>Samples ({WEIGHT_SAMPLES})</SubsectionLabel>
-        <div className="overflow-x-auto">
+        {/* Mobile-friendly samples — narrow viewports hide gross column, the
+            net + leak still fit. Net carries the gross value in its title
+            attribute so it isn't lost. */}
+        <div>
           <table className="w-full text-[12px]">
             <thead className="text-[10px] uppercase text-[var(--text-muted)]">
               <tr>
                 <th className="text-left px-2 py-1">#</th>
                 <th className="text-left px-2 py-1">Net (g)</th>
-                <th className="text-left px-2 py-1">Gross (g)</th>
-                <th className="text-left px-2 py-1">Leak pass</th>
+                <th className="text-left px-2 py-1 hidden sm:table-cell">Gross (g)</th>
+                <th className="text-left px-2 py-1">Leak</th>
               </tr>
             </thead>
             <tbody>
@@ -2066,13 +4114,13 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
                 <tr key={i} className="border-b border-[var(--aws-border)]">
                   <td className="px-2 py-1 text-[var(--text-secondary)]">{i + 1}</td>
                   <td className="px-2 py-1">
-                    <input type="number" step="any" className={inputCls} value={s.net} onChange={(e) => updateSample(i, { net: e.target.value })} disabled={savingQuality} />
+                    <input type="number" step="any" className={inputCls} value={s.net} onChange={(e) => updateSample(i, { net: e.target.value })} onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()} disabled={qualityDisabled} aria-disabled={qualityDisabled} />
+                  </td>
+                  <td className="px-2 py-1 hidden sm:table-cell">
+                    <input type="number" step="any" className={inputCls} value={s.gross} onChange={(e) => updateSample(i, { gross: e.target.value })} onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()} disabled={qualityDisabled} aria-disabled={qualityDisabled} />
                   </td>
                   <td className="px-2 py-1">
-                    <input type="number" step="any" className={inputCls} value={s.gross} onChange={(e) => updateSample(i, { gross: e.target.value })} disabled={savingQuality} />
-                  </td>
-                  <td className="px-2 py-1">
-                    <input type="checkbox" className="accent-[var(--aws-orange)] w-4 h-4" checked={s.leak} onChange={(e) => updateSample(i, { leak: e.target.checked })} disabled={savingQuality} />
+                    <input type="checkbox" className="accent-[var(--aws-orange)] w-4 h-4 disabled:opacity-50 disabled:cursor-not-allowed" checked={s.leak} onChange={(e) => updateSample(i, { leak: e.target.checked })} disabled={qualityDisabled} aria-disabled={qualityDisabled} />
                   </td>
                 </tr>
               ))}
@@ -2088,7 +4136,7 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
             <RowTable
               rows={envRecords}
               columns={[
-                { key: "recorded_at",    label: "When", render: (v) => fmtDateTime(String(v ?? "")) },
+                { key: "recorded_at",    label: "When", render: (v) => fmtDateTime(String(v ?? "")), hideBelow: "sm" },
                 { key: "parameter_name", label: "Parameter" },
                 { key: "value",          label: "Value" },
                 { key: "unit",           label: "Unit" },
@@ -2104,47 +4152,82 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
               label={p.label}
               value={envValues[p.key] ?? ""}
               onChange={(v) => setEnvValues((m) => ({ ...m, [p.key]: v }))}
-              disabled={savingQuality}
+              disabled={qualityDisabled}
               placeholder="value"
             />
           ))}
         </div>
       </Panel>
 
-      {/* ── 5. QC Sample Consumed ──────────────────────────────────────── */}
-      <Panel title="QC Sample Consumed">
+      {/* ── 5. QC Sample (read-only summary; R10/C6) ──────────────────── */}
+      <Panel title="QC Sample">
         <p className="text-[11px] text-[var(--text-muted)] italic mb-3">
-          Operator-reference only — the v2 backend doesn&apos;t persist this
-          field. Recorded for parity with the Android form.
+          Recorded on the Output &amp; Accounting tab. Read-only here.
         </p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <FormNumber label="Sample weight (g)" value={qcSampleGm} onChange={setQcSampleGm} disabled={savingQuality} placeholder="e.g. 50" />
-        </div>
+        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
+          <KV
+            label="Control Sample (kg)"
+            value={
+              controlSampleKgSaved.trim() === ""
+                ? "—"
+                : `${num(controlSampleKgSaved).toFixed(3)} kg`
+            }
+          />
+        </dl>
       </Panel>
 
-      {/* ── 6. QC Verification ──────────────────────────────────────────── */}
+      {/* ── 6. QC Verification (R12/C8) ─────────────────────────────────── */}
       <Panel title="QC Verification">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-          <FormCheckbox label="QC Passed" value={qcPassed} onChange={setQcPassed} disabled={savingQuality} />
+        {/* Server-stamped sign-off card. Visible once the QC team has
+            ticked the verification on the backend. */}
+        <div className="mb-3 rounded-md border border-[var(--aws-border)] bg-[var(--surface-subtle)] p-3">
+          <FormLabel>Verified by</FormLabel>
+          {qcSignOff && qcSignOff.signedBy.trim() ? (
+            <div className="text-[13px] text-[var(--text-primary)]">
+              Verified by <span className="font-semibold">{qcSignOff.signedBy}</span>
+              {qcSignOff.signedAt ? (
+                <> at <span className="font-mono text-[12px]">{qcSignOff.signedAt}</span></>
+              ) : null}
+            </div>
+          ) : (
+            <div className="text-[12px] text-[var(--text-muted)] italic">
+              Not yet verified.
+            </div>
+          )}
         </div>
-        <FormText label="Findings / remarks" value={qcFindings} onChange={setQcFindings} disabled={savingQuality} />
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+          <div title={!canVerifyQc ? "Only QC team can verify this JC." : undefined}>
+            <FormCheckbox
+              label="QC Verification Passed"
+              value={qcPassed}
+              onChange={setQcPassed}
+              disabled={qualityDisabled || !canVerifyQc}
+            />
+            {!canVerifyQc ? (
+              <p className="mt-1 text-[10px] text-[var(--text-muted)] italic">
+                Only QC team can verify this JC.
+              </p>
+            ) : null}
+          </div>
+        </div>
+        <FormText label="Findings / remarks" value={qcFindings} onChange={setQcFindings} disabled={qualityDisabled} />
       </Panel>
 
       {/* ── Save Quality ────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-3 mb-6">
-        <button
-          type="button"
-          onClick={saveQuality}
+      <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-6">
+        {/* C10 (Wave 4) — Save Quality via LockableButton. Keeps the
+            chained-POST progress + feedback handling next to the button. */}
+        <LockableButton
+          lockState={lock}
+          busy={savingQuality}
+          busyLabel="Saving…"
           disabled={savingQuality}
-          className={[
-            "h-9 px-4 rounded-[2px] text-[13px] font-bold border tracking-wide",
-            savingQuality
-              ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
-              : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
-          ].join(" ")}
+          onClick={saveQuality}
+          variant="primary"
+          className="h-9 px-4 text-[13px] font-bold tracking-wide"
         >
-          {savingQuality ? "Saving…" : "SAVE QUALITY"}
-        </button>
+          SAVE QUALITY
+        </LockableButton>
         {progress ? (
           <span className="text-[12px] text-[var(--text-secondary)]">{progress}</span>
         ) : feedback ? (
@@ -2181,10 +4264,24 @@ function FormText({ label, value, onChange, disabled, placeholder }: { label: st
   );
 }
 function FormNumber({ label, value, onChange, disabled, placeholder }: { label: string; value: string; onChange: (v: string) => void; disabled?: boolean; placeholder?: string }) {
+  // onWheel→blur: <input type="number"> increments on mouse-wheel by
+  // default, so scrolling past a row of inputs randomly mutates values.
+  // Blurring the focused field on wheel disables that behaviour without
+  // breaking explicit click-then-scroll editing — the operator can
+  // re-focus to nudge a value if they truly want to.
   return (
     <label className="block">
       <FormLabel>{label}</FormLabel>
-      <input type="number" step="any" className={inputCls} value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled} placeholder={placeholder} />
+      <input
+        type="number"
+        step="any"
+        className={inputCls}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
+        disabled={disabled}
+        placeholder={placeholder}
+      />
     </label>
   );
 }
@@ -2223,21 +4320,36 @@ function FormCheckbox({ label, value, onChange, disabled }: { label: string; val
   );
 }
 
-function FormFooter({ feedback, submitting, submitLabel }: { feedback: { kind: "ok" | "err"; msg: string } | null; submitting: boolean; submitLabel: string }) {
+function FormFooter({
+  feedback, submitting, submitLabel, disabled,
+}: {
+  feedback: { kind: "ok" | "err"; msg: string } | null;
+  submitting: boolean;
+  submitLabel: string;
+  /** C3: extra disable flag (e.g. JC is locked). When true, the submit
+   *  button is disabled with an aria-disabled hint even outside the
+   *  submitting state. */
+  disabled?: boolean;
+}) {
+  // C10 (Wave 4) — submit button delegated to ActionButton. type="submit"
+  // keeps the native form-submit pathway intact so the existing onSubmit
+  // handlers (saveOutput / addRemark / assignTeam) keep working unchanged.
+  // No role gate here — the form-submit button itself is open to any
+  // signed-in user; the JC lock + submit-in-flight + caller-supplied
+  // `disabled` cover the per-form gating. Lock-aware variants live in
+  // the call sites that need them (Save Quality, Notify QC, ActionBar).
   return (
-    <div className="mt-2 mb-6 flex items-center gap-3">
-      <button
+    <div className="mt-2 mb-6 flex flex-col sm:flex-row sm:items-center gap-3">
+      <ActionButton
         type="submit"
-        disabled={submitting}
-        className={[
-          "h-9 px-4 rounded-[2px] text-[13px] font-bold border tracking-wide",
-          submitting
-            ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
-            : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
-        ].join(" ")}
+        busy={submitting}
+        busyLabel="Saving…"
+        disabled={!!disabled}
+        variant="primary"
+        className="h-9 px-4 text-[13px] font-bold tracking-wide"
       >
-        {submitting ? "Saving…" : submitLabel}
-      </button>
+        {submitLabel}
+      </ActionButton>
       {feedback ? (
         <span className={["text-[12px]", feedback.kind === "ok" ? "text-[var(--text-success)]" : "text-[var(--aws-error)]"].join(" ")}>
           {feedback.msg}
@@ -2253,16 +4365,26 @@ type Column = {
   key: string;
   label: string;
   render?: (v: unknown, row: Record<string, unknown>) => React.ReactNode;
+  /** Drop this column below the given breakpoint — mobile-first column
+   *  hiding per the repo responsive convention (no horizontal scroll). */
+  hideBelow?: "sm" | "md" | "lg";
+};
+
+// Literal class strings so Tailwind's scanner keeps them in the build.
+const COL_HIDE_CLS: Record<NonNullable<Column["hideBelow"]>, string> = {
+  sm: "hidden sm:table-cell",
+  md: "hidden md:table-cell",
+  lg: "hidden lg:table-cell",
 };
 
 function RowTable({ rows, columns }: { rows: Array<Record<string, unknown>>; columns: Column[] }) {
   return (
-    <div className="overflow-x-auto -mx-1">
+    <div>
       <table className="w-full text-[13px] border-collapse">
         <thead className="bg-[var(--surface-subtle)]">
           <tr className="border-b border-[var(--aws-border)]">
             {columns.map((c) => (
-              <th key={c.key} className="px-3 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">
+              <th key={c.key} className={`px-3 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-[var(--text-secondary)] ${c.hideBelow ? COL_HIDE_CLS[c.hideBelow] : ""}`}>
                 {c.label}
               </th>
             ))}
@@ -2275,7 +4397,7 @@ function RowTable({ rows, columns }: { rows: Array<Record<string, unknown>>; col
                 const raw = row[c.key];
                 const display = c.render ? c.render(raw, row) : raw == null || raw === "" ? "—" : String(raw);
                 return (
-                  <td key={c.key} className="px-3 py-2 align-top max-w-[260px] truncate" title={typeof display === "string" ? display : undefined}>
+                  <td key={c.key} className={`px-3 py-2 align-top max-w-[160px] sm:max-w-[260px] truncate ${c.hideBelow ? COL_HIDE_CLS[c.hideBelow] : ""}`} title={typeof display === "string" ? display : undefined}>
                     {display}
                   </td>
                 );

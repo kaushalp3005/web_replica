@@ -32,9 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
-# But keep the documented template tracked — it's the source of truth for
-# what env vars the app needs, both locally and on Netlify.
-!.env.example
+# .env and .env.example are intentionally NOT committed — kept local only.
 
 # vercel
 .vercel

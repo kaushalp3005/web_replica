@@ -36,14 +36,17 @@ export default function LoginPage() {
         });
         return;
       }
+      // Save first either way — the change-password page reads me from
+      // localStorage to gate itself, so we need it on disk before we route.
+      userStore.save(me);
       if (me.must_change_password) {
-        setBanner({
-          kind: "info",
-          text: "You must change your password before continuing.",
-        });
+        // Force-change-password gate. We do NOT consume any stashed
+        // redirect target here — the user has to set a new password first;
+        // the post-change flow signs them out and the next login picks up
+        // the redirect normally.
+        router.replace("/change-password");
         return;
       }
-      userStore.save(me);
       // If apiFetch's 401 handler (or useRequireAuth's redirect) stashed
       // the path the user came from, bounce them straight back; otherwise
       // land on the modules grid.

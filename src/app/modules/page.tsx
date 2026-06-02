@@ -28,6 +28,13 @@ export default function ModulesPage() {
         if (!cancelled) {
           userStore.save(fresh);
           setMe(fresh);
+          // If an admin flipped must_change_password mid-session, the
+          // initial useRequireAuth check (which reads cached me) won't
+          // catch it. Re-gate on the fresh response.
+          if (fresh.must_change_password === true) {
+            router.replace("/change-password");
+            return;
+          }
         }
       } catch {
         signOut();

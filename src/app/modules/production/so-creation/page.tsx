@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useRequireAuth } from "@/lib/user";
+import { useSeesCost } from "@/lib/cost-gate";
 import {
   type GstStatus,
   type GstRecon,
@@ -116,9 +117,16 @@ function countAdvFilters(filters: Record<string, Set<string>>): number {
 
 // Export column spec — mirrors so-view.js._exportColumns (28 columns).
 // `get` reads from the SO header and the line+gst envelope.
+//
+// `gated: true` marks cost-bearing columns (C12) — dropped from the CSV
+// when the operator's role can't see ₹. The `*_amount` and `rate_inr`
+// fields appear in the backend `COST_BEARING_FIELDS` set, so omitting
+// them client-side matches what the API would have stripped anyway and
+// keeps the exported CSV honest for deny-list roles.
 type ExportCol = {
   key: string;
   label: string;
+  gated?: boolean;
   get: (so: SoRow, line?: SoLine, gst?: GstRecon | null) => string | number | null | undefined;
 };
 const EXPORT_COLUMNS: ExportCol[] = [
@@ -133,16 +141,16 @@ const EXPORT_COLUMNS: ExportCol[] = [
   { key: "sub_category",         label: "Sub Category",      get: (_so, l) => l?.sub_category },
   { key: "uom",                  label: "UOM",               get: (_so, l) => l?.uom },
   { key: "quantity",             label: "Pack Count",        get: (_so, l) => l?.quantity },
-  { key: "rate_inr",             label: "Rate",              get: (_so, l) => l?.rate_inr },
-  { key: "amount_inr",           label: "Amount",            get: (_so, l) => l?.amount_inr },
-  { key: "igst_amount",          label: "IGST",              get: (_so, l) => l?.igst_amount },
-  { key: "sgst_amount",          label: "SGST",              get: (_so, l) => l?.sgst_amount },
-  { key: "cgst_amount",          label: "CGST",              get: (_so, l) => l?.cgst_amount },
-  { key: "total_amount_inr",     label: "Total",             get: (_so, l) => l?.total_amount_inr },
-  { key: "apmc_amount",          label: "APMC",              get: (_so, l) => l?.apmc_amount },
-  { key: "packing_amount",       label: "Packing",           get: (_so, l) => l?.packing_amount },
-  { key: "freight_amount",       label: "Freight",           get: (_so, l) => l?.freight_amount },
-  { key: "processing_amount",    label: "Processing",        get: (_so, l) => l?.processing_amount },
+  { key: "rate_inr",             label: "Rate",              gated: true, get: (_so, l) => l?.rate_inr },
+  { key: "amount_inr",           label: "Amount",            gated: true, get: (_so, l) => l?.amount_inr },
+  { key: "igst_amount",          label: "IGST",              gated: true, get: (_so, l) => l?.igst_amount },
+  { key: "sgst_amount",          label: "SGST",              gated: true, get: (_so, l) => l?.sgst_amount },
+  { key: "cgst_amount",          label: "CGST",              gated: true, get: (_so, l) => l?.cgst_amount },
+  { key: "total_amount_inr",     label: "Total",             gated: true, get: (_so, l) => l?.total_amount_inr },
+  { key: "apmc_amount",          label: "APMC",              gated: true, get: (_so, l) => l?.apmc_amount },
+  { key: "packing_amount",       label: "Packing",           gated: true, get: (_so, l) => l?.packing_amount },
+  { key: "freight_amount",       label: "Freight",           gated: true, get: (_so, l) => l?.freight_amount },
+  { key: "processing_amount",    label: "Processing",        gated: true, get: (_so, l) => l?.processing_amount },
   { key: "item_type",            label: "Item Type",         get: (_so, l) => l?.item_type },
   { key: "item_description",     label: "Item Description",  get: (_so, l) => l?.item_description },
   { key: "sales_group",          label: "Sales Group",       get: (_so, l) => l?.sales_group },
@@ -162,18 +170,23 @@ function csvCell(v: unknown): string {
   return s;
 }
 
-function buildExportCsv(sos: SoRow[]): string {
+function buildExportCsv(sos: SoRow[], seesCost: boolean): string {
+  // Filter gated columns out for deny-list roles (C12) — the resulting
+  // CSV has no rate / amount / tax columns at all, matching what the
+  // backend would have stripped if the export path were proxied
+  // through `strip_cost_fields`.
+  const cols = EXPORT_COLUMNS.filter((c) => !c.gated || seesCost);
   const rows: string[] = [];
-  rows.push(EXPORT_COLUMNS.map((c) => csvCell(c.label)).join(","));
+  rows.push(cols.map((c) => csvCell(c.label)).join(","));
   for (const so of sos) {
     const entries = normaliseLines(so.lines);
     if (entries.length === 0) {
       // SOs with no lines still get a header-only row so they're not lost.
-      rows.push(EXPORT_COLUMNS.map((c) => csvCell(c.get(so))).join(","));
+      rows.push(cols.map((c) => csvCell(c.get(so))).join(","));
       continue;
     }
     for (const { line, gst_recon } of entries) {
-      rows.push(EXPORT_COLUMNS.map((c) => csvCell(c.get(so, line, gst_recon ?? null))).join(","));
+      rows.push(cols.map((c) => csvCell(c.get(so, line, gst_recon ?? null))).join(","));
     }
   }
   // Leading BOM so Excel detects UTF-8 instead of mojibake'ing currency
@@ -202,6 +215,11 @@ const STATUS_PALETTE: Record<string, { fg: string; bg: string; ring: string }> =
 export default function SoCreationPage() {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
+  // C12 cost-metric UI gate. Threaded into the export, the per-line
+  // card, and the per-line section components below. Deny-list roles
+  // (team_leader, qc_inspector, floor_manager, viewer) get no ₹ chrome
+  // anywhere on this page.
+  const { seesCost } = useSeesCost();
 
   // Method picker visibility — once the operator commits to upload, hide it.
   const [showMethods, setShowMethods] = useState(true);
@@ -220,6 +238,16 @@ export default function SoCreationPage() {
   const [cache] = useState<SoListCache | null>(() =>
     typeof window !== "undefined" ? loadSoListCache() : null,
   );
+
+  // Hydration guard. The cache above is sessionStorage-only, so seeding render
+  // state from it diverges between the server (cache-less) and the client's
+  // first render → hydration mismatch. Render a cache-free shell until mounted,
+  // then reveal the hydrated UI (deferred setState avoids the
+  // react-hooks/set-state-in-effect lint).
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    queueMicrotask(() => setMounted(true));
+  }, []);
 
   // Filters / sort / pagination ──────────────────────────────────────────
   const [search, setSearch] = useState(cache?.search ?? "");
@@ -435,7 +463,7 @@ export default function SoCreationPage() {
         setUploadMsg({ kind: "warn", text: "No Sales Orders match the current filters." });
         return;
       }
-      const csv = buildExportCsv(sos);
+      const csv = buildExportCsv(sos, seesCost);
       const suffix = only ? `-${only === "mismatch" ? "mismatches" : "warnings"}` : "";
       downloadBlob(
         new Blob([csv], { type: "text/csv;charset=utf-8;" }),
@@ -445,6 +473,19 @@ export default function SoCreationPage() {
     } catch (e) {
       setUploadMsg({ kind: "err", text: `Export failed: ${e instanceof Error ? e.message : "unknown"}` });
     }
+  }
+
+  if (!mounted) {
+    return (
+      <SoChrome title="SO Creation">
+        <div className="bg-white border border-[var(--aws-border)] rounded-md p-10 text-center text-[var(--text-secondary)]">
+          <span className="inline-flex items-center gap-2 text-[13px]">
+            <span className="inline-block w-4 h-4 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" />
+            Loading sales orders…
+          </span>
+        </div>
+      </SoChrome>
+    );
   }
 
   return (
@@ -545,6 +586,7 @@ export default function SoCreationPage() {
         onSort={changeSort}
         expanded={expanded}
         onToggle={toggleExpanded}
+        seesCost={seesCost}
         onEditHeader={(soId) => router.push(`/modules/production/so-creation/manual-update/${soId}?section=header`)}
         onEditLines={(soId) => router.push(`/modules/production/so-creation/manual-update/${soId}?section=lines`)}
       />
@@ -985,7 +1027,7 @@ function AdvancedFilterPanel({
 
 function SoTable({
   rows, loading, error, sortBy, sortOrder, onSort,
-  expanded, onToggle, onEditHeader, onEditLines,
+  expanded, onToggle, seesCost, onEditHeader, onEditLines,
 }: {
   rows: SoRow[];
   loading: boolean;
@@ -995,6 +1037,11 @@ function SoTable({
   onSort: (col: SortBy) => void;
   expanded: Set<number>;
   onToggle: (soId: number) => void;
+  // C12 cost-metric flag — propagated down to the per-line cards so
+  // ₹ values vanish for deny-list roles. Stored at the table level so
+  // both the mobile-card branch and the desktop-table branch read the
+  // same value.
+  seesCost: boolean;
   onEditHeader: (soId: number) => void;
   onEditLines: (soId: number) => void;
 }) {
@@ -1028,6 +1075,7 @@ function SoTable({
               row={row}
               isOpen={row.so_id != null && expanded.has(row.so_id)}
               onToggle={() => row.so_id != null && onToggle(row.so_id)}
+              seesCost={seesCost}
               onEditHeader={() => row.so_id != null && onEditHeader(row.so_id)}
               onEditLines={() => row.so_id != null && onEditLines(row.so_id)}
             />
@@ -1076,6 +1124,7 @@ function SoTable({
                     row={row}
                     isOpen={!!isOpen}
                     onToggle={() => row.so_id != null && onToggle(row.so_id)}
+                    seesCost={seesCost}
                     onEditHeader={() => row.so_id != null && onEditHeader(row.so_id)}
                     onEditLines={() => row.so_id != null && onEditLines(row.so_id)}
                   />
@@ -1097,11 +1146,12 @@ function SoTable({
 // the same data into one card per SO with a tap-to-expand affordance.
 
 function SoMobileCard({
-  row, isOpen, onToggle, onEditHeader, onEditLines,
+  row, isOpen, onToggle, seesCost, onEditHeader, onEditLines,
 }: {
   row: SoRow;
   isOpen: boolean;
   onToggle: () => void;
+  seesCost: boolean;
   onEditHeader: () => void;
   onEditLines: () => void;
 }) {
@@ -1162,7 +1212,7 @@ function SoMobileCard({
       </div>
       {isOpen ? (
         <div className="border-t border-[var(--aws-border)] p-3 bg-[var(--surface-subtle)]">
-          <SoLineDetail row={row} />
+          <SoLineDetail row={row} seesCost={seesCost} />
         </div>
       ) : null}
     </div>
@@ -1201,11 +1251,12 @@ function Th({
 }
 
 function SoTableRow({
-  row, isOpen, onToggle, onEditHeader, onEditLines,
+  row, isOpen, onToggle, seesCost, onEditHeader, onEditLines,
 }: {
   row: SoRow;
   isOpen: boolean;
   onToggle: () => void;
+  seesCost: boolean;
   onEditHeader: () => void;
   onEditLines: () => void;
 }) {
@@ -1268,7 +1319,7 @@ function SoTableRow({
       {isOpen ? (
         <tr className="border-b border-[var(--aws-border)] bg-[var(--surface-subtle)]">
           <td colSpan={8} className="px-3 py-3" style={{ borderLeft: `3px solid ${palette.fg}` }}>
-            <SoLineDetail row={row} />
+            <SoLineDetail row={row} seesCost={seesCost} />
           </td>
         </tr>
       ) : null}
@@ -1320,7 +1371,7 @@ function GstSegBar({ row }: { row: SoRow }) {
   );
 }
 
-function SoLineDetail({ row }: { row: SoRow }) {
+function SoLineDetail({ row, seesCost }: { row: SoRow; seesCost: boolean }) {
   // Backend ships the list endpoint's `lines` as [{ line, gst_recon }] but
   // the detail endpoint ships a flat SoLine[]. normaliseLines() collapses
   // both into a single shape so the column readers don't have to branch.
@@ -1346,7 +1397,7 @@ function SoLineDetail({ row }: { row: SoRow }) {
       ) : (
         <div className="space-y-2">
           {entries.map(({ line, gst_recon }, i) => (
-            <LineCard key={line.so_line_id ?? line.line_number ?? i} line={line} gst={gst_recon ?? null} />
+            <LineCard key={line.so_line_id ?? line.line_number ?? i} line={line} gst={gst_recon ?? null} seesCost={seesCost} />
           ))}
         </div>
       )}
@@ -1363,7 +1414,7 @@ function SoLineDetail({ row }: { row: SoRow }) {
 //   4. GST Reconciliation (+ Excel-vs-Master compare table + checks),
 //      or "No GST Reconciliation" when gst_recon is null.
 
-function LineCard({ line, gst }: { line: SoLine; gst: GstRecon | null }) {
+function LineCard({ line, gst, seesCost }: { line: SoLine; gst: GstRecon | null; seesCost: boolean }) {
   const [open, setOpen] = useState(false);
   const status = (gst?.status ?? line.gst_status ?? (gst ? "ok" : "unmatched")) as string;
   const palette = STATUS_PALETTE[status] ?? STATUS_PALETTE.unmatched;
@@ -1395,9 +1446,14 @@ function LineCard({ line, gst }: { line: SoLine; gst: GstRecon | null }) {
           {line.sku_name || "Unnamed Article"}
           {isUnmatched ? <span className="ml-2 text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)]">Unmatched</span> : null}
         </span>
-        <span className="text-[12px] font-mono tabular-nums text-[var(--text-secondary)] shrink-0">
-          ₹{fmtNum(line.total_amount_inr)}
-        </span>
+        {/* C12: deny-list roles never see the ₹ chip on the row header.
+            The status chip + line title still anchor the layout, so
+            hiding this doesn't break the row alignment. */}
+        {seesCost ? (
+          <span className="text-[12px] font-mono tabular-nums text-[var(--text-secondary)] shrink-0">
+            ₹{fmtNum(line.total_amount_inr)}
+          </span>
+        ) : null}
         <span
           className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-sm capitalize shrink-0"
           style={{ background: palette.bg, color: palette.fg, border: `1px solid ${palette.ring}` }}
@@ -1410,9 +1466,13 @@ function LineCard({ line, gst }: { line: SoLine; gst: GstRecon | null }) {
       {open ? (
         <div className="border-t border-[var(--aws-border)] p-3 bg-[var(--surface-subtle)] space-y-3">
           <LineItemSection line={line} />
-          <PricingSection line={line} />
+          {/* PricingSection retains Pack Count, Quantity (Kg), and
+              Rate Type for all roles; the ₹ cells are gated inside the
+              component via `seesCost` so deny-list roles still get the
+              operational metrics without any cost chrome. */}
+          <PricingSection line={line} seesCost={seesCost} />
           <MatchSection line={line} />
-          {gst ? <GstSection line={line} gst={gst} /> : <NoGstSection />}
+          {gst ? <GstSection line={line} gst={gst} seesCost={seesCost} /> : <NoGstSection />}
         </div>
       ) : null}
     </div>
@@ -1463,23 +1523,32 @@ function LineItemSection({ line }: { line: SoLine }) {
   );
 }
 
-function PricingSection({ line }: { line: SoLine }) {
+function PricingSection({ line, seesCost }: { line: SoLine; seesCost: boolean }) {
+  // The Pack Count, Quantity (Kg), and Rate Type fields are operational
+  // (not currency) and stay visible for every role. The remaining cells
+  // are all currency amounts — they're gated by `seesCost`. The grid
+  // auto-collapses cleanly because every KV is the same shape, so the
+  // narrower 3-cell view for deny-list roles still aligns at md+.
   return (
-    <SectionShell title="Quantity & Pricing">
+    <SectionShell title={seesCost ? "Quantity & Pricing" : "Quantity"}>
       <dl className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-3 gap-y-2">
         <KV label="Pack Count"          value={fmtNum(line.quantity)}        mono />
         <KV label="Quantity (Kg)"       value={fmtNum(line.quantity_units)}  mono />
-        <KV label="Rate (INR)"          value={fmtCur(line.rate_inr)}        mono />
         <KV label="Rate Type"           value={line.rate_type || "—"} />
-        <KV label="Amount (INR)"        value={fmtCur(line.amount_inr)}      mono />
-        <KV label="IGST Amount"         value={fmtCur(line.igst_amount)}     mono />
-        <KV label="SGST Amount"         value={fmtCur(line.sgst_amount)}     mono />
-        <KV label="CGST Amount"         value={fmtCur(line.cgst_amount)}     mono />
-        <KV label="APMC Amount"         value={fmtCur(line.apmc_amount)}     mono />
-        <KV label="Packing Amount"      value={fmtCur(line.packing_amount)}  mono />
-        <KV label="Freight Amount"      value={fmtCur(line.freight_amount)}  mono />
-        <KV label="Processing Amount"   value={fmtCur(line.processing_amount)} mono />
-        <KV label="Total Amount (INR)"  value={fmtCur(line.total_amount_inr)} mono accent="ok" />
+        {seesCost ? (
+          <>
+            <KV label="Rate (INR)"          value={fmtCur(line.rate_inr)}        mono />
+            <KV label="Amount (INR)"        value={fmtCur(line.amount_inr)}      mono />
+            <KV label="IGST Amount"         value={fmtCur(line.igst_amount)}     mono />
+            <KV label="SGST Amount"         value={fmtCur(line.sgst_amount)}     mono />
+            <KV label="CGST Amount"         value={fmtCur(line.cgst_amount)}     mono />
+            <KV label="APMC Amount"         value={fmtCur(line.apmc_amount)}     mono />
+            <KV label="Packing Amount"      value={fmtCur(line.packing_amount)}  mono />
+            <KV label="Freight Amount"      value={fmtCur(line.freight_amount)}  mono />
+            <KV label="Processing Amount"   value={fmtCur(line.processing_amount)} mono />
+            <KV label="Total Amount (INR)"  value={fmtCur(line.total_amount_inr)} mono accent="ok" />
+          </>
+        ) : null}
       </dl>
     </SectionShell>
   );
@@ -1517,7 +1586,7 @@ function MatchSection({ line }: { line: SoLine }) {
   );
 }
 
-function GstSection({ line, gst }: { line: SoLine; gst: GstRecon }) {
+function GstSection({ line, gst, seesCost }: { line: SoLine; gst: GstRecon; seesCost: boolean }) {
   const status = String(gst.status ?? "unmatched");
   const palette = STATUS_PALETTE[status] ?? STATUS_PALETTE.unmatched;
   const diff = parseFloat(String(gst.gst_difference ?? 0));
@@ -1533,11 +1602,16 @@ function GstSection({ line, gst }: { line: SoLine; gst: GstRecon }) {
               </span>
             }
           />
+          {/* GST RATES (0.18 = 18%) are dimensionless percentages — they
+              stay visible for every role. The corresponding AMOUNT cells
+              are currency-denominated, so they vanish for deny-list
+              roles. The grid auto-reflows because every cell is the same
+              shape, so dropping cells doesn't break alignment. */}
           <KV label="Expected GST Rate"   value={fmtRate(gst.expected_gst_rate)} mono />
           <KV label="Actual GST Rate"     value={fmtRate(gst.actual_gst_rate)}   mono />
-          <KV label="Expected GST Amount" value={fmtCur(gst.expected_gst_amount)} mono />
-          <KV label="Actual GST Amount"   value={fmtCur(gst.actual_gst_amount)}   mono />
-          <KV label="GST Difference"      value={fmtCur(gst.gst_difference)}      mono accent={Math.abs(diff) > 0.01 ? "err" : undefined} />
+          {seesCost ? <KV label="Expected GST Amount" value={fmtCur(gst.expected_gst_amount)} mono /> : null}
+          {seesCost ? <KV label="Actual GST Amount"   value={fmtCur(gst.actual_gst_amount)}   mono /> : null}
+          {seesCost ? <KV label="GST Difference"      value={fmtCur(gst.gst_difference)}      mono accent={Math.abs(diff) > 0.01 ? "err" : undefined} /> : null}
           <KV label="GST Type"            value={gst.gst_type || "—"} mono />
         </dl>
       </SectionShell>
@@ -1561,14 +1635,17 @@ function GstSection({ line, gst }: { line: SoLine; gst: GstRecon }) {
               <CompareRow label="Sales Group"   excel={line.sales_group}   master={gst.matched_sales_group} />
               <CompareRow label="Item Type"     excel={line.item_type}     master={gst.matched_item_type} />
               <CompareRow label="GST Rate"      excel={gst.actual_gst_rate}   master={gst.expected_gst_rate}   format="rate" />
-              <CompareRow label="GST Amount"    excel={gst.actual_gst_amount} master={gst.expected_gst_amount} format="cur" />
+              {/* GST Amount comparison is currency-denominated → gated. */}
+              {seesCost ? (
+                <CompareRow label="GST Amount"    excel={gst.actual_gst_amount} master={gst.expected_gst_amount} format="cur" />
+              ) : null}
             </tbody>
           </table>
         </div>
       </SectionShell>
 
       <SectionShell title="GST Validation Checks">
-        <ValidationChecks line={line} gst={gst} />
+        <ValidationChecks line={line} gst={gst} seesCost={seesCost} />
         {gst.notes ? (
           <div className="mt-3 pt-3 border-t border-[var(--aws-border)]">
             <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)] mb-1">Notes</div>
@@ -1645,7 +1722,7 @@ function CompareRow({
   );
 }
 
-function ValidationChecks({ line, gst }: { line: SoLine; gst: GstRecon }) {
+function ValidationChecks({ line, gst, seesCost }: { line: SoLine; gst: GstRecon; seesCost: boolean }) {
   type Check = { pass: boolean; warn: boolean; text: React.ReactNode };
   const checks: Check[] = [];
   if (gst.expected_gst_rate != null) {
@@ -1655,10 +1732,14 @@ function ValidationChecks({ line, gst }: { line: SoLine; gst: GstRecon }) {
   if (gst.gst_type_valid != null) {
     checks.push({ pass: !!gst.gst_type_valid, warn: false, text: <>GST Type — <strong>{gst.gst_type || "—"}</strong> {gst.gst_type_valid ? "(valid)" : "(IGST and SGST/CGST both non-zero)"}</> });
   }
-  if (gst.sgst_cgst_equal != null) {
+  // The SGST/CGST equality and the Amount+GST=Total checks both inline
+  // ₹ values, so we drop the rows entirely for deny-list roles instead
+  // of rendering a check string with the cost numbers stripped (which
+  // would read as nonsense — "SGST   equals CGST  ").
+  if (seesCost && gst.sgst_cgst_equal != null) {
     checks.push({ pass: !!gst.sgst_cgst_equal, warn: false, text: <>SGST/CGST Equal — SGST <strong>{fmtCur(line.sgst_amount)}</strong>, CGST <strong>{fmtCur(line.cgst_amount)}</strong></> });
   }
-  if (gst.total_with_gst_valid != null) {
+  if (seesCost && gst.total_with_gst_valid != null) {
     checks.push({ pass: !!gst.total_with_gst_valid, warn: false, text: <>Total — Amount (<strong>{fmtCur(line.amount_inr)}</strong>) + GST (<strong>{fmtCur(gst.actual_gst_amount)}</strong>) = Total (<strong>{fmtCur(line.total_amount_inr)}</strong>) {gst.total_with_gst_valid ? "— Matched" : "— Mismatch"}</> });
   }
   if (gst.uom_match != null) {

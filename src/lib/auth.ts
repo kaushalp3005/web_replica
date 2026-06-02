@@ -76,6 +76,16 @@ export interface LoginResponse {
   user?: unknown;
 }
 
+// Role-envelope shape returned by `/me` (server: auth_service._role_payload).
+// Each entry has `code` (the canonical role_name) and optionally `is_admin`.
+// Older builds shipped just the bare string; we tolerate both at the call
+// site (see lib/cost-gate.ts:extractRoleName).
+export interface MeRoleEnvelope {
+  code?: string;
+  role_name?: string;
+  is_admin?: boolean;
+}
+
 export interface MeResponse {
   user_id?: string;
   phone?: string;
@@ -84,16 +94,66 @@ export interface MeResponse {
   status: string;
   must_change_password: boolean;
   is_admin?: boolean;
-  roles?: unknown[];
+  // C12-fix M6: typed `role_name` + `roles` so consumers no longer cast
+  // inline. `roles` is heterogeneous on the wire (envelope objects on new
+  // builds, bare strings on old ones); the cost-gate normaliser handles
+  // both shapes.
+  role_name?: string;
+  roles?: (string | MeRoleEnvelope)[];
   permissions?: unknown[];
   [key: string]: unknown;
 }
 
 const ME_KEY = "auth.me";
 
+// C12-fix M2: normalise `is_admin` once on save so every consumer (cost
+// gate, scope hooks, route guards) reads the same flag without having to
+// re-walk the `roles` envelope. Precedence — admin wins:
+//
+//   me.is_admin === true                       → admin
+//   any roles[].is_admin === true              → admin
+//   any roles[].code === "admin" (or string)   → admin
+//
+// `_normaliseAdmin` returns a SHALLOW copy with the flag set; the original
+// object is left untouched so callers (e.g. profile page) can keep using
+// the response they got from `/me`.
+function _normaliseAdmin(me: MeResponse): MeResponse {
+  if (me.is_admin === true) return me;
+  const roles = Array.isArray(me.roles) ? me.roles : null;
+  if (!roles) return me;
+  for (const r of roles) {
+    if (typeof r === "string") {
+      if (r === "admin") return { ...me, is_admin: true };
+      continue;
+    }
+    if (r && typeof r === "object") {
+      const env = r as MeRoleEnvelope;
+      if (env.is_admin === true) return { ...me, is_admin: true };
+      if (env.code === "admin" || env.role_name === "admin") {
+        return { ...me, is_admin: true };
+      }
+    }
+  }
+  return me;
+}
+
+// C12-fix M3: tiny pub-sub. `useMe` / `useSeesCost` subscribe so a fresh
+// `/me` fetch propagates into already-mounted screens (e.g. the profile
+// page hydrates faster than the avatar dropdown). Cross-tab sync comes for
+// free via the `storage` event in the hook.
+type MeListener = (me: MeResponse | null) => void;
+const meListeners = new Set<MeListener>();
+function _notifyMeListeners(me: MeResponse | null): void {
+  for (const fn of meListeners) {
+    try { fn(me); } catch { /* one listener failure shouldn't stop the rest */ }
+  }
+}
+
 export const userStore = {
   save(me: MeResponse) {
-    safeSet(ME_KEY, JSON.stringify(me));
+    const normalised = _normaliseAdmin(me);
+    safeSet(ME_KEY, JSON.stringify(normalised));
+    _notifyMeListeners(normalised);
   },
   load(): MeResponse | null {
     const raw = safeGet(ME_KEY);
@@ -106,6 +166,13 @@ export const userStore = {
   },
   clear() {
     safeRemove(ME_KEY);
+    _notifyMeListeners(null);
+  },
+  // Subscribe to save/clear events. Returns an unsubscribe callback so
+  // hooks (and tests) can clean up on unmount.
+  subscribe(fn: MeListener): () => void {
+    meListeners.add(fn);
+    return () => { meListeners.delete(fn); };
   },
 };
 
@@ -210,6 +277,23 @@ async function parseEnvelope(res: Response): Promise<ErrorEnvelope> {
   } catch {
     return { error: "unknown_error", message: `HTTP ${res.status}` };
   }
+}
+
+// W4-HIGH-2: shared error envelope reader used by any caller that wants the
+// canonical {message} or {error} string out of a failed response. Reads the
+// JSON body in a try; falls through to `fallback` if the body is empty or
+// non-JSON. Centralised here so a `res.text()`-style probe never goes back
+// onto the wire for an HTML error page (which used to be alert()-ed verbatim).
+export async function readApiErrorMessage(res: Response, fallback: string): Promise<string> {
+  try {
+    const data = (await res.json()) as { message?: string; error?: string } | null;
+    if (data && (data.message || data.error)) {
+      return String(data.message || data.error);
+    }
+  } catch {
+    /* non-JSON body — fall through to fallback */
+  }
+  return fallback;
 }
 
 export async function login(phone: string, password: string): Promise<LoginResponse> {

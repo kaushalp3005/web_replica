@@ -23,6 +23,7 @@ import {
   getPlan,
   approvePlan,
   cancelPlan,
+  submitPlanFieldChangeAmendment,
   updatePlan,
   deletePlan,
   updatePlanLine,
@@ -189,13 +190,44 @@ export default function PlanDetailPage() {
   // operator changed end up in the body — `updatePlan()` drops undefined
   // / empty values before serialising. The server then filters its own
   // `None`-keys, so unchanged columns stay exactly as they were.
+  //
+  // Routing per plan status:
+  //   • draft     → direct PUT /plans-v2/{id}            (no approval gate)
+  //   • approved  → POST /amendments  (plan_field_change) — admin must
+  //                 approve before the fields are actually applied;
+  //                 cascade rules + step-change limits handled server-side.
   async function onUpdate(patch: UpdatePlanBody) {
     if (!detail) return;
     setBusy(true);
     setToast(null);
     try {
-      await updatePlan(detail.plan_id, patch);
-      setToast("Plan updated.");
+      if (isApproved) {
+        // Maker-checker path: collect reason, submit an amendment.
+        // window.prompt is a deliberate MVP affordance; a textarea in
+        // the EditModal is the follow-up polish (the server enforces
+        // the min-20-char rule regardless).
+        const reason = (window.prompt(
+          "This plan is approved. Submit edit for admin approval?\n\n"
+          + "Provide a reason (≥ 20 characters):",
+          "",
+        ) ?? "").trim();
+        if (!reason) {
+          setToast("Edit cancelled — no reason provided.");
+          return;
+        }
+        if (reason.length < 20) {
+          setToast("Reason must be at least 20 characters.");
+          return;
+        }
+        await submitPlanFieldChangeAmendment(
+          { plan_id: detail.plan_id, plan_fields: patch },
+          reason,
+        );
+        setToast("Edit submitted for admin approval.");
+      } else {
+        await updatePlan(detail.plan_id, patch);
+        setToast("Plan updated.");
+      }
       setEditing(false);
       setReload((k) => k + 1);
     } catch (e) {
@@ -244,6 +276,9 @@ export default function PlanDetailPage() {
             <LinesSection
               lines={detail.lines ?? []}
               warehouse={detail.warehouse}
+              editable={isDraft || isApproved}
+              planId={detail.plan_id}
+              requireApproval={isApproved}
               onSaved={() => setReload((k) => k + 1)}
               onMessage={setToast}
             />
@@ -517,10 +552,18 @@ function AuditKV({
 // have multiple pending drafts open and confuse themselves.
 
 function LinesSection({
-  lines, warehouse, onSaved, onMessage,
+  lines, warehouse, editable, planId, requireApproval, onSaved, onMessage,
 }: {
   lines: PlanLineRow[];
   warehouse?: string | null;
+  /** Plan-level gate. False on cancelled / executed plans → hide every
+   *  per-line Edit affordance. True on draft / approved plans. */
+  editable: boolean;
+  planId: number;
+  /** When true (status='approved') line edits route through the R8
+   *  amendment flow (POST /amendments plan_field_change) instead of
+   *  direct PUT. Step changes are blocked entirely in this mode. */
+  requireApproval: boolean;
   onSaved: () => void;
   onMessage: (msg: string | null) => void;
 }) {
@@ -544,8 +587,11 @@ function LinesSection({
             line={l}
             idx={i + 1}
             warehouse={warehouse}
-            isEditing={editingLineId != null && editingLineId === l.plan_line_id}
-            onStartEdit={() => setEditingLineId(l.plan_line_id ?? null)}
+            editable={editable}
+            planId={planId}
+            requireApproval={requireApproval}
+            isEditing={editable && editingLineId != null && editingLineId === l.plan_line_id}
+            onStartEdit={() => editable && setEditingLineId(l.plan_line_id ?? null)}
             onCancelEdit={() => setEditingLineId(null)}
             onSaved={() => { setEditingLineId(null); onSaved(); }}
             onMessage={onMessage}
@@ -570,11 +616,15 @@ interface StepDraft {
 }
 
 function LineCard({
-  line, idx, warehouse, isEditing, onStartEdit, onCancelEdit, onSaved, onMessage,
+  line, idx, warehouse, editable, planId, requireApproval,
+  isEditing, onStartEdit, onCancelEdit, onSaved, onMessage,
 }: {
   line: PlanLineRow;
   idx: number;
   warehouse?: string | null;
+  editable: boolean;
+  planId: number;
+  requireApproval: boolean;
   isEditing: boolean;
   onStartEdit: () => void;
   onCancelEdit: () => void;
@@ -587,6 +637,8 @@ function LineCard({
         line={line}
         idx={idx}
         warehouse={warehouse}
+        planId={planId}
+        requireApproval={requireApproval}
         onCancel={onCancelEdit}
         onSaved={onSaved}
         onMessage={onMessage}
@@ -624,19 +676,21 @@ function LineCard({
             </div>
           ) : null}
         </div>
-        <button
-          type="button"
-          onClick={onStartEdit}
-          aria-label="Edit line"
-          title="Edit qty, area, deadline, steps"
-          className="shrink-0 inline-flex items-center gap-1 h-7 px-2 text-[11px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)]"
-        >
-          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-          </svg>
-          Edit
-        </button>
+        {editable ? (
+          <button
+            type="button"
+            onClick={onStartEdit}
+            aria-label="Edit line"
+            title="Edit qty, area, deadline, steps"
+            className="shrink-0 inline-flex items-center gap-1 h-7 px-2 text-[11px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)]"
+          >
+            <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+            </svg>
+            Edit
+          </button>
+        ) : null}
       </div>
 
       {/* ── Zone 2: meta strip ────────────────────────────────────── */}
@@ -702,11 +756,17 @@ function LineCard({
 // line PUT last.
 
 function LineCardEdit({
-  line, idx, warehouse, onCancel, onSaved, onMessage,
+  line, idx, warehouse, planId, requireApproval, onCancel, onSaved, onMessage,
 }: {
   line: PlanLineRow;
   idx: number;
   warehouse?: string | null;
+  planId: number;
+  /** When true, line edits go through the R8 plan_field_change amendment
+   *  flow. Step changes are not supported on approved plans because the
+   *  amendment scope only covers line fields — operator gets a clear
+   *  error toast if they try. */
+  requireApproval: boolean;
   onCancel: () => void;
   onSaved: () => void;
   onMessage: (msg: string | null) => void;
@@ -880,6 +940,56 @@ function LineCardEdit({
       !orderChanged
     ) {
       onMessage("Nothing to save.");
+      return;
+    }
+
+    // Approved-plan path: route line-field changes through the R8
+    // plan_field_change amendment. Step changes are blocked entirely on
+    // approved plans because the amendment scope only covers line fields
+    // — operator must cancel + recreate the plan if step structure needs
+    // editing.
+    if (requireApproval) {
+      const stepsTouched = patches.length > 0 || deletes.length > 0 || orderChanged;
+      if (stepsTouched) {
+        onMessage(
+          "Step edits aren't supported on approved plans yet. Cancel the plan and create a new revision, or revert the step changes and resubmit only line-level edits.",
+        );
+        return;
+      }
+      if (Object.keys(lineDiff).length === 0 || line.plan_line_id == null) {
+        onMessage("Nothing to save.");
+        return;
+      }
+      const reason = (window.prompt(
+        "This plan is approved. Submit line edit for admin approval?\n\n"
+        + "Provide a reason (≥ 20 characters):",
+        "",
+      ) ?? "").trim();
+      if (!reason) {
+        onMessage("Edit cancelled — no reason provided.");
+        return;
+      }
+      if (reason.length < 20) {
+        onMessage("Reason must be at least 20 characters.");
+        return;
+      }
+      setBusy(true);
+      onMessage(null);
+      try {
+        await submitPlanFieldChangeAmendment(
+          {
+            plan_id: planId,
+            line_changes: [{ plan_line_id: line.plan_line_id, fields: lineDiff }],
+          },
+          reason,
+        );
+        onMessage("Line edit submitted for admin approval.");
+        onSaved();
+      } catch (e) {
+        onMessage(`Submit failed: ${e instanceof Error ? e.message : "unknown"}`);
+      } finally {
+        setBusy(false);
+      }
       return;
     }
 

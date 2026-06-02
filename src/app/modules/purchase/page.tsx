@@ -1,7 +1,7 @@
 "use client";
 
 // Purchase module landing. Mirrors production/page.tsx card pattern.
-// Only PO Upload + Manual Entry are implemented on the web today.
+// PO Upload is the purchase entry point on the web.
 
 import { useRouter } from "next/navigation";
 import { useRequireAuth } from "@/lib/user";
@@ -12,7 +12,6 @@ type SubModule = { title: string; description: string; route: string };
 
 const SUB_MODULES: SubModule[] = [
   { title: "PO Upload", description: "Upload a PO workbook (.xlsx), preview SKU matches and duplicates, then commit. Browse, filter, and export existing purchase orders.", route: "/modules/purchase/po-creation" },
-  { title: "Manual Entry", description: "Create a purchase order by hand — header, line items with SKU lookup, lots, and box weights.", route: "/modules/purchase/po-creation/manual" },
 ];
 
 export default function PurchaseLandingPage() {
@@ -27,7 +26,7 @@ export default function PurchaseLandingPage() {
       <div className="mb-6">
         <h1 className="text-[22px] leading-[28px] font-semibold text-[var(--text-primary)]">Purchase</h1>
         <p className="text-[13px] text-[var(--text-secondary)] mt-1">
-          Upload and review purchase orders, or create one manually.
+          Upload, review, filter, and export purchase orders.
         </p>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">

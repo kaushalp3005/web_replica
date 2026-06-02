@@ -96,6 +96,16 @@ export default function PoCreationPage(): React.JSX.Element {
     typeof window !== "undefined" ? loadPoListCache() : null,
   );
 
+  // Hydration guard. The cache above is sessionStorage-only, so seeding render
+  // state from it diverges between the server (cache-less) and the client's
+  // first render → hydration mismatch. Render a cache-free shell until mounted,
+  // then reveal the hydrated UI (deferred setState avoids the
+  // react-hooks/set-state-in-effect lint).
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    queueMicrotask(() => setMounted(true));
+  }, []);
+
   // ── Listing state (controlled) ────────────────────────────────────────────
 
   const [search, setSearch] = useState<string>(cache?.search ?? "");
@@ -239,6 +249,22 @@ export default function PoCreationPage(): React.JSX.Element {
     setPreviewData(null);
     setCommitResult(result);
     setReloadKey((k) => k + 1);
+  }
+
+  // Hydration guard — render a cache-free shell on the first (server + client)
+  // render so hydration matches; the cache-hydrated UI mounts one frame later.
+  // Placed before the auth guard so the first render is deterministic.
+  if (!mounted) {
+    return (
+      <PurchaseChrome title="Purchase Order Upload">
+        <div className="bg-white border border-[var(--aws-border)] rounded-md p-10 text-center text-[var(--text-secondary)]">
+          <span className="inline-flex items-center gap-2 text-[13px]">
+            <span className="inline-block w-4 h-4 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" />
+            Loading purchase orders…
+          </span>
+        </div>
+      </PurchaseChrome>
+    );
   }
 
   // ── Guard until auth is confirmed ─────────────────────────────────────────

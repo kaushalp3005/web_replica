@@ -8,11 +8,12 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useRequireAuth } from "@/lib/user";
+import { useSeesCost, seesCostFor } from "@/lib/cost-gate";
 import { createSo, COMPANY_OPTIONS, VOUCHER_TYPE_OPTIONS } from "@/lib/so";
-import { registerOnSignOut } from "@/lib/auth";
+import { registerOnSignOut, userStore } from "@/lib/auth";
 import { sessionLoad, sessionSave, sessionClear } from "@/lib/session-state";
 import { SoChrome } from "../_chrome";
-import { SoLineEditor, emptyLine, lineToWire, type LineRow } from "../_SoLineForm";
+import { SoLineEditor, emptyLine, lineToWire, stripLineCostFields, type LineRow } from "../_SoLineForm";
 
 interface HeaderForm {
   so_number: string;
@@ -44,13 +45,30 @@ interface ManualSoDraft {
 export default function ManualSoEntryPage() {
   const router = useRouter();
   useRequireAuth(router.replace);
+  // C12 cost-metric gate. Deny-list roles never see the rate / amount
+  // inputs (the editor hides them), so we can't require `rate_inr` from
+  // them. The validation block below branches on this flag.
+  const { seesCost } = useSeesCost();
 
   // Lazy load the draft ONCE on mount (returns null on SSR or no entry).
   // Both header + lines hydrate from the same snapshot, then maintain their
   // own state — write-through to sessionStorage happens via the effect below.
-  const [initialDraft] = useState<ManualSoDraft | null>(() =>
-    typeof window !== "undefined" ? sessionLoad<ManualSoDraft>(DRAFT_KEY) : null,
-  );
+  //
+  // C12-fix H3: drafts persist across users on the same device (sign-out
+  // drains, but a fresh sign-in by a different operator could land here
+  // with a stale draft written by an allow-listed teammate). If the
+  // current operator can't see cost, scrub the persisted cost columns at
+  // hydrate time so they never reach state — much less the wire.
+  // `seesCostFor(userStore.load())` is the synchronous boundary check;
+  // calling the hook here would be too late (the initialiser only runs
+  // once, the hook only resolves after the first render).
+  const [initialDraft] = useState<ManualSoDraft | null>(() => {
+    if (typeof window === "undefined") return null;
+    const raw = sessionLoad<ManualSoDraft>(DRAFT_KEY);
+    if (!raw) return null;
+    if (seesCostFor(userStore.load())) return raw;
+    return { header: raw.header, lines: raw.lines.map(stripLineCostFields) };
+  });
   const [header, setHeader] = useState<HeaderForm>(initialDraft?.header ?? EMPTY_HEADER);
   const [lines, setLines] = useState<LineRow[]>(initialDraft?.lines ?? []);
   const [submitting, setSubmitting] = useState(false);
@@ -101,16 +119,27 @@ export default function ManualSoEntryPage() {
       setFeedback({ kind: "err", msg: "Add at least one line item." });
       return;
     }
-    // Per-line validation
+    // Per-line validation. Rate is only required when the operator is
+    // allowed to see / enter cost — the editor hides the Rate input for
+    // deny-list roles (C12), so requiring it would dead-lock them.
     for (let i = 0; i < lines.length; i++) {
       const l = lines[i];
       if (!l.sku_name.trim()) { setFeedback({ kind: "err", msg: `Line ${i + 1}: Particulars is required.` }); return; }
       if (!l.quantity.trim()) { setFeedback({ kind: "err", msg: `Line ${i + 1}: Pack count is required.` }); return; }
-      if (!l.rate_inr.trim()) { setFeedback({ kind: "err", msg: `Line ${i + 1}: Rate is required.` }); return; }
+      if (seesCost && !l.rate_inr.trim()) { setFeedback({ kind: "err", msg: `Line ${i + 1}: Rate is required.` }); return; }
     }
 
     setSubmitting(true);
     try {
+      // C12-fix H3: belt-and-braces strip. The editor already hides cost
+      // inputs for deny-list roles and the auto-compute effect skips
+      // currency math when `seesCost` is false, but a stale draft or a
+      // future bug could still leave a `*_amount` value on the LineRow.
+      // Drop them here before mapping to the wire shape so the server
+      // never records numbers the operator can't see.
+      const wireLines = lines
+        .map((l) => (seesCost ? l : stripLineCostFields(l)))
+        .map(lineToWire);
       await createSo({
         so_number: header.so_number.trim(),
         so_date: header.so_date,
@@ -118,7 +147,7 @@ export default function ManualSoEntryPage() {
         common_customer_name: header.common_customer_name.trim(),
         company: header.company,
         voucher_type: header.voucher_type,
-        lines: lines.map(lineToWire),
+        lines: wireLines,
       });
       setFeedback({ kind: "ok", msg: "Sales Order created." });
       // Draft has served its purpose — drop it before navigating away so
