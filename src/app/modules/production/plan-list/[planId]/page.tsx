@@ -11,7 +11,7 @@ import { useEffect, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { useParams, useRouter } from "next/navigation";
 import { userStore } from "@/lib/auth";
-import { useRequireAuth, useUserInitial } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useIsAdmin } from "@/lib/user";
 import { BackLink } from "@/components/BackLink";
 import {
   type PlanDetail,
@@ -110,6 +110,13 @@ export default function PlanDetailPage() {
   const isDraft = status === "draft";
   const isApproved = status === "approved";
   const hasMobileBar = isDraft || isApproved;
+  // Admins bypass the R8 plan_field_change amendment flow on approved
+  // plans — they can direct-edit line fields AND step structure without a
+  // reason prompt or the "step edits aren't supported" block. This still
+  // routes through the same per-step PUT/POST/DELETE endpoints (no server
+  // gate on step writes by plan status), so the wire shape is unchanged
+  // for the audit log.
+  const isAdmin = useIsAdmin();
 
   async function onApprove() {
     if (!detail) return;
@@ -280,7 +287,10 @@ export default function PlanDetailPage() {
               warehouse={detail.warehouse}
               editable={isDraft || isApproved}
               planId={detail.plan_id}
-              requireApproval={isApproved}
+              // Admin bypass: treat the plan as if it weren't approved so
+              // line + step edits flow through the direct-write path
+              // instead of the amendment + step-block gates.
+              requireApproval={isApproved && !isAdmin}
               onSaved={() => setReload((k) => k + 1)}
               onMessage={setToast}
             />
