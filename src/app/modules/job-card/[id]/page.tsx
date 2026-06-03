@@ -2897,14 +2897,111 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
         throw new Error(String(msg));
       }
       setFeedback({ kind: "ok", msg: "Output saved." });
-      // C3-H3 — re-fetch GET /accounting so the SummaryCard renders the
-      // server-canonical R9 row (process / invisible / total / other loss
-      // pct etc.) instead of leaving the live preview as the source of
-      // truth. Folded into local state — onReload() also fires below to
-      // refresh the rest of the JC payload (consumption lines, balance
-      // materials, etc.). If the /accounting fetch fails (e.g. backend
-      // hasn't shipped the endpoint yet on this env) we swallow silently
-      // and let the live preview keep rendering.
+      // ── Persist the accounting summary row ────────────────────────
+      // Without this, job_card_accounting_v2 stays NULL on every JC
+      // and the /complete endpoint's R9 balance check returns
+      // {error: 'no_accounting'} → 400 when the operator hits Complete.
+      // Building the body from the same local state the SummaryCard
+      // uses keeps server-saved is_balanced / balance_diff_kg /
+      // *_loss_pct in lockstep with the live preview.
+      //
+      // total_input_qty rule mirrors the SummaryCard: canonical
+      // rm_issued + carried_in when present, else RM-only consumption
+      // sum (PM rows excluded — they don't convert into FG mass).
+      try {
+        // Recompute the same totals the summary card derives so the
+        // server-saved row matches what the operator saw before hitting
+        // Save. Order matches the AccountingSummaryRequest schema in
+        // router.py (AccountingSummaryRequest at ~5185).
+        const rmKg = num(fgActualKg);  // FG actual kg — needed for fallback path
+        const _articleByKey = new Map<string, typeof articles[number]>();
+        for (const a of articles) {
+          const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
+          _articleByKey.set(key, a);
+        }
+        const _isRmKey = (k: string) => {
+          const a = _articleByKey.get(k);
+          return a ? (a.item_type || "").toUpperCase() !== "PM" : true;
+        };
+        const rmConsumptionSum = Object.entries(consumption)
+          .reduce((s, [k, v]) => s + (_isRmKey(k) ? num(v) : 0), 0);
+        const carriedInVal = num(String(effectiveAccounting?.carried_in_kg ?? detail.carried_qty_kg ?? 0));
+        const canonical = rmIssuedKg + carriedInVal;
+        const totalInputForSave = canonical > 0 ? canonical : rmConsumptionSum;
+        const offgradeForSave = rejections.reduce(
+          (acc, r) => acc + (r.category && r.category !== "wastage" ? num(r.qty) : 0),
+          0,
+        );
+        const wastageForSave = rejections.reduce(
+          (acc, r) => acc + (r.category === "wastage" ? num(r.qty) : 0),
+          0,
+        );
+        const balForSave = Object.values(balance).reduce((a, v) => a + num(v), 0);
+        const fgUnitsVal = fgActualUnits.trim() === "" ? null : parseInt(fgActualUnits, 10);
+        const summaryBody: Record<string, unknown> = {
+          total_input_qty:      totalInputForSave,
+          input_uom:            "KGS",
+          output_qty:           rmKg,  // FG kg
+          output_uom:           "KGS",
+          output_qty_units:     fgUnitsVal != null && Number.isFinite(fgUnitsVal) ? fgUnitsVal : null,
+          process_loss_qty:     num(processLoss),
+          extra_give_away_qty:  num(extraGiveawayQty),
+          balance_material_qty: balForSave,
+          offgrade_total_qty:   offgradeForSave,
+          rejection_qty:        0,  // off-grade and rejection are one bucket per operator policy
+          wastage_qty:          wastageForSave,
+          control_sample_qty:   num(controlSampleKg),
+        };
+        const sumRes = await apiFetch(
+          `/api/v1/production/job-cards-v2/${detail.job_card_id}/accounting/summary`,
+          {
+            method: "PUT",
+            body: JSON.stringify(summaryBody),
+          },
+        );
+        if (sumRes.ok) {
+          const sumJson = (await sumRes.json().catch(() => null)) as
+            | Record<string, unknown>
+            | null;
+          // Server envelope varies across the v2 history: some routes
+          // return {saved: row}, some return {row}, some return the row
+          // directly. Pick whichever shape is present; non-null means
+          // accounting.* is now populated for /complete's balance gate.
+          const accFromSummary =
+            (sumJson && typeof sumJson === "object" && sumJson.saved && typeof sumJson.saved === "object"
+              ? (sumJson.saved as NonNullable<JobCardDetail["accounting"]>)
+              : null)
+            ?? (sumJson && typeof sumJson === "object" && sumJson.row && typeof sumJson.row === "object"
+              ? (sumJson.row as NonNullable<JobCardDetail["accounting"]>)
+              : null)
+            ?? (sumJson as NonNullable<JobCardDetail["accounting"]> | null);
+          if (accFromSummary) setServerAccounting(accFromSummary);
+        } else {
+          // Surface the failure instead of swallowing — without this,
+          // /complete will still 400 with "no_accounting" and the
+          // operator has no idea why their save "succeeded" but
+          // Complete still fails.
+          let msg = `HTTP ${sumRes.status}`;
+          try {
+            const j = await sumRes.json();
+            msg = (j && (j.message || j.detail || j.error)) || msg;
+          } catch { /* non-JSON */ }
+          console.warn("[save-output] /accounting/summary failed:", msg, summaryBody);
+          setFeedback({
+            kind: "err",
+            msg: `Output saved, but the accounting summary save failed (${msg}). Complete will be blocked — please retry Save Output.`,
+          });
+        }
+      } catch (err) {
+        console.warn("[save-output] /accounting/summary threw:", err);
+        setFeedback({
+          kind: "err",
+          msg: `Output saved, but the accounting summary call threw: ${err instanceof Error ? err.message : "unknown"}. Complete will be blocked.`,
+        });
+      }
+      // C3-H3 — backup GET /accounting in case the summary PUT above
+      // failed (older server, non-2xx, etc.). Skipped silently on
+      // failure; the live preview keeps rendering.
       try {
         const accRes = await apiFetch(`/api/v1/production/job-cards-v2/${detail.job_card_id}/accounting`);
         if (accRes.ok) {

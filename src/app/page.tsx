@@ -267,6 +267,14 @@ function Field({
   autoFocus?: boolean;
   inputMode?: "tel" | "text" | "numeric" | "email";
 }) {
+  // Show/hide toggle for password fields. The eye button sits inside
+  // the input border so the field shape stays consistent across
+  // text/tel/password types. Flips input.type between "password" and
+  // "text" — browsers handle the autocomplete + masking transition
+  // natively without breaking the saved-password popup.
+  const [showPassword, setShowPassword] = useState(false);
+  const isPassword = type === "password";
+  const effectiveType = isPassword && showPassword ? "text" : type;
   return (
     <div className="mb-4">
       <label
@@ -275,27 +283,57 @@ function Field({
       >
         {label}
       </label>
-      <input
-        id={id}
-        name={id}
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        autoComplete={autoComplete}
-        autoFocus={autoFocus}
-        inputMode={inputMode}
-        aria-invalid={!!error}
-        aria-describedby={error ? `${id}-error` : undefined}
-        className={[
-          "w-full h-9 px-2 text-[14px] rounded-[2px] bg-white",
-          "border outline-none transition-shadow",
-          error
-            ? "border-[var(--aws-error)] shadow-[0_0_0_1px_var(--aws-error)]"
-            : "border-[var(--aws-border-strong)] focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]",
-          "disabled:bg-[#f4f4f4] disabled:text-[#879596]",
-        ].join(" ")}
-      />
+      <div className="relative">
+        <input
+          id={id}
+          name={id}
+          type={effectiveType}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          autoComplete={autoComplete}
+          autoFocus={autoFocus}
+          inputMode={inputMode}
+          aria-invalid={!!error}
+          aria-describedby={error ? `${id}-error` : undefined}
+          className={[
+            "w-full h-9 px-2 text-[14px] rounded-[2px] bg-white",
+            "border outline-none transition-shadow",
+            isPassword ? "pr-10" : "",
+            error
+              ? "border-[var(--aws-error)] shadow-[0_0_0_1px_var(--aws-error)]"
+              : "border-[var(--aws-border-strong)] focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]",
+            "disabled:bg-[#f4f4f4] disabled:text-[#879596]",
+          ].join(" ")}
+        />
+        {isPassword ? (
+          <button
+            type="button"
+            onClick={() => setShowPassword((s) => !s)}
+            disabled={disabled}
+            aria-label={showPassword ? "Hide password" : "Show password"}
+            aria-pressed={showPassword}
+            title={showPassword ? "Hide password" : "Show password"}
+            className="absolute inset-y-0 right-0 px-2.5 inline-flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {showPassword ? (
+              // Eye-off (hide)
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M17.94 17.94A10.94 10.94 0 0 1 12 20c-7 0-10-8-10-8a18.45 18.45 0 0 1 5.06-5.94" />
+                <path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 10 8 10 8a18.5 18.5 0 0 1-2.16 3.19" />
+                <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+                <line x1="1" y1="1" x2="23" y2="23" />
+              </svg>
+            ) : (
+              // Eye (show)
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+            )}
+          </button>
+        ) : null}
+      </div>
       {error && (
         <p
           id={`${id}-error`}

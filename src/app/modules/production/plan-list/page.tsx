@@ -65,6 +65,13 @@ export default function PlanListPage() {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
+  // Bump after a successful mutation (approve / cancel) to force the
+  // fetch effect to refire even when no other dependency changed. The
+  // previous reload() called setPage(1), which was a no-op when the
+  // operator was already on page 1 — React saw an identical state value
+  // and skipped the re-render, so the cleared rows[] never re-populated
+  // and the list looked empty until a manual filter change.
+  const [reloadKey, setReloadKey] = useState(0);
 
   // Data state
   const [rows, setRows] = useState<PlanRow[]>([]);
@@ -123,7 +130,7 @@ export default function PlanListPage() {
     })();
     return () => c.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authed, entity, statusKey, typeKey, debouncedSearch, page]);
+  }, [authed, entity, statusKey, typeKey, debouncedSearch, page, reloadKey]);
 
   const resetForFilterChange = useCallback(() => setPage(1), []);
 
@@ -150,11 +157,15 @@ export default function PlanListPage() {
     resetForFilterChange();
   }
 
-  // Reload after a successful approve / cancel.
+  // Reload after a successful approve / cancel. Bumping reloadKey
+  // forces the fetch effect to refire even when no other dep changed
+  // (e.g. operator already on page 1). Resetting page to 1 here is
+  // intentional — after a status change the operator usually wants to
+  // see the newly-affected plan, which most likely sits at the top of
+  // the canonical sort.
   function reload() {
     setPage(1);
-    // Touch a dependency by clearing rows so the user sees a fresh load.
-    setRows([]);
+    setReloadKey((k) => k + 1);
   }
 
   async function doApprove(planId: number) {

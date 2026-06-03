@@ -347,6 +347,48 @@ export async function updatePlanStep(
   return await res.json();
 }
 
+// Append a step to a plan line. Returns the created row (server
+// includes the assigned step_id so callers can patch / reorder it
+// without a refetch). process_name is required by StepV2Add on the
+// server — caller must supply a non-empty string.
+export interface AddPlanStepBody {
+  process_name: string;
+  stage?: string | null;
+  floor?: string | null;
+  std_time_min?: number | null;
+  loss_pct?: number | null;
+  notes?: string | null;
+}
+
+export async function addPlanStep(
+  planLineId: number,
+  body: AddPlanStepBody,
+): Promise<{ step_id?: number } & Record<string, unknown>> {
+  // Drop undefined keys; preserve explicit null (matches updatePlanStep
+  // semantics — null = "set this column to NULL", absent = "skip").
+  const trimmed: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (v !== undefined) trimmed[k] = v;
+  }
+  if (!trimmed.process_name) throw new Error("process_name is required");
+  const res = await apiFetch(
+    `/api/v1/production/plans-v2/lines/${planLineId}/steps`,
+    {
+      method: "POST",
+      body: JSON.stringify(trimmed),
+    },
+  );
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const j = (await res.json()) as { detail?: string };
+      if (j.detail) detail = j.detail;
+    } catch { /* non-JSON */ }
+    throw new Error(detail);
+  }
+  return await res.json();
+}
+
 export async function reorderPlanSteps(
   planLineId: number,
   stepIds: number[],

@@ -61,6 +61,10 @@ type JobCardRow = {
   force_unlocked?: boolean | null;
   // C2 (Wave 4) — created_at for the table column.
   created_at?: string | null;
+  // Plan date pulled from production_plan_v2 via the JC's plan_id.
+  // Distinct from SO date (which the operator never wants tampered).
+  // Server returns ISO date string; default list sort is plan_date DESC.
+  plan_date?: string | null;
 };
 
 type Pagination = {
@@ -144,6 +148,18 @@ function fmtCreatedAt(iso: string | null | undefined): string {
   } catch {
     return iso;
   }
+}
+
+// Plan date arrives as a bare YYYY-MM-DD (Postgres DATE type) rather
+// than an ISO timestamp. Parse manually so we don't reinterpret it as
+// UTC midnight and slip the displayed date by one day on negative-
+// offset locales.
+function fmtPlanDate(s: string | null | undefined): string {
+  if (!s) return "—";
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (!m) return s;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return d.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "2-digit" });
 }
 
 function fmtStatus(s?: string | null): string {
@@ -823,9 +839,22 @@ function buildGroups(rows: JobCardRow[]): Group[] {
     const newestJcId = stages.reduce((m, s) => (s.job_card_id > m ? s.job_card_id : m), 0);
     planGroups.push({ kind: "plan", plan_id, stages: ordered, newestJcId });
   }
-  // Merge + sort by newestJcId descending so the most recently created
-  // group (plan or loose) is at the top.
-  return [...planGroups, ...loose].sort((a, b) => b.newestJcId - a.newestJcId);
+  // Merge + sort by plan_date desc (latest plan first), tie-break on
+  // newestJcId so two plans created on the same date land in stable
+  // order. Null plan_dates sink to the bottom. Matches the table sort
+  // so the two views never disagree.
+  const planDateOf = (g: Group) =>
+    g.kind === "plan"
+      ? (g.stages[0]?.plan_date ?? null)
+      : (g.row.plan_date ?? null);
+  return [...planGroups, ...loose].sort((a, b) => {
+    const aP = planDateOf(a) ?? "";
+    const bP = planDateOf(b) ?? "";
+    if (aP === bP) return b.newestJcId - a.newestJcId;
+    if (!aP) return 1;
+    if (!bP) return -1;
+    return bP.localeCompare(aP);
+  });
 }
 
 function JobCardGroupedGrid({ rows, onReload }: { rows: JobCardRow[]; onReload: () => void }) {
@@ -851,11 +880,20 @@ function JobCardGroupedGrid({ rows, onReload }: { rows: JobCardRow[]; onReload: 
 // surfaced in the list endpoint today, so the gate is a no-op here but
 // the seam exists for future column additions.
 function JobCardTable({ rows, onReload }: { rows: JobCardRow[]; onReload: () => void }) {
-  // Sort latest-first so the table matches the card grid's ordering. The
-  // backend already returns rows sorted by created_at DESC by default, but
-  // we re-sort defensively so a future change to sort_by doesn't flip the
-  // table relative to the cards.
-  const sorted = [...rows].sort((a, b) => b.job_card_id - a.job_card_id);
+  // Operator-stated: sort by plan_date desc — latest plan at the top,
+  // older scrolls down. Server already returns this order (the default
+  // sort_by flipped from created_at → plan_date), but we re-sort
+  // defensively so a malformed response or fallback doesn't flip the
+  // visible ordering. Tie-break on job_card_id desc keeps same-day
+  // plans stable. NULL plan_date rows sink to the bottom.
+  const sorted = [...rows].sort((a, b) => {
+    const aP = a.plan_date ?? "";
+    const bP = b.plan_date ?? "";
+    if (aP === bP) return b.job_card_id - a.job_card_id;
+    if (!aP) return 1;
+    if (!bP) return -1;
+    return bP.localeCompare(aP);
+  });
   return (
     <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
       <table className="w-full text-[12px] border-collapse table-auto">
@@ -868,6 +906,7 @@ function JobCardTable({ rows, onReload }: { rows: JobCardRow[]; onReload: () => 
             <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden lg:table-cell">Phase</th>
             <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Status</th>
             <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden xl:table-cell">Lock</th>
+            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden md:table-cell">Plan Date</th>
             <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden xl:table-cell">Created</th>
             <th className="px-3 py-2 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Action</th>
           </tr>
@@ -937,6 +976,9 @@ function JobCardTableRow({ jc, onReload }: { jc: JobCardRow; onReload: () => voi
           <span className="text-[10px] text-[var(--text-muted)]">—</span>
         )}
       </td>
+      <td className="px-3 py-2 text-[var(--text-primary)] font-medium hidden md:table-cell">
+        {fmtPlanDate(jc.plan_date)}
+      </td>
       <td className="px-3 py-2 text-[var(--text-secondary)] hidden xl:table-cell">
         {fmtCreatedAt(jc.created_at)}
       </td>
@@ -990,12 +1032,20 @@ function PlanMergedCard({ group }: { group: PlanGroup }) {
         </div>
         <div className="text-[13px] font-semibold text-[var(--text-primary)] truncate" title={sku}>{sku}</div>
         <div className="text-[11px] text-[var(--text-secondary)] truncate" title={customer}>{customer}</div>
-        <div className="flex items-center gap-2 mt-1 text-[10px] text-[var(--text-muted)]">
+        <div className="flex items-center gap-2 mt-1 text-[10px] text-[var(--text-muted)] flex-wrap">
           <span>{plant}</span>
           {so.display !== "—" ? (
             <>
               <span>·</span>
               <span title={so.tooltip}>SO {so.display}</span>
+            </>
+          ) : null}
+          {first?.plan_date ? (
+            <>
+              <span>·</span>
+              <span title="Plan date" className="font-medium text-[var(--text-secondary)]">
+                Plan {fmtPlanDate(first.plan_date)}
+              </span>
             </>
           ) : null}
         </div>

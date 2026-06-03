@@ -29,6 +29,8 @@ import {
   createUser,
   deactivateUser,
   editUser,
+  unlockUser,
+  userIsLocked,
   floorsAvailable,
   fmtAdminDate,
   generateTempPassword,
@@ -284,6 +286,29 @@ function UsersTab({
     }
   }
 
+  // Clear locked_until + failed_login_count so the user can log in
+  // immediately. Distinct from Reset (which forces a password change
+  // and revokes all sessions). Confirmation gate matches Disable's UX
+  // to avoid accidental clicks on a row with a transient lockout that
+  // would expire on its own in <5 min anyway.
+  async function onUnlock(u: AdminUser) {
+    if (!window.confirm(
+      `Unlock ${u.full_name || u.phone || "this user"}? They'll be able to log in immediately with their current password.`
+    )) return;
+    try {
+      const r = await unlockUser(u.user_id);
+      onToast({
+        kind: "ok",
+        text: r.was_locked
+          ? "User unlocked"
+          : "User was not locked — failed-login counter cleared",
+      });
+      void refresh();
+    } catch (e) {
+      onToast({ kind: "err", text: e instanceof Error ? e.message : "Unlock failed" });
+    }
+  }
+
   return (
     <section>
       {/* Toolbar */}
@@ -383,12 +408,31 @@ function UsersTab({
                   <td className="px-3 py-2 hidden md:table-cell whitespace-nowrap">
                     <span className={["inline-block w-2 h-2 rounded-full mr-1", active ? "bg-[#1d8102]" : "bg-[#a8a8a8]"].join(" ")} />
                     {active ? "Active" : "Inactive"}
+                    {userIsLocked(u) ? (
+                      <span
+                        title={
+                          u.locked_until
+                            ? `Locked until ${fmtAdminDate(u.locked_until)}`
+                            : "Account temporarily locked"
+                        }
+                        className="ml-1.5 inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded-sm border bg-[#fdf3f1] text-[#b1361e] border-[#f0c7be]"
+                      >
+                        Locked
+                      </span>
+                    ) : null}
                   </td>
                   <td className="px-3 py-2 text-[var(--text-secondary)] whitespace-nowrap hidden xl:table-cell">{fmtAdminDate(u.last_login_at)}</td>
                   <td className="px-3 py-2">
                     <div className="flex flex-wrap gap-1 justify-end">
                       <ActionBtn onClick={() => router.push(`/modules/admin/users/${u.user_id}`)}>View</ActionBtn>
                       <ActionBtn onClick={() => { setEditTarget(u); setUserModalOpen(true); }}>Edit</ActionBtn>
+                      {/* Unlock only renders for currently-locked users. Sits
+                          before Reset so a locked-out user is one click
+                          from logging back in without forcing a password
+                          change. */}
+                      {userIsLocked(u) ? (
+                        <ActionBtn variant="ok" onClick={() => onUnlock(u)}>Unlock</ActionBtn>
+                      ) : null}
                       <ActionBtn variant="warning" onClick={() => setResetTarget(u)}>Reset</ActionBtn>
                       {active
                         ? <ActionBtn variant="danger" onClick={() => onDeactivate(u)}>Disable</ActionBtn>

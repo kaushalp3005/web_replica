@@ -46,6 +46,13 @@ export interface AdminUser {
   password_changed_at?: string | null;
   must_change_password?: boolean;
   created_at?: string | null;
+  // Lock-state surfaced by /users (added alongside the unlock endpoint).
+  // locked_until is an ISO timestamp; the UI compares against `now` to
+  // decide whether the user is CURRENTLY locked. failed_login_count is
+  // the running counter — non-zero is informational even when no longer
+  // locked (e.g. 3 failures so far, lock at 5).
+  locked_until?: string | null;
+  failed_login_count?: number | null;
 }
 
 export interface AdminPermission {
@@ -159,6 +166,33 @@ export async function adminResetPassword(
     method: "POST",
     body: JSON.stringify({ new_password: newPassword }),
   });
+}
+
+// Immediately clear locked_until + failed_login_count for the target
+// user. Doesn't touch their password (unlike reset-password) and
+// doesn't revoke live sessions — purely lifts the login-gate lockout
+// so the user can attempt login right away.
+//
+// was_locked tells the caller whether locked_until > NOW() before the
+// update — useful for differentiating "actually unlocked" from
+// "cleared stale counters on an already-unlocked account" in toasts.
+export interface AdminUnlockUserResponse {
+  user_id: number;
+  unlocked: boolean;
+  was_locked: boolean;
+}
+
+export async function unlockUser(userId: number): Promise<AdminUnlockUserResponse> {
+  return adminJson(`/api/v1/auth/users/${userId}/unlock`, { method: "POST" });
+}
+
+// Pure helper: is the user currently locked per their locked_until
+// timestamp? Used by the admin row to decide whether to render the
+// Locked chip + Unlock CTA.
+export function userIsLocked(u: AdminUser): boolean {
+  if (!u.locked_until) return false;
+  const t = Date.parse(u.locked_until);
+  return Number.isFinite(t) && t > Date.now();
 }
 
 // ── roles ────────────────────────────────────────────────────────────────

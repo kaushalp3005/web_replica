@@ -28,12 +28,14 @@ import {
   deletePlan,
   updatePlanLine,
   updatePlanStep,
+  addPlanStep,
   reorderPlanSteps,
   deletePlanStep,
   fmtPlanKg,
   fmtPlanDate,
   fmtDateRange,
 } from "@/lib/plans";
+import { PROCESS_OPTIONS, canonProcess, stageFromProcess } from "@/lib/processCatalog";
 
 // Warehouse → allowed floor list. Same source-of-truth as the Planning
 // page's FLOORS_BY_FACTORY mapping, keyed by the warehouse identifier the
@@ -811,6 +813,23 @@ function LineCardEdit({
   function patchStep(idx: number, patch: Partial<StepDraft>) {
     setStepDrafts((cur) => cur.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
   }
+  // Append a blank draft step. step_id stays undefined; onSave below
+  // identifies these as "new" and POSTs them via addPlanStep. Inserted
+  // at the end so the operator's expected order matches the saved
+  // result — a reorder is a separate edit if they want it elsewhere.
+  function addStep() {
+    setStepDrafts((cur) => [
+      ...cur,
+      {
+        step_id: undefined,
+        process_name: null,
+        stage: null,
+        floor: null,
+        std_time_min: null,
+        loss_pct: null,
+      },
+    ]);
+  }
   function moveStep(fromIdx: number, toIdx: number) {
     setStepDrafts((cur) => {
       // Map active-index → real-index so reorder only swaps visible rows.
@@ -922,8 +941,22 @@ function LineCardEdit({
       if (Object.keys(body).length > 0) patches.push({ step_id: d.step_id, body });
     });
 
+    // New steps: drafts with step_id == null (created via Add Step).
+    // Caller MUST have picked a process_name — server's StepV2Add
+    // requires it. We validate up front so the POST round-trip
+    // doesn't waste a request to surface a fixable error.
+    const newSteps = stepDrafts.filter((s) => !s.isDeleted && s.step_id == null);
+    for (const ns of newSteps) {
+      if (!ns.process_name || !ns.process_name.trim()) {
+        onMessage("Pick a process for every new step before saving.");
+        return;
+      }
+    }
+
     // Reorder: surviving step_ids in their new order. Compare against the
-    // original step_id sequence to know if reorder fired.
+    // original step_id sequence to know if reorder fired. New steps are
+    // appended server-side AFTER reorder runs, so we don't need to
+    // include them in the reorder body — they'll already be at the end.
     const survivingIds = stepDrafts
       .filter((s) => !s.isDeleted && s.step_id != null)
       .map((s) => s.step_id as number);
@@ -937,6 +970,7 @@ function LineCardEdit({
       Object.keys(lineDiff).length === 0 &&
       patches.length === 0 &&
       deletes.length === 0 &&
+      newSteps.length === 0 &&
       !orderChanged
     ) {
       onMessage("Nothing to save.");
@@ -949,7 +983,8 @@ function LineCardEdit({
     // — operator must cancel + recreate the plan if step structure needs
     // editing.
     if (requireApproval) {
-      const stepsTouched = patches.length > 0 || deletes.length > 0 || orderChanged;
+      const stepsTouched = patches.length > 0 || deletes.length > 0
+        || newSteps.length > 0 || orderChanged;
       if (stepsTouched) {
         onMessage(
           "Step edits aren't supported on approved plans yet. Cancel the plan and create a new revision, or revert the step changes and resubmit only line-level edits.",
@@ -1004,9 +1039,30 @@ function LineCardEdit({
       if (patches.length > 0) {
         await Promise.all(patches.map((p) => updatePlanStep(p.step_id, p.body)));
       }
-      // Reorder if needed.
+      // Reorder before inserting new steps — the surviving-ids list
+      // doesn't include the new ones yet, and the server appends
+      // POSTed steps at the tail, so reorder + append gives the
+      // correct final sequence in one pass.
       if (orderChanged && line.plan_line_id != null) {
         await reorderPlanSteps(line.plan_line_id, survivingIds);
+      }
+      // New steps appended sequentially so server-side step_number
+      // assignment stays deterministic. (Parallel POSTs would race on
+      // the per-line max+1 step_number SELECT.)
+      if (newSteps.length > 0 && line.plan_line_id != null) {
+        for (const ns of newSteps) {
+          // Belt-and-braces stage derivation in case the dropdown
+          // handler hadn't fired (e.g. operator pasted a value or the
+          // draft was left in a partial state). Server has the same
+          // fallback so this is purely to keep the wire payload clean.
+          await addPlanStep(line.plan_line_id, {
+            process_name: ns.process_name!,  // validated above
+            stage:        ns.stage ?? stageFromProcess(ns.process_name),
+            floor:        ns.floor ?? null,
+            std_time_min: ns.std_time_min ?? null,
+            loss_pct:     ns.loss_pct ?? null,
+          });
+        }
       }
       // Line PUT last so its successful response confirms the unit.
       if (Object.keys(lineDiff).length > 0 && line.plan_line_id != null) {
@@ -1132,6 +1188,29 @@ function LineCardEdit({
           }}
         />
       ) : null}
+
+      {/* Add Step row — sits just below the editable steps list, above
+          Save/Cancel. Operator picks a process via the dropdown on the
+          inserted row; the actual POST fires when they hit Save. Lives
+          outside EditableStepsList so it renders even when the list is
+          empty (e.g. a line that started with no steps for some reason). */}
+      <div className="px-3 pb-2.5 pt-1 flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={addStep}
+          disabled={busy}
+          className="inline-flex items-center gap-1 h-7 px-2.5 text-[11px] font-semibold rounded-[2px] border border-dashed border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-orange)] hover:text-[var(--aws-orange)] text-[var(--text-secondary)] disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          Add step
+        </button>
+        <p className="text-[10px] text-[var(--text-muted)] italic">
+          New steps are appended at the end.
+        </p>
+      </div>
 
       {/* Save / Cancel footer */}
       <div className="px-3 py-2.5 bg-[var(--surface-subtle)] flex justify-end gap-2">
@@ -1260,15 +1339,45 @@ function EditableStepsList({
                 </label>
               ) : <span />}
               <span aria-hidden className="shrink-0 inline-flex items-center justify-center w-5 h-5 rounded-full bg-[var(--aws-navy)] text-white text-[10px] font-bold">{i + 1}</span>
-              {/* process_name + stage are read-only here. They're snapshotted
-                  from the BOM at create time and feed downstream consumers
-                  (job-card grouping, reports). Exposing them as inputs
-                  invites accidental tampering. Operators reconfigure the
-                  step's FLOOR / time / loss — not its identity. */}
-              <div className="flex-1 min-w-0">
-                <div className="text-[12px] font-semibold text-[var(--text-primary)] truncate" title={s.process_name ?? ""}>
-                  {s.process_name || "—"}
-                </div>
+              {/* process_name is now editable via PROCESS_OPTIONS
+                  dropdown. Legacy BOM values not in the canonical list
+                  get a synthetic "(custom)" option so they stay
+                  visible. stage stays read-only — it's a BOM-level
+                  identity tag the operator doesn't reclassify. */}
+              <div className="flex-1 min-w-0 space-y-0.5">
+                {(() => {
+                  const current = s.process_name ?? "";
+                  const inCatalog =
+                    current === "" ||
+                    PROCESS_OPTIONS.some(
+                      (p) => p.toLowerCase() === current.toLowerCase(),
+                    );
+                  return (
+                    <select
+                      value={current}
+                      onChange={(e) => {
+                        // stage tracks process_name so the row stays
+                        // valid for the downstream job_card_v2.stage
+                        // NOT NULL constraint when the plan is approved.
+                        const picked = canonProcess(e.target.value || null);
+                        onPatch(i, {
+                          process_name: picked,
+                          stage: stageFromProcess(picked),
+                        });
+                      }}
+                      title="Pick the process for this step"
+                      className="w-full h-7 px-1.5 text-[12px] font-semibold rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] text-[var(--text-primary)]"
+                    >
+                      <option value="">— Process —</option>
+                      {!inCatalog && current ? (
+                        <option value={current}>{current} (custom)</option>
+                      ) : null}
+                      {PROCESS_OPTIONS.map((p) => (
+                        <option key={p} value={p}>{p}</option>
+                      ))}
+                    </select>
+                  );
+                })()}
                 {s.stage ? (
                   <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)] truncate" title={s.stage}>
                     {s.stage}

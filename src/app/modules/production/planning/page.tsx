@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
 import { useRequireAuth, useUserInitial, useUserScope, type UserScope } from "@/lib/user";
+import { PROCESS_OPTIONS, canonProcess, stageFromProcess } from "@/lib/processCatalog";
 import { BackLink } from "@/components/BackLink";
 import {
   type FulfillmentRow,
@@ -212,19 +213,20 @@ export default function PlanningPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authed, entity, customerKey, soNumberKey, articleKey, page]);
 
-  // Entity is a top-level scope change (CFPL vs CDPL) — different business
-  // entirely, so we DO clear selections + cards here. Customer / SO /
-  // article filters only affect the LIST below; their reset path leaves
-  // the Selected Articles panel intact so any qty / factory / step / floor
-  // work the operator has done so far survives.
+  // Operator-stated: changing entity must NOT wipe in-flight plan work.
+  // The list view re-fetches with the new entity scope automatically
+  // (the fetch effect depends on `entity`), but the operator's
+  // Selected Articles panel — selectedIds, cardCfg, selectedRowsCache,
+  // expandedCardId — stays intact. They can flip CFPL ↔ CDPL while
+  // composing a multi-entity plan without losing their qty / factory
+  // / step / floor work.
+  //
+  // Page is reset to 1 because the LIST itself flips to the new
+  // entity's fulfillments; that's a list-surface reset only.
   function changeEntity(v: Entity) {
     setEntity(v);
     setPage(1);
     setExpandedId(null);
-    setSelectedIds(new Set());
-    setCardCfg(new Map());
-    setSelectedRowsCache(new Map());
-    setExpandedCardId(null);
   }
   const resetForFilterChange = useCallback(() => {
     // Filter change only resets the LIST surface — selected cards in the
@@ -387,6 +389,52 @@ export default function PlanningPage() {
       if (!cur?.steps || idx < 0 || idx >= cur.steps.length) return m;
       const next = cur.steps.slice();
       next[idx] = { ...next[idx], floor };
+      const nm = new Map(m);
+      nm.set(id, { ...cur, steps: next });
+      return nm;
+    });
+  }
+
+  // Append a blank step at the end. The operator picks a process name
+  // (or leaves it blank for later), assigns a floor, and optionally
+  // edits std_time_min / loss_pct via the existing per-step UI. The
+  // step inherits no defaults from the BOM — it's a true add.
+  function addCardStep(id: number) {
+    setCardCfg((m) => {
+      const cur = m.get(id) ?? {};
+      const next: PlanStep[] = [
+        ...(cur.steps ?? []),
+        {
+          process_name: null,
+          stage: null,
+          floor: null,
+          std_time_min: null,
+          loss_pct: null,
+        },
+      ];
+      const nm = new Map(m);
+      nm.set(id, { ...cur, steps: next });
+      return nm;
+    });
+  }
+
+  // Change a single step's process_name. Canon'd through canonProcess()
+  // so picking "De-Seeding" out of the dropdown stores it as the
+  // canonical "De-seeding". stage auto-derives from the chosen process
+  // because job_card_v2.stage is NOT NULL — keeping them in sync here
+  // means the downstream JC creation doesn't 500 when a custom-added
+  // step makes it to /approve.
+  function setCardStepProcess(id: number, idx: number, name: string | null) {
+    setCardCfg((m) => {
+      const cur = m.get(id);
+      if (!cur?.steps || idx < 0 || idx >= cur.steps.length) return m;
+      const canoned = canonProcess(name);
+      const next = cur.steps.slice();
+      next[idx] = {
+        ...next[idx],
+        process_name: canoned,
+        stage: stageFromProcess(canoned),
+      };
       const nm = new Map(m);
       nm.set(id, { ...cur, steps: next });
       return nm;
@@ -802,8 +850,10 @@ export default function PlanningPage() {
           onClearAll={clearAllSelection}
           onSetFactory={setCardFactory}
           onSetStepFloor={setCardStepFloor}
+          onSetStepProcess={setCardStepProcess}
           onMoveStep={moveCardStep}
           onMergeSteps={mergeCardSteps}
+          onAddStep={addCardStep}
           onRemoveStep={removeCardStep}
           onRefreshSteps={refreshCardSteps}
         />
@@ -1325,7 +1375,8 @@ function FulfillmentTable({
 function SelectedArticlesPanel({
   selectedIds, rowsCache, cardCfg, expandedCardId, scope, factoryOpts,
   onToggleExpand, onPatch, onReset, onRemove, onClearAll,
-  onSetFactory, onSetStepFloor, onMoveStep, onMergeSteps,
+  onSetFactory, onSetStepFloor, onSetStepProcess, onMoveStep, onMergeSteps,
+  onAddStep,
   onRemoveStep, onRefreshSteps,
 }: {
   selectedIds: Set<number>;
@@ -1341,8 +1392,10 @@ function SelectedArticlesPanel({
   onClearAll: () => void;
   onSetFactory: (id: number, factory: FactoryCode | undefined) => void;
   onSetStepFloor: (id: number, idx: number, floor: string | null) => void;
+  onSetStepProcess: (id: number, idx: number, name: string | null) => void;
   onMoveStep: (id: number, from: number, to: number) => void;
   onMergeSteps: (id: number, idxs: number[]) => void;
+  onAddStep: (id: number) => void;
   onRemoveStep: (id: number, idx: number) => void;
   onRefreshSteps: (id: number) => void;
 }) {
@@ -1393,8 +1446,10 @@ function SelectedArticlesPanel({
             onRemove={() => onRemove(r.fulfillment_id)}
             onSetFactory={(f) => onSetFactory(r.fulfillment_id, f)}
             onSetStepFloor={(idx, floor) => onSetStepFloor(r.fulfillment_id, idx, floor)}
+            onSetStepProcess={(idx, name) => onSetStepProcess(r.fulfillment_id, idx, name)}
             onMoveStep={(from, to) => onMoveStep(r.fulfillment_id, from, to)}
             onMergeSteps={(idxs) => onMergeSteps(r.fulfillment_id, idxs)}
+            onAddStep={() => onAddStep(r.fulfillment_id)}
             onRemoveStep={(idx) => onRemoveStep(r.fulfillment_id, idx)}
             onRefreshSteps={() => onRefreshSteps(r.fulfillment_id)}
           />
@@ -1407,8 +1462,8 @@ function SelectedArticlesPanel({
 function SelectedCard({
   row, cfg, isExpanded, scope, factoryOpts,
   onToggleExpand, onPatch, onReset, onRemove,
-  onSetFactory, onSetStepFloor, onMoveStep, onMergeSteps,
-  onRemoveStep, onRefreshSteps,
+  onSetFactory, onSetStepFloor, onSetStepProcess, onMoveStep, onMergeSteps,
+  onAddStep, onRemoveStep, onRefreshSteps,
 }: {
   row: FulfillmentRow;
   cfg: CardOverride;
@@ -1421,8 +1476,10 @@ function SelectedCard({
   onRemove: () => void;
   onSetFactory: (factory: FactoryCode | undefined) => void;
   onSetStepFloor: (idx: number, floor: string | null) => void;
+  onSetStepProcess: (idx: number, name: string | null) => void;
   onMoveStep: (from: number, to: number) => void;
   onMergeSteps: (idxs: number[]) => void;
+  onAddStep: () => void;
   onRemoveStep: (idx: number) => void;
   onRefreshSteps: () => void;
 }) {
@@ -1437,6 +1494,43 @@ function SelectedCard({
   const steps = cfg.steps ?? [];
   const allowedFloors = useMemo(() => allowedFloorsFor(scope, factory), [scope, factory]);
   const flooredCount = steps.filter((s) => !!s.floor).length;
+
+  // Per-unit kg derived from the SO line's own pending qtys — this is
+  // the same ratio that ultimately lives in all_sku.uom for the
+  // canonical SKU, so using it here keeps qty (pcs) and qty (kg) on
+  // the planning card linked the same way R2 specifies.
+  //
+  // Operator typing into pcs → kg auto-computes; typing kg → pcs
+  // auto-computes. Either field still accepts a direct manual value
+  // (operator can override the link by editing the other field
+  // immediately after).
+  const skuUomKg: number | null =
+    defaultUnits > 0 && defaultKg > 0
+      ? defaultKg / defaultUnits
+      : null;
+
+  function patchQtyUnits(n: number | undefined) {
+    if (n == null || !Number.isFinite(n)) {
+      onPatch({ qty_units: undefined, qty_kg: undefined });
+      return;
+    }
+    if (skuUomKg != null) {
+      onPatch({ qty_units: n, qty_kg: Number((n * skuUomKg).toFixed(3)) });
+    } else {
+      onPatch({ qty_units: n });
+    }
+  }
+  function patchQtyKg(n: number | undefined) {
+    if (n == null || !Number.isFinite(n)) {
+      onPatch({ qty_kg: undefined, qty_units: undefined });
+      return;
+    }
+    if (skuUomKg != null && skuUomKg > 0) {
+      onPatch({ qty_kg: n, qty_units: Math.round(n / skuUomKg) });
+    } else {
+      onPatch({ qty_kg: n });
+    }
+  }
 
   const customised =
     cfg.qty_kg != null || cfg.qty_units != null ||
@@ -1550,13 +1644,13 @@ function SelectedCard({
               label="Pack count (pcs)"
               value={cfg.qty_units ?? ""}
               placeholder={defaultUnits > 0 ? String(Math.round(defaultUnits)) : "—"}
-              onChange={(n) => onPatch({ qty_units: n })}
+              onChange={patchQtyUnits}
             />
             <NumberField
               label="Quantity (kg)"
               value={cfg.qty_kg ?? ""}
               placeholder={defaultKg > 0 ? String(defaultKg) : "—"}
-              onChange={(n) => onPatch({ qty_kg: n })}
+              onChange={patchQtyKg}
             />
             <label className="block">
               <span className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">Deadline</span>
@@ -1609,8 +1703,10 @@ function SelectedCard({
             factory={factory}
             bomNote={cfg.bomNote}
             onSetStepFloor={onSetStepFloor}
+            onSetStepProcess={onSetStepProcess}
             onMoveStep={onMoveStep}
             onMergeSteps={onMergeSteps}
+            onAddStep={onAddStep}
             onRemoveStep={onRemoveStep}
             onRefreshSteps={onRefreshSteps}
           />
@@ -1650,7 +1746,8 @@ function SelectedCard({
 
 function StepsSection({
   stepsLoaded, stepsLoading, steps, allowedFloors, factory, bomNote,
-  onSetStepFloor, onMoveStep, onMergeSteps, onRemoveStep, onRefreshSteps,
+  onSetStepFloor, onSetStepProcess, onMoveStep, onMergeSteps,
+  onAddStep, onRemoveStep, onRefreshSteps,
 }: {
   stepsLoaded: boolean;
   stepsLoading: boolean;
@@ -1659,8 +1756,10 @@ function StepsSection({
   factory: FactoryCode | undefined;
   bomNote: string | null | undefined;
   onSetStepFloor: (idx: number, floor: string | null) => void;
+  onSetStepProcess: (idx: number, name: string | null) => void;
   onMoveStep: (from: number, to: number) => void;
   onMergeSteps: (idxs: number[]) => void;
+  onAddStep: () => void;
   onRemoveStep: (idx: number) => void;
   onRefreshSteps: () => void;
 }) {
@@ -1871,10 +1970,39 @@ function StepsSection({
                   {i + 1}
                 </span>
                 <div className="flex-1 min-w-0">
-                  <div className="text-[12px] font-semibold text-[var(--text-primary)] truncate" title={s.process_name ?? ""}>
-                    {s.process_name || "—"}
-                  </div>
-                  <div className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] flex-wrap">
+                  {/* Process picker: canonical PROCESS_OPTIONS values plus
+                      a synthetic option for any BOM-supplied name that
+                      isn't in the catalog (defensive — keeps legacy
+                      values visible instead of silently resetting). */}
+                  {(() => {
+                    const current = s.process_name ?? "";
+                    const inCatalog =
+                      current === "" ||
+                      PROCESS_OPTIONS.some(
+                        (p) => p.toLowerCase() === current.toLowerCase(),
+                      );
+                    return (
+                      <select
+                        value={current}
+                        onChange={(e) => onSetStepProcess(i, e.target.value || null)}
+                        title="Pick the process for this step"
+                        className="w-full h-7 px-1.5 text-[12px] font-semibold rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] text-[var(--text-primary)]"
+                      >
+                        <option value="">— Process —</option>
+                        {!inCatalog && current ? (
+                          <option value={current}>
+                            {current} (custom)
+                          </option>
+                        ) : null}
+                        {PROCESS_OPTIONS.map((p) => (
+                          <option key={p} value={p}>
+                            {p}
+                          </option>
+                        ))}
+                      </select>
+                    );
+                  })()}
+                  <div className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] flex-wrap mt-0.5">
                     {s.stage ? <span>{s.stage}</span> : null}
                     {s.std_time_min != null ? <span>· {s.std_time_min} min</span> : null}
                     {s.loss_pct != null && s.loss_pct > 0 ? <span>· {s.loss_pct}% loss</span> : null}
@@ -1941,9 +2069,25 @@ function StepsSection({
           );
         })}
       </ol>
-      {bomNote ? (
-        <p className="text-[11px] text-[var(--text-muted)] italic mt-2">{bomNote}</p>
-      ) : null}
+      {/* Append a fresh blank step. Operator picks a process from the
+          dropdown and (optionally) a floor. The step inherits no BOM
+          defaults — it's a true insertion. */}
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={onAddStep}
+          className="inline-flex items-center gap-1 h-7 px-2.5 text-[11px] font-semibold rounded-[2px] border border-dashed border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-orange)] hover:text-[var(--aws-orange)] text-[var(--text-secondary)]"
+        >
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          Add step
+        </button>
+        {bomNote ? (
+          <p className="text-[11px] text-[var(--text-muted)] italic">{bomNote}</p>
+        ) : null}
+      </div>
     </div>
   );
 }
