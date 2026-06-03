@@ -1812,18 +1812,15 @@ function StepsSection({
   if (!stepsLoaded) {
     return null;
   }
-  if (bomNote && steps.length === 0) {
-    return (
-      <p className="text-[11px] text-[var(--aws-error)] italic">{bomNote}</p>
-    );
-  }
-  if (steps.length === 0) {
-    return (
-      <p className="text-[11px] text-[var(--text-muted)] italic">
-        No BOM process route found for this SKU. The server will fall back to defaults at create time.
-      </p>
-    );
-  }
+  // Empty-state hint shown inline above the (empty) step list when no
+  // BOM route exists. The manual "Add step" button below is the operator's
+  // path forward in this case — keep it reachable for every article so
+  // the workflow is uniform whether or not a BOM route is configured.
+  const emptyHint = steps.length === 0
+    ? (bomNote
+        ? bomNote
+        : "No BOM process route found for this SKU — use “Add step” below to build the route manually.")
+    : null;
 
   return (
     <div>
@@ -1893,6 +1890,20 @@ function StepsSection({
             Merge selected
           </button>
         </div>
+      ) : null}
+
+      {emptyHint ? (
+        <p
+          className={
+            "mb-1.5 px-2 py-1.5 text-[11px] italic rounded border " + (
+              bomNote
+                ? "text-[var(--aws-error)] border-[var(--aws-border)] bg-[#fdf0f1]"
+                : "text-[var(--text-muted)] border-dashed border-[var(--aws-border)] bg-[var(--surface-subtle)]"
+            )
+          }
+        >
+          {emptyHint}
+        </p>
       ) : null}
 
       <ol className="space-y-1">
@@ -2084,7 +2095,7 @@ function StepsSection({
           </svg>
           Add step
         </button>
-        {bomNote ? (
+        {bomNote && steps.length > 0 ? (
           <p className="text-[11px] text-[var(--text-muted)] italic">{bomNote}</p>
         ) : null}
       </div>
