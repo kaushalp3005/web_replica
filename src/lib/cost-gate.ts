@@ -40,6 +40,9 @@ export const COST_FIELDS_DENY_ROLES: ReadonlySet<string> = new Set([
 
 export const COST_FIELDS_ALLOW_ROLES: ReadonlySet<string> = new Set([
   "admin", "planner", "purchase_manager", "inventory_manager",
+  // sample module — business_head is a management role and sees cost
+  // (npd_team is intentionally omitted → default-deny).
+  "business_head",
   // future commercial roles — explicit opt-in so adding the
   // role on the backend doesn't silently expose ₹ in the UI.
   "commercial_manager", "cost_controller",
@@ -197,8 +200,12 @@ export function useSeesCost(): { seesCost: boolean; loaded: boolean } {
     // lazy initialiser ran before `auth.me` was populated (e.g. a tab
     // restored mid-login).
     if (!loaded) {
-      setMe(userStore.load());
-      setLoaded(true);
+      // Deferred past the synchronous effect body (react-hooks/set-state-in-effect)
+      // — same queueMicrotask pattern as lib/user.ts::useMe.
+      queueMicrotask(() => {
+        setMe(userStore.load());
+        setLoaded(true);
+      });
     }
     const unsubscribe = userStore.subscribe((next) => setMe(next));
     const onStorage = (e: StorageEvent) => {

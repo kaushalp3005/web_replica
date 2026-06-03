@@ -1403,58 +1403,66 @@ function EditableStepsList({
                 <option value="">{floors.length === 0 ? "— Pick warehouse —" : "— Any floor —"}</option>
                 {floors.map((fl) => <option key={fl} value={fl}>{fl}</option>)}
               </select>
-              <input
-                type="number"
-                min={0}
-                step="any"
-                inputMode="decimal"
-                value={s.std_time_min ?? ""}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  onPatch(i, { std_time_min: v === "" ? null : Number(v) });
-                }}
-                placeholder="min"
-                title="Standard time (min)"
-                className="h-7 w-full sm:w-[60px] px-1.5 text-[11px] text-right font-mono rounded-[2px] bg-white border border-[var(--aws-border)] outline-none focus:border-[#9a393e]"
-              />
-              <input
-                type="number"
-                min={0}
-                max={100}
-                step="any"
-                inputMode="decimal"
-                value={s.loss_pct ?? ""}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  onPatch(i, { loss_pct: v === "" ? null : Number(v) });
-                }}
-                placeholder="loss%"
-                title="Loss %"
-                className="h-7 w-full sm:w-[60px] px-1.5 text-[11px] text-right font-mono rounded-[2px] bg-white border border-[var(--aws-border)] outline-none focus:border-[#9a393e]"
-              />
-              <div className="flex items-center gap-0.5 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => onMove(i, i - 1)}
-                  disabled={i === 0}
-                  aria-label="Move step up"
-                  className="w-7 h-7 inline-flex items-center justify-center rounded-sm text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] disabled:opacity-30 disabled:cursor-not-allowed"
-                >
-                  <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="6 15 12 9 18 15" />
-                  </svg>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onMove(i, i + 1)}
-                  disabled={i === activeSteps.length - 1}
-                  aria-label="Move step down"
-                  className="w-7 h-7 inline-flex items-center justify-center rounded-sm text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] disabled:opacity-30 disabled:cursor-not-allowed"
-                >
-                  <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="6 9 12 15 18 9" />
-                  </svg>
-                </button>
+              {/* Trailing trio: std_time, loss%, reorder buttons.
+                  On mobile (< sm) the wrapper is a flex row so all three
+                  fit on a single compact line instead of stacking into
+                  three full-width grid rows. On sm+ `sm:contents` makes
+                  the wrapper transparent to the grid so each child lands
+                  in its own column as before. */}
+              <div className="flex items-center gap-1.5 sm:contents">
+                <input
+                  type="number"
+                  min={0}
+                  step="any"
+                  inputMode="decimal"
+                  value={s.std_time_min ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    onPatch(i, { std_time_min: v === "" ? null : Number(v) });
+                  }}
+                  placeholder="min"
+                  title="Standard time (min)"
+                  className="h-7 flex-1 min-w-0 sm:flex-none sm:w-[60px] px-1.5 text-[11px] text-right font-mono rounded-[2px] bg-white border border-[var(--aws-border)] outline-none focus:border-[#9a393e]"
+                />
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step="any"
+                  inputMode="decimal"
+                  value={s.loss_pct ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    onPatch(i, { loss_pct: v === "" ? null : Number(v) });
+                  }}
+                  placeholder="loss%"
+                  title="Loss %"
+                  className="h-7 flex-1 min-w-0 sm:flex-none sm:w-[60px] px-1.5 text-[11px] text-right font-mono rounded-[2px] bg-white border border-[var(--aws-border)] outline-none focus:border-[#9a393e]"
+                />
+                <div className="flex items-center gap-0.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => onMove(i, i - 1)}
+                    disabled={i === 0}
+                    aria-label="Move step up"
+                    className="w-7 h-7 inline-flex items-center justify-center rounded-sm text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="6 15 12 9 18 15" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onMove(i, i + 1)}
+                    disabled={i === activeSteps.length - 1}
+                    aria-label="Move step down"
+                    className="w-7 h-7 inline-flex items-center justify-center rounded-sm text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </button>
+                </div>
               </div>
             </li>
           );

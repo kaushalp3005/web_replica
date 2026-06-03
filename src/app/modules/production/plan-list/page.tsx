@@ -13,7 +13,7 @@
 //     just no UI yet — easy to add)
 //   • Plan name edit / re-revision flow
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
 import { userStore } from "@/lib/auth";
@@ -21,6 +21,7 @@ import { useRequireAuth, useUserInitial } from "@/lib/user";
 import { BackLink } from "@/components/BackLink";
 import {
   type PlanRow,
+  type PlanRowLineSummary,
   type PlanPagination,
   type PlanDetail,
   type PlanLineRow,
@@ -39,6 +40,15 @@ const SEARCH_DEBOUNCE_MS = 300;
 type Entity = "" | "cfpl" | "cdpl";
 type StatusKey = "draft" | "approved" | "executed" | "cancelled";
 type PlanTypeKey = "daily" | "weekly";
+// Warehouse filter values match the values stored in
+// production_plan_v2.warehouse (canonical hyphenated form). The chip
+// labels use the shorter factory-code form ("W202", "A185") that
+// operators see elsewhere in the app. Empty string = "All".
+type WarehouseKey = "" | "W-202" | "A-185";
+const WAREHOUSE_OPTS: { v: Exclude<WarehouseKey, "">; label: string }[] = [
+  { v: "W-202", label: "W202" },
+  { v: "A-185", label: "A185" },
+];
 
 const STATUS_OPTS: { v: StatusKey; label: string }[] = [
   { v: "draft",     label: "Draft" },
@@ -60,6 +70,7 @@ export default function PlanListPage() {
 
   // Filter state
   const [entity, setEntity] = useState<Entity>("");
+  const [warehouse, setWarehouse] = useState<WarehouseKey>("");
   const [status, setStatus] = useState<StatusKey[]>([]);
   const [planType, setPlanType] = useState<PlanTypeKey[]>([]);
   const [search, setSearch] = useState("");
@@ -110,6 +121,7 @@ export default function PlanListPage() {
         const resp = await listPlans(
           {
             entity,
+            warehouse: warehouse || undefined,
             status,
             plan_type: planType,
             search: debouncedSearch || undefined,
@@ -130,12 +142,18 @@ export default function PlanListPage() {
     })();
     return () => c.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authed, entity, statusKey, typeKey, debouncedSearch, page, reloadKey]);
+  }, [authed, entity, warehouse, statusKey, typeKey, debouncedSearch, page, reloadKey]);
 
   const resetForFilterChange = useCallback(() => setPage(1), []);
 
   function changeEntity(v: Entity) {
     setEntity(v);
+    resetForFilterChange();
+  }
+
+  function toggleWarehouse(v: Exclude<WarehouseKey, "">) {
+    // Single-select chip group — click the active chip to clear it.
+    setWarehouse((cur) => (cur === v ? "" : v));
     resetForFilterChange();
   }
 
@@ -151,6 +169,7 @@ export default function PlanListPage() {
 
   function clearAllFilters() {
     setEntity("");
+    setWarehouse("");
     setStatus([]);
     setPlanType([]);
     setSearch("");
@@ -218,7 +237,34 @@ export default function PlanListPage() {
     return { ...counts, total: pagination.total ?? rows.length };
   }, [rows, pagination.total]);
 
-  const anyFilterActive = !!entity || status.length > 0 || planType.length > 0 || !!debouncedSearch;
+  const anyFilterActive = !!entity || !!warehouse || status.length > 0 || planType.length > 0 || !!debouncedSearch;
+
+  // Stable handlers so the memoized row components below don't see new
+  // function identities on every parent render — without these, every
+  // chip click / search keystroke would invalidate React.memo on every
+  // row and the table would re-render in full.  router is mutable across
+  // renders but its `push` reference is stable in app-router.
+  const onToggleExpand = useCallback((p: PlanRow) => {
+    setExpandedPlanId((c) => (c === p.plan_id ? null : p.plan_id));
+  }, []);
+  const onConfirmApprove = useCallback((p: PlanRow) => {
+    setConfirm({ kind: "approve", plan: p });
+  }, []);
+  const onConfirmCancel = useCallback((p: PlanRow) => {
+    setConfirm({ kind: "cancel", plan: p });
+  }, []);
+  const onOpen = useCallback((p: PlanRow) => {
+    router.push(`/modules/production/plan-list/${p.plan_id}`);
+  }, [router]);
+  const onPage = useCallback((p: number) => setPage(p), []);
+
+  // Surface a thin, non-blocking progress bar whenever a fetch is in
+  // flight AND we already have rows on screen (the rows-empty case is
+  // handled by the centred "Loading plans…" panel below). Without this
+  // strip, filter / pagination clicks felt unresponsive — the click
+  // landed, but nothing visually changed until the network round-trip
+  // completed.
+  const showRefreshBar = loading && rows.length > 0;
 
   return (
     <div className="min-h-screen flex flex-col bg-[var(--background)]">
@@ -241,10 +287,23 @@ export default function PlanListPage() {
           </div>
         </div>
 
-        {/* Filter toolbar — search + status pills + type pills + clear */}
+        {/* Filter toolbar — search + warehouse + status + type + clear.
+            Each chip group wraps onto its own row on narrow screens via
+            flex-wrap so phones don't get a horizontal scrollbar. */}
         <div className="border-b border-[var(--aws-border)] mb-3 pb-3 flex flex-wrap items-center gap-1.5">
           <SearchInput value={search} onChange={setSearch} />
-          <div className="flex items-center gap-1 ml-1">
+          <div className="flex items-center gap-1 ml-1 flex-wrap">
+            <span className="text-[10px] uppercase tracking-wide font-bold text-[var(--text-muted)] mr-1 hidden sm:inline">Warehouse</span>
+            {WAREHOUSE_OPTS.map((o) => (
+              <FilterChip
+                key={o.v}
+                label={o.label}
+                active={warehouse === o.v}
+                onClick={() => toggleWarehouse(o.v)}
+              />
+            ))}
+          </div>
+          <div className="flex items-center gap-1 ml-1 flex-wrap">
             <span className="text-[10px] uppercase tracking-wide font-bold text-[var(--text-muted)] mr-1 hidden sm:inline">Status</span>
             {STATUS_OPTS.map((o) => (
               <FilterChip
@@ -256,7 +315,7 @@ export default function PlanListPage() {
               />
             ))}
           </div>
-          <div className="flex items-center gap-1 ml-1">
+          <div className="flex items-center gap-1 ml-1 flex-wrap">
             <span className="text-[10px] uppercase tracking-wide font-bold text-[var(--text-muted)] mr-1 hidden sm:inline">Type</span>
             {TYPE_OPTS.map((o) => (
               <FilterChip
@@ -293,6 +352,18 @@ export default function PlanListPage() {
           </div>
         ) : null}
 
+        {/* Thin animated bar — instant feedback for chip / pagination
+            clicks while the fetch is still in flight. CSS-only; cheap. */}
+        <div
+          aria-hidden
+          className={[
+            "h-0.5 rounded-full overflow-hidden transition-opacity duration-150 mb-2",
+            showRefreshBar ? "opacity-100" : "opacity-0",
+          ].join(" ")}
+        >
+          <div className="h-full bg-[var(--aws-orange)] animate-pulse" />
+        </div>
+
         {loading && rows.length === 0 ? (
           <Centered>Loading plans…</Centered>
         ) : error ? (
@@ -301,15 +372,20 @@ export default function PlanListPage() {
           <Centered>No plans match your filters.</Centered>
         ) : (
           <>
-            <PlansList
-              rows={rows}
-              expandedPlanId={expandedPlanId}
-              onToggleExpand={(p) => setExpandedPlanId((c) => (c === p.plan_id ? null : p.plan_id))}
-              onApprove={(p) => setConfirm({ kind: "approve", plan: p })}
-              onCancel={(p) => setConfirm({ kind: "cancel", plan: p })}
-              onOpen={(p) => router.push(`/modules/production/plan-list/${p.plan_id}`)}
-            />
-            <Pagination pg={pagination} onPage={(p) => setPage(p)} loading={loading} />
+            <div
+              aria-busy={loading}
+              className={loading ? "opacity-70 transition-opacity" : "transition-opacity"}
+            >
+              <PlansList
+                rows={rows}
+                expandedPlanId={expandedPlanId}
+                onToggleExpand={onToggleExpand}
+                onApprove={onConfirmApprove}
+                onCancel={onConfirmCancel}
+                onOpen={onOpen}
+              />
+            </div>
+            <Pagination pg={pagination} onPage={onPage} loading={loading} />
           </>
         )}
       </main>
@@ -616,6 +692,10 @@ function PlansList({
   onCancel:  (p: PlanRow) => void;
   onOpen:    (p: PlanRow) => void;
 }) {
+  // The handlers are passed through verbatim — the row components apply
+  // the per-row binding internally.  Wrapping callbacks here with an
+  // inline `() => onApprove(r)` would mint a new function identity per
+  // row per render and defeat React.memo on the rows.
   return (
     <>
       {/* Mobile (< md): stacked cards */}
@@ -625,10 +705,10 @@ function PlansList({
             key={r.plan_id}
             row={r}
             expanded={expandedPlanId === r.plan_id}
-            onToggleExpand={() => onToggleExpand(r)}
-            onApprove={() => onApprove(r)}
-            onCancel={() => onCancel(r)}
-            onOpen={() => onOpen(r)}
+            onToggleExpand={onToggleExpand}
+            onApprove={onApprove}
+            onCancel={onCancel}
+            onOpen={onOpen}
           />
         ))}
       </div>
@@ -656,10 +736,10 @@ function PlansList({
                   key={r.plan_id}
                   row={r}
                   expanded={expandedPlanId === r.plan_id}
-                  onToggleExpand={() => onToggleExpand(r)}
-                  onApprove={() => onApprove(r)}
-                  onCancel={() => onCancel(r)}
-                  onOpen={() => onOpen(r)}
+                  onToggleExpand={onToggleExpand}
+                  onApprove={onApprove}
+                  onCancel={onCancel}
+                  onOpen={onOpen}
                 />
               ))}
             </tbody>
@@ -667,6 +747,58 @@ function PlansList({
         </div>
       </div>
     </>
+  );
+}
+
+// ── Article + qty summary (inline, under each plan row) ──────────────────
+//
+// Server returns up to 20 line summaries per plan in `lines_summary`.  We
+// surface the first three inline so the operator can scan plans by their
+// FG SKU + kg without expanding the row.  When the plan has more lines,
+// a "+N more" hint nudges them to click expand for the full picture.
+
+function ArticleSummary({
+  summary, totalLineCount,
+}: {
+  summary?: PlanRowLineSummary[] | null;
+  totalLineCount?: number | null;
+}) {
+  if (!summary || summary.length === 0) return null;
+  const SHOW = 3;
+  const shown = summary.slice(0, SHOW);
+  const known = summary.length;
+  const total = typeof totalLineCount === "number" ? totalLineCount : known;
+  const remainder = Math.max(0, total - shown.length);
+  return (
+    <ul className="mt-1 space-y-0.5 text-[11px] leading-[14px] text-[var(--text-secondary)]">
+      {shown.map((l, i) => {
+        const kg = l.planned_qty_kg != null ? fmtPlanKg(l.planned_qty_kg) : null;
+        const pcs = l.planned_qty_units != null && l.planned_qty_units !== ""
+          ? String(l.planned_qty_units)
+          : null;
+        return (
+          <li
+            key={l.plan_line_id ?? `${i}-${l.fg_sku_name ?? ""}`}
+            className="flex items-baseline gap-1.5 min-w-0"
+            title={l.fg_sku_name ?? ""}
+          >
+            <span className="truncate text-[var(--text-primary)]">
+              {l.fg_sku_name || "—"}
+            </span>
+            <span className="shrink-0 font-mono text-[var(--text-muted)] whitespace-nowrap">
+              {kg != null ? `${kg} kg` : ""}
+              {kg != null && pcs != null ? " · " : ""}
+              {pcs != null ? `${pcs} pcs` : ""}
+            </span>
+          </li>
+        );
+      })}
+      {remainder > 0 ? (
+        <li className="text-[10px] text-[var(--text-muted)] italic">
+          + {remainder} more line{remainder === 1 ? "" : "s"}
+        </li>
+      ) : null}
+    </ul>
   );
 }
 
@@ -683,17 +815,28 @@ function Th({ children, right }: { children?: React.ReactNode; right?: boolean }
   );
 }
 
-function PlanRowDesktop({
+// React.memo so each row only re-renders when its own props change.
+// Without this, every search keystroke / chip click / pagination tick
+// re-renders the entire ~50-row table — even when nothing about a
+// given row's data changed.  Parent-supplied callbacks are stabilised
+// with useCallback so this memo isn't busted by new function identities.
+const PlanRowDesktop = memo(function PlanRowDesktop({
   row, expanded, onToggleExpand, onApprove, onCancel, onOpen,
 }: {
   row: PlanRow;
   expanded: boolean;
-  onToggleExpand: () => void;
-  onApprove: () => void;
-  onCancel: () => void;
-  onOpen: () => void;
+  onToggleExpand: (p: PlanRow) => void;
+  onApprove: (p: PlanRow) => void;
+  onCancel: (p: PlanRow) => void;
+  onOpen: (p: PlanRow) => void;
 }) {
   const isDraft = (row.status ?? "").toLowerCase() === "draft";
+  // Memoise the row-bound adapters so the per-row buttons / rowclick
+  // don't churn their own listeners on every render either.
+  const handleToggle = useCallback(() => onToggleExpand(row), [onToggleExpand, row]);
+  const handleApprove = useCallback(() => onApprove(row), [onApprove, row]);
+  const handleCancel = useCallback(() => onCancel(row), [onCancel, row]);
+  const handleOpen = useCallback(() => onOpen(row), [onOpen, row]);
   return (
     <>
     <tr
@@ -703,14 +846,14 @@ function PlanRowDesktop({
       ].join(" ")}
       onClick={(e) => {
         if ((e.target as HTMLElement).closest("button")) return;
-        onToggleExpand();
+        handleToggle();
       }}
     >
       <td className="px-2 py-1.5 w-[24px] text-[var(--text-secondary)]">
         <button
           type="button"
           aria-label={expanded ? "Collapse plan" : "Expand plan"}
-          onClick={(e) => { e.stopPropagation(); onToggleExpand(); }}
+          onClick={(e) => { e.stopPropagation(); handleToggle(); }}
           className="inline-flex items-center justify-center w-5 h-5 rounded-sm hover:bg-white"
         >
           <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2} style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform .15s" }}>
@@ -718,7 +861,7 @@ function PlanRowDesktop({
           </svg>
         </button>
       </td>
-      <td className="px-2.5 py-1.5 min-w-[180px]">
+      <td className="px-2.5 py-1.5 min-w-[180px] max-w-[360px]">
         <div className="flex items-center gap-1.5 flex-wrap">
           <span className="font-medium text-[var(--text-primary)]">
             {row.plan_name || `Plan #${row.plan_id}`}
@@ -734,6 +877,10 @@ function PlanRowDesktop({
             {row.warehouse}
           </div>
         ) : null}
+        <ArticleSummary
+          summary={row.lines_summary}
+          totalLineCount={row.line_count ?? null}
+        />
       </td>
       <td className="px-2.5 py-1.5">
         <TypeBadge type={row.plan_type} />
@@ -754,40 +901,44 @@ function PlanRowDesktop({
       <td className="px-2.5 py-1.5 text-right">
         <RowActions
           isDraft={isDraft}
-          onApprove={onApprove}
-          onCancel={onCancel}
-          onOpen={onOpen}
+          onApprove={handleApprove}
+          onCancel={handleCancel}
+          onOpen={handleOpen}
         />
       </td>
     </tr>
     {expanded ? (
       <tr className="border-b border-[var(--aws-border)] bg-[var(--surface-subtle)]">
         <td colSpan={9} className="px-3 py-3">
-          <PlanInlinePreview planId={row.plan_id} onOpen={onOpen} />
+          <PlanInlinePreview planId={row.plan_id} onOpen={handleOpen} />
         </td>
       </tr>
     ) : null}
     </>
   );
-}
+});
 
-function PlanMobileCard({
+const PlanMobileCard = memo(function PlanMobileCard({
   row, expanded, onToggleExpand, onApprove, onCancel, onOpen,
 }: {
   row: PlanRow;
   expanded: boolean;
-  onToggleExpand: () => void;
-  onApprove: () => void;
-  onCancel: () => void;
-  onOpen: () => void;
+  onToggleExpand: (p: PlanRow) => void;
+  onApprove: (p: PlanRow) => void;
+  onCancel: (p: PlanRow) => void;
+  onOpen: (p: PlanRow) => void;
 }) {
   const isDraft = (row.status ?? "").toLowerCase() === "draft";
+  const handleToggle = useCallback(() => onToggleExpand(row), [onToggleExpand, row]);
+  const handleApprove = useCallback(() => onApprove(row), [onApprove, row]);
+  const handleCancel = useCallback(() => onCancel(row), [onCancel, row]);
+  const handleOpen = useCallback(() => onOpen(row), [onOpen, row]);
   return (
     <div
       className="bg-white border border-[var(--aws-border)] rounded-md overflow-hidden cursor-pointer hover:border-[var(--aws-navy)]"
       onClick={(e) => {
         if ((e.target as HTMLElement).closest("button")) return;
-        onToggleExpand();
+        handleToggle();
       }}
     >
       <div className="px-2.5 py-2">
@@ -796,7 +947,7 @@ function PlanMobileCard({
             <button
               type="button"
               aria-label={expanded ? "Collapse" : "Expand"}
-              onClick={(e) => { e.stopPropagation(); onToggleExpand(); }}
+              onClick={(e) => { e.stopPropagation(); handleToggle(); }}
               className="shrink-0 inline-flex items-center justify-center w-5 h-5 -ml-0.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
             >
               <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2} style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform .15s" }}>
@@ -821,27 +972,31 @@ function PlanMobileCard({
           ) : null}
           <span className="text-[var(--text-muted)]">{fmtDateRange(row.date_from, row.date_to)}</span>
         </div>
-        <div className="flex items-center gap-3 text-[11px] mb-2">
+        <div className="flex items-center gap-3 text-[11px] mb-1.5">
           <span><span className="text-[var(--text-muted)]">Lines</span> <strong>{row.line_count ?? 0}</strong></span>
           <span><span className="text-[var(--text-muted)]">Volume</span> <strong>{fmtPlanKg(row.total_planned_kg)} kg</strong></span>
         </div>
-        <div className="flex items-center gap-2">
+        <ArticleSummary
+          summary={row.lines_summary}
+          totalLineCount={row.line_count ?? null}
+        />
+        <div className="flex items-center gap-2 mt-2">
           <RowActions
             isDraft={isDraft}
-            onApprove={onApprove}
-            onCancel={onCancel}
-            onOpen={onOpen}
+            onApprove={handleApprove}
+            onCancel={handleCancel}
+            onOpen={handleOpen}
           />
         </div>
       </div>
       {expanded ? (
         <div className="border-t border-[var(--aws-border)] px-2.5 py-3 bg-[var(--surface-subtle)]">
-          <PlanInlinePreview planId={row.plan_id} onOpen={onOpen} />
+          <PlanInlinePreview planId={row.plan_id} onOpen={handleOpen} />
         </div>
       ) : null}
     </div>
   );
-}
+});
 
 function RowActions({
   isDraft, onApprove, onCancel, onOpen,

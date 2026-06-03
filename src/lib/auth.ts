@@ -284,11 +284,30 @@ async function parseEnvelope(res: Response): Promise<ErrorEnvelope> {
 // JSON body in a try; falls through to `fallback` if the body is empty or
 // non-JSON. Centralised here so a `res.text()`-style probe never goes back
 // onto the wire for an HTML error page (which used to be alert()-ed verbatim).
+//
+// Handles the three envelope shapes the server uses across modules:
+//   1. RequestContextMiddleware (`{error, message, details, request_id}`)
+//      — wrapping unhandled exceptions and many app-level errors.
+//   2. FastAPI HTTPException(detail=str) → `{detail: "..."}`.
+//   3. FastAPI HTTPException(detail={...}) → `{detail: {message, ...}}`.
+// Surfacing all three means a 500 from a raw asyncpg error (envelope #1)
+// and a 400 from a clean HTTPException (envelopes #2/#3) both reach the
+// user as readable text rather than a generic "HTTP 500".
 export async function readApiErrorMessage(res: Response, fallback: string): Promise<string> {
   try {
-    const data = (await res.json()) as { message?: string; error?: string } | null;
-    if (data && (data.message || data.error)) {
-      return String(data.message || data.error);
+    const data = (await res.json()) as {
+      message?: string;
+      error?: string;
+      detail?: string | { message?: string; error?: string };
+    } | null;
+    if (data) {
+      if (typeof data.detail === "string" && data.detail) return data.detail;
+      if (data.detail && typeof data.detail === "object") {
+        if (data.detail.message) return String(data.detail.message);
+        if (data.detail.error)   return String(data.detail.error);
+      }
+      if (data.message) return String(data.message);
+      if (data.error)   return String(data.error);
     }
   } catch {
     /* non-JSON body — fall through to fallback */

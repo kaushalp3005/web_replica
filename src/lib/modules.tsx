@@ -45,6 +45,16 @@ function JobCardIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function SampleIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M9 3h6" />
+      <path d="M10 3v6.5L5.5 17a2 2 0 0 0 1.8 3h9.4a2 2 0 0 0 1.8-3L14 9.5V3" />
+      <path d="M8 14h8" />
+    </svg>
+  );
+}
+
 function AdminIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
@@ -86,6 +96,16 @@ export const MODULES: ModuleItem[] = [
     route: "job-card",
     implemented: true,
     Icon: JobCardIcon,
+  },
+  {
+    title: "Sample",
+    description:
+      "Raise and track sample requisitions (Basis RM, Basis FG, NPD, Internal), run approvals, issue outward & gate passes, and convert internal samples to external dispatch.",
+    badge: "Core",
+    stat: "Requisitions · Approvals · Gate passes",
+    route: "sample",
+    implemented: true,
+    Icon: SampleIcon,
   },
   {
     title: "Admin",

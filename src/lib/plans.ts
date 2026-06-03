@@ -5,9 +5,22 @@
 // The list response shape is { results: PlanRow[], pagination: { page,
 // page_size, total, total_pages } } — drop-in compatible with v1.
 
-import { apiFetch } from "./auth";
+import { apiFetch, readApiErrorMessage } from "./auth";
 
 // ── Row shape ────────────────────────────────────────────────────────────
+
+// Per-line summary returned by the v2 list endpoint so the list page
+// can show articles + qty inline without a per-plan detail fetch.
+// Server caps at 20 entries per plan; bigger plans surface the truncation
+// in the UI ("+N more").
+export interface PlanRowLineSummary {
+  plan_line_id?: number | null;
+  fg_sku_name?: string | null;
+  customer_name?: string | null;
+  planned_qty_kg?: number | string | null;
+  planned_qty_units?: number | string | null;
+  area?: string | null;
+}
 
 export interface PlanRow {
   plan_id: number;
@@ -27,6 +40,7 @@ export interface PlanRow {
   created_by?: string | null;
   approved_at?: string | null;
   approved_by?: string | null;
+  lines_summary?: PlanRowLineSummary[] | null;
   [k: string]: unknown;
 }
 
@@ -85,7 +99,13 @@ export async function listPlans(
   signal?: AbortSignal,
 ): Promise<PlanListResponse> {
   const res = await apiFetch(`/api/v1/production/plans-v2?${buildListParams(q)}`, { signal });
-  if (!res.ok) throw new Error(`Plans HTTP ${res.status}`);
+  if (!res.ok) {
+    // Surface the server's actual message ({message,error,detail}
+    // envelope) so the UI shows "column p.plan_name does not exist"
+    // instead of a generic "Plans HTTP 500". readApiErrorMessage handles
+    // non-JSON bodies and the fallback in one place.
+    throw new Error(await readApiErrorMessage(res, `Plans HTTP ${res.status}`));
+  }
   return (await res.json()) as PlanListResponse;
 }
 
@@ -135,7 +155,9 @@ export async function getPlan(
 ): Promise<PlanDetail> {
   const res = await apiFetch(`/api/v1/production/plans-v2/${planId}`, { signal });
   if (res.status === 404) throw new Error("Plan not found.");
-  if (!res.ok) throw new Error(`Plan HTTP ${res.status}`);
+  if (!res.ok) {
+    throw new Error(await readApiErrorMessage(res, `Plan HTTP ${res.status}`));
+  }
   return (await res.json()) as PlanDetail;
 }
 
@@ -178,12 +200,7 @@ export async function updatePlan(
     body: JSON.stringify(trimmed),
   });
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
+    throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
   }
   return await res.json();
 }
@@ -257,14 +274,7 @@ export async function submitPlanFieldChangeAmendment(
     }),
   });
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: { message?: string } | string; message?: string };
-      if (typeof j.detail === "string") detail = j.detail;
-      else if (j.detail?.message) detail = j.detail.message;
-      else if (j.message) detail = j.message;
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
+    throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
   }
   return await res.json();
 }
@@ -302,12 +312,7 @@ export async function updatePlanLine(
     body: JSON.stringify(trimmed),
   });
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
+    throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
   }
   return await res.json();
 }
@@ -337,12 +342,7 @@ export async function updatePlanStep(
     body: JSON.stringify(trimmed),
   });
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
+    throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
   }
   return await res.json();
 }
@@ -379,12 +379,7 @@ export async function addPlanStep(
     },
   );
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
+    throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
   }
   return await res.json();
 }
@@ -401,12 +396,7 @@ export async function reorderPlanSteps(
     },
   );
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
+    throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
   }
   return await res.json();
 }
@@ -416,12 +406,7 @@ export async function deletePlanStep(stepId: number): Promise<unknown> {
     method: "DELETE",
   });
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
+    throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
   }
   return await res.json();
 }
@@ -454,12 +439,7 @@ export async function deletePlan(
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
+    throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
   }
   return (await res.json()) as DeletePlanResponse;
 }
@@ -490,12 +470,7 @@ export async function approvePlan(
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
+    throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
   }
   return (await res.json()) as ApprovePlanResponse;
 }
@@ -510,12 +485,7 @@ export async function cancelPlan(planId: number, body: CancelPlanBody): Promise<
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
+    throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
   }
   return await res.json();
 }
