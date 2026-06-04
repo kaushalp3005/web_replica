@@ -48,6 +48,17 @@ type JobCardRow = {
   status?: string | null;
   entity?: string | null;
   plan_id?: number | null;
+  // Chain identity. A single `plan_id` can contain MANY independent process
+  // chains — one per `production_plan_line_v2` (a distinct FG batch / SO line).
+  // `plan_line_id` is the chain key; `step_number` orders the stages within
+  // that chain (sorting=1 → packaging=2 → …). The list/search endpoints return
+  // both on every row (see job_card_v2.list_job_cards). Grouping by plan_id
+  // alone interleaves sibling chains into one ladder — group by plan_line_id.
+  plan_line_id?: number | null;
+  step_number?: number | null;
+  process_name?: string | null;
+  // Per-line batch label from the backend: `P{plan_id}-L{plan_line_id}-S{step}`.
+  batch_number?: string | null;
   // Aggregated SO numbers for this JC's plan line — backend returns
   // ARRAY_AGG(DISTINCT so_header.so_number). May be null when no SO is
   // linked (manual job cards, scratch plans, etc.).
@@ -795,21 +806,25 @@ function JobCardListingPageBody() {
   );
 }
 
-// ── Grouped grid: plan-grouped merged cards + loose JCs ─────────────────
+// ── Grouped grid: one card per process CHAIN + loose JCs ────────────────
 //
-// All rows in a single shared list are sorted latest-first by job_card_id
-// (newer JCs have larger ids — the v2 backend issues them monotonically).
-// Then we partition: rows with a plan_id roll up into one merged card per
-// plan, with each stage shown inline; rows without plan_id render as
-// standalone cards. The mixed list is reassembled in latest-first order
-// by taking each group's MAX(job_card_id) as its sort key — so freshly
-// approved plans surface at the top of the page even when their oldest
-// stage is buried mid-list.
+// A single production `plan_id` contains many independent process chains —
+// one per `plan_line_id` (a distinct FG batch / SO line). Each chain is its
+// own sorting → packaging → … sequence, ordered by `step_number`. Grouping by
+// `plan_id` alone flattened every chain into one ladder sorted by job_card_id,
+// which interleaves sibling chains (a chain's sorting could land below another
+// chain's packaging) and makes the lock/unlock pattern read as nonsense to the
+// operator. So we partition by `plan_line_id`: one merged card per chain, with
+// its stages ordered by `step_number`. Rows without a `plan_line_id` (manual /
+// scratch JCs) render as standalone loose cards. The mixed list is reassembled
+// latest-first by plan_date (tie-break on each group's MAX(job_card_id)) so
+// freshly approved plans surface at the top.
 
 interface PlanGroup {
   kind: "plan";
-  plan_id: number;
-  stages: JobCardRow[];          // already sorted by step_number then job_card_id asc
+  plan_line_id: number;          // the chain key — one card per chain
+  plan_id: number | null;        // parent plan, shown on the header for provenance
+  stages: JobCardRow[];          // sorted by step_number then job_card_id asc
   newestJcId: number;            // used for latest-first global ordering
 }
 interface LooseGroup {
@@ -820,29 +835,44 @@ interface LooseGroup {
 type Group = PlanGroup | LooseGroup;
 
 function buildGroups(rows: JobCardRow[]): Group[] {
-  const byPlan = new Map<number, JobCardRow[]>();
+  const byChain = new Map<number, JobCardRow[]>();
   const loose: LooseGroup[] = [];
   for (const jc of rows) {
-    if (jc.plan_id != null) {
-      const list = byPlan.get(jc.plan_id) ?? [];
+    // Chain key is plan_line_id. Fall back to a loose card when it's missing
+    // (manual JCs, or a malformed row) rather than silently merging unrelated
+    // stages under a null key.
+    if (jc.plan_line_id != null) {
+      const list = byChain.get(jc.plan_line_id) ?? [];
       list.push(jc);
-      byPlan.set(jc.plan_id, list);
+      byChain.set(jc.plan_line_id, list);
     } else {
       loose.push({ kind: "loose", row: jc, newestJcId: jc.job_card_id });
     }
   }
   const planGroups: PlanGroup[] = [];
-  for (const [plan_id, stages] of byPlan.entries()) {
-    // Sort stages by step number if known, then by JC id ascending — that
-    // way the chain reads top-down in the order production runs.
-    const ordered = [...stages].sort((a, b) => a.job_card_id - b.job_card_id);
+  for (const [plan_line_id, stages] of byChain.entries()) {
+    // Order the chain top-down the way production runs: by step_number
+    // ascending (NULLs last), tie-break on job_card_id so it stays stable.
+    const ordered = [...stages].sort((a, b) => {
+      const aS = a.step_number, bS = b.step_number;
+      if (aS != null && bS != null && aS !== bS) return aS - bS;
+      if (aS == null && bS != null) return 1;
+      if (aS != null && bS == null) return -1;
+      return a.job_card_id - b.job_card_id;
+    });
     const newestJcId = stages.reduce((m, s) => (s.job_card_id > m ? s.job_card_id : m), 0);
-    planGroups.push({ kind: "plan", plan_id, stages: ordered, newestJcId });
+    planGroups.push({
+      kind: "plan",
+      plan_line_id,
+      plan_id: ordered[0]?.plan_id ?? null,
+      stages: ordered,
+      newestJcId,
+    });
   }
   // Merge + sort by plan_date desc (latest plan first), tie-break on
-  // newestJcId so two plans created on the same date land in stable
-  // order. Null plan_dates sink to the bottom. Matches the table sort
-  // so the two views never disagree.
+  // newestJcId so two chains from the same date land in stable order. Null
+  // plan_dates sink to the bottom. Matches the table sort so the two views
+  // never disagree.
   const planDateOf = (g: Group) =>
     g.kind === "plan"
       ? (g.stages[0]?.plan_date ?? null)
@@ -863,7 +893,7 @@ function JobCardGroupedGrid({ rows, onReload }: { rows: JobCardRow[]; onReload: 
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
       {groups.map((g) => (
         g.kind === "plan" ? (
-          <PlanMergedCard key={`plan-${g.plan_id}`} group={g} />
+          <PlanMergedCard key={`chain-${g.plan_line_id}`} group={g} />
         ) : (
           <JobCard key={`jc-${g.row.job_card_id}`} jc={g.row} onReload={onReload} />
         )
@@ -991,20 +1021,25 @@ function JobCardTableRow({ jc, onReload }: { jc: JobCardRow; onReload: () => voi
   );
 }
 
-// Compact merged card: one per plan, with each stage rendered as a single
-// row inside. Click a stage row to jump to that JC's detail page. Header
-// shows SKU + customer + plant; the stage rows show step/process · stage
-// label · qty · status.
+// Compact merged card: one per process CHAIN (plan line), with each stage
+// rendered as a single row inside, ordered by step_number. Click a stage row
+// to jump to that JC's detail page. Header shows SKU + customer + plant; the
+// stage rows show step number · process · floor · qty · status.
 function PlanMergedCard({ group }: { group: PlanGroup }) {
   const router = useRouter();
   const first = group.stages[0];
   const sku = first?.fg_sku_name || "—";
   const customer = first?.customer_name || "—";
   const plant = first?.factory || "—";
-  // Total kg across stages (per-stage planned qty — gives a rough sense of
-  // the plan's overall scale at a glance).
-  const totalKg = group.stages.reduce(
-    (s, jc) => s + (parseFloat(String(jc.planned_qty_kg ?? jc.batch_size_kg ?? 0)) || 0),
+  // This card is ONE process chain (one plan line), so the meaningful figure
+  // is the batch size — not a sum across stages. Summing would double-count
+  // (sorting 2,610 kg + packaging 2,610 kg ≠ a 5,220 kg batch). Take the
+  // largest per-stage planned qty, which equals the chain's entry quantity.
+  const batchQty = group.stages.reduce(
+    (m, jc) => {
+      const q = parseFloat(String(jc.planned_qty_kg ?? jc.batch_size_kg ?? 0)) || 0;
+      return q > m ? q : m;
+    },
     0,
   );
   // SO numbers de-duped across all stages.
@@ -1012,6 +1047,12 @@ function PlanMergedCard({ group }: { group: PlanGroup }) {
     new Set(group.stages.flatMap((jc) => jc.so_numbers ?? [])),
   );
   const so = formatSo(allSos);
+  // Stable per-line label for traceability when several chains share one plan.
+  // The backend batch_number is `P{plan}-L{line}-S{step}`; drop the step suffix
+  // so the label is constant across the chain's stages. Shown as the card's
+  // hover title so operators can tell sibling chains apart unambiguously.
+  const batchLabel = (first?.batch_number ?? "").replace(/-S\d+$/i, "")
+    || (group.plan_id != null ? `Plan #${group.plan_id}` : "Chain");
 
   function openStage(jcId: number) {
     patchListCache({ scrollY: typeof window !== "undefined" ? window.scrollY : 0 });
@@ -1019,15 +1060,23 @@ function PlanMergedCard({ group }: { group: PlanGroup }) {
   }
 
   return (
-    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
-      {/* Header — compact: plan id + SKU + customer + plant chip + total */}
+    <div
+      className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden"
+      title={batchLabel}
+    >
+      {/* Header — compact: plan id + SKU + customer + plant chip + batch size.
+          One card == one process chain (plan line); the step count + batch
+          size describe just this chain, not the whole plan. */}
       <div className="px-3 py-2 border-b border-[var(--aws-border)] bg-[var(--surface-subtle)]">
         <div className="flex items-center justify-between gap-2 mb-0.5">
-          <span className="font-mono text-[10px] uppercase tracking-wide font-bold text-[var(--text-muted)]">
-            Plan #{group.plan_id}
+          <span
+            className="font-mono text-[10px] uppercase tracking-wide font-bold text-[var(--text-muted)] truncate"
+            title={batchLabel}
+          >
+            {group.plan_id != null ? `Plan #${group.plan_id}` : "Chain"}
           </span>
-          <span className="text-[10px] font-semibold text-[var(--text-secondary)]">
-            {group.stages.length} stage{group.stages.length === 1 ? "" : "s"} · {fmtBatch(totalKg)}
+          <span className="text-[10px] font-semibold text-[var(--text-secondary)] shrink-0">
+            {group.stages.length} step{group.stages.length === 1 ? "" : "s"} · {fmtBatch(batchQty)}
           </span>
         </div>
         <div className="text-[13px] font-semibold text-[var(--text-primary)] truncate" title={sku}>{sku}</div>
@@ -1058,7 +1107,11 @@ function PlanMergedCard({ group }: { group: PlanGroup }) {
           const status = jc.status ?? "";
           const style = STATUS_STYLES[status] ?? { bg: "#f4f4f4", fg: "#414d5c", ring: "#d5dbdb" };
           const qty = jc.planned_qty_kg ?? jc.batch_size_kg;
-          const processLabel = jc.stage || `Stage ${i + 1}`;
+          const processLabel = jc.process_name || jc.stage || `Stage ${i + 1}`;
+          // Real step number from the chain — not the array index. Within a
+          // single chain these match, but showing the backend value keeps the
+          // badge honest if a step is ever filtered out or missing.
+          const stepNo = jc.step_number ?? i + 1;
           return (
             <li
               key={jc.job_card_id}
@@ -1080,7 +1133,7 @@ function PlanMergedCard({ group }: { group: PlanGroup }) {
               }}
             >
               <span className="shrink-0 inline-flex items-center justify-center w-4 h-4 rounded-full bg-[var(--aws-navy)] text-white text-[9px] font-bold">
-                {i + 1}
+                {stepNo}
               </span>
               <div className="flex-1 min-w-0">
                 <div className="font-medium text-[var(--text-primary)] truncate" title={processLabel}>
