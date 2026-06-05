@@ -36,19 +36,20 @@ import {
   fmtDateRange,
 } from "@/lib/plans";
 import { PROCESS_OPTIONS, canonProcess, stageFromProcess } from "@/lib/processCatalog";
+import { normaliseWarehouseCode } from "@/lib/warehouseScope";
 
 // Warehouse → allowed floor list. Same source-of-truth as the Planning
-// page's FLOORS_BY_FACTORY mapping, keyed by the warehouse identifier the
-// plan header stores (W-202 / A-185) so we can look up valid floors with
-// no further translation.
+// page's FLOORS_BY_FACTORY mapping.  Keys are pre-normalised ("W202",
+// "A185") so the lookup tolerates the hyphenated / lowercased /
+// padded admin-typed variants we see in the wild.
 const WAREHOUSE_TO_FLOORS: Record<string, readonly string[]> = {
-  "W-202": [
+  W202: [
     "Lower Basement", "Upper Basement",
     "First Floor", "First Floor Mezz",
     "Second Floor", "Second Floor Mezz",
     "Terrace",
   ],
-  "A-185": [
+  A185: [
     "Roasting Area", "Mezzanine", "Sorting Area", "Printing Area",
     "Dmart Production Area", "Dmart Packing Area",
     "Cheese Floor", "FG store", "FFS Packing Area",
@@ -57,7 +58,7 @@ const WAREHOUSE_TO_FLOORS: Record<string, readonly string[]> = {
 
 function floorsForWarehouse(wh: string | null | undefined): readonly string[] {
   if (!wh) return [];
-  return WAREHOUSE_TO_FLOORS[wh] ?? [];
+  return WAREHOUSE_TO_FLOORS[normaliseWarehouseCode(wh)] ?? [];
 }
 
 export default function PlanDetailPage() {

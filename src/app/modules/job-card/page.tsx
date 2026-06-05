@@ -16,6 +16,7 @@ import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
 import { useRequireAuth, deriveRowLockIndicator, useUserInitial, useUserScope } from "@/lib/user";
+import { userHasWarehouse } from "@/lib/warehouseScope";
 // W4-MED-3/M10 — single context-driven subscription point.
 import { UserProvider, useUserCtx } from "./_UserContext";
 import { userMayForceUnlock } from "./_useLockState";
@@ -1435,12 +1436,14 @@ function EmptyState({
 
   // If the user is scoped to specific factories AND they're filtering to a
   // factory outside that scope, the server returned 0 rows because of the
-  // scope intersection — flag that explicitly.
+  // scope intersection — flag that explicitly.  Uses the shared
+  // warehouse matcher so admin-typed variants ("W202" vs "W-202" vs
+  // "w-202") all resolve the same way.
   const factoryOutOfScope =
-    factory &&
+    !!factory &&
     !userScope.isAdmin &&
     userScope.warehouses.length > 0 &&
-    !userScope.warehouses.includes(factory);
+    !userHasWarehouse(userScope.warehouses, factory);
 
   return (
     <div className="bg-white border border-[var(--aws-border)] rounded-md p-10 text-center text-[var(--text-secondary)]">

@@ -19,6 +19,7 @@ import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
 import { useRequireAuth, useUserInitial, useUserScope, type UserScope } from "@/lib/user";
 import { PROCESS_OPTIONS, canonProcess, stageFromProcess } from "@/lib/processCatalog";
+import { userHasAnyWarehouse } from "@/lib/warehouseScope";
 import { BackLink } from "@/components/BackLink";
 import {
   type FulfillmentRow,
@@ -67,12 +68,19 @@ const FLOORS_BY_FACTORY: Record<FactoryCode, readonly string[]> = {
 };
 
 // Intersect the master with the user's scope. Admin or empty scope ⇒ no
-// restriction. Mirrors fulfillment.js:1264 / 1271.
+// restriction. Mirrors fulfillment.js:1264 / 1271.  Uses the shared
+// warehouseScope matcher so admin-typed variants ("W-202" vs "W202"
+// vs "w-202") all resolve cleanly.
 function allowedFactoryCodes(scope: UserScope): FactoryCode[] {
   const all = Object.keys(FACTORY_TO_WAREHOUSE) as FactoryCode[];
   if (scope.isAdmin) return all;
   if (!scope.warehouses.length) return all;
-  return all.filter((code) => scope.warehouses.includes(FACTORY_TO_WAREHOUSE[code]));
+  return all.filter((code) =>
+    userHasAnyWarehouse(scope.warehouses, [
+      FACTORY_TO_WAREHOUSE[code],  // "W-202"
+      code,                        // "W202"
+    ]),
+  );
 }
 
 function allowedFloorsFor(scope: UserScope, factory: FactoryCode | undefined): string[] {
@@ -1687,7 +1695,21 @@ function SelectedCard({
             </label>
             {factoryOpts.length === 0 ? (
               <p className="mt-1 text-[11px] text-[var(--aws-error)]">
-                No factories are assigned to your account. Ask an admin to grant warehouse access.
+                No factories are assigned to your account.{" "}
+                {scope.warehouses.length > 0 ? (
+                  <>
+                    Your account has <span className="font-mono">{scope.warehouses.join(", ")}</span>
+                    , but planning expects one of{" "}
+                    <span className="font-mono">
+                      {(Object.keys(FACTORY_TO_WAREHOUSE) as FactoryCode[])
+                        .map((c) => `${c} / ${FACTORY_TO_WAREHOUSE[c]}`)
+                        .join(", ")}
+                    </span>
+                    . Ask an admin to align your <span className="font-mono">allowed_warehouses</span> with one of those exact values.
+                  </>
+                ) : (
+                  <>Ask an admin to grant warehouse access.</>
+                )}
               </p>
             ) : null}
           </div>
