@@ -1554,24 +1554,17 @@ function SelectedCard({
   // auto-computes. Either field still accepts a direct manual value
   // (operator can override the link by editing the other field
   // immediately after).
-  const skuUomFromSoLine: number | null =
-    defaultUnits > 0 && defaultKg > 0
-      ? defaultKg / defaultUnits
-      : null;
-
-  // R10 — all_sku fallback. When the SO line is fully fulfilled
-  // (pending_qty_kg = pending_qty_units = 0) the per-line ratio can't
-  // be derived, leaving Pack count ↔ Quantity unlinked. Fetching the
-  // SKU's canonical `uom` (= kg per pack) from the all_sku master
-  // gives a stable conversion factor regardless of fulfillment state.
-  // Only fires when the SO-line ratio is unavailable AND the card is
-  // expanded (avoids one HTTP round-trip per row on initial render).
+  //
+  // ── Source of truth: all_sku master (NOT the SO-line ratio) ──
+  // The per-line pending_qty_kg / pending_qty_units ratio is a
+  // *data-state* derivative — a wrongly-entered SO line ("2,350 kg /
+  // 14,883 pcs" → 0.158 kg/pc on a SKU whose actual pack is 200 g)
+  // would propagate the error into every plan made off that row.
+  // The all_sku `uom` column is the pack weight in kg (0.200 for a
+  // 200 g pack) and is the only authoritative source. Fetched on
+  // expand so we don't pay one round-trip per row at initial render.
   const [skuUomFromMaster, setSkuUomFromMaster] = useState<number | null>(null);
   useEffect(() => {
-    if (skuUomFromSoLine != null) {
-      // SO-line ratio works; no fetch needed.
-      return;
-    }
     if (!isExpanded || !row.fg_sku_name) return;
     const ctrl = new AbortController();
     void (async () => {
@@ -1589,15 +1582,17 @@ function SelectedCard({
         const n = typeof uom === "number" ? uom : parseFloat(String(uom));
         if (Number.isFinite(n) && n > 0) setSkuUomFromMaster(n);
       } catch {
-        // Silent — the operator can still type both fields manually.
+        // Silent — the operator can still type both fields manually
+        // (they stay unlinked when master isn't available).
       }
     })();
     return () => ctrl.abort();
-  }, [isExpanded, row.fg_sku_name, skuUomFromSoLine]);
+  }, [isExpanded, row.fg_sku_name]);
 
-  // Effective ratio: prefer SO-line-derived (instant, no fetch), fall
-  // back to the all_sku master value (async, populated after fetch).
-  const skuUomKg: number | null = skuUomFromSoLine ?? skuUomFromMaster;
+  // Strict: only the all_sku master drives interlinking. If the
+  // master fetch hasn't completed (or the SKU isn't in the table)
+  // the two fields stay unlinked and the operator types both.
+  const skuUomKg: number | null = skuUomFromMaster;
 
   function patchQtyUnits(n: number | undefined) {
     if (n == null || !Number.isFinite(n)) {

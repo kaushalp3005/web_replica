@@ -165,6 +165,11 @@ export function friendlyApiError(raw: unknown): string {
         "create plan",
         fromBackend || "one or more selected SKUs have no BOM. Set up the BOM, or remove the SKU from the selection.",
       );
+    case "over_allocation":
+      return compose(
+        "create plan",
+        fromBackend || "the requested qty exceeds the SO fulfillment's pending balance. Reduce the planned qty or pick a different fulfillment.",
+      );
     case "plan_not_found":
       return "Plan not found.";
     case "no_change":
