@@ -818,7 +818,7 @@ function JobCardDetailPageBody() {
               onJump={(id) => router.push(`/modules/job-card/${id}`)}
               onReload={reload}
             />
-            <ActionBar detail={detail} onReload={reload} />
+            <ActionBar detail={detail} onReload={reload} reloading={loading} />
             {/* R10 — lifecycle hint: production hasn't started yet. The
                 Overview tab stays editable so Assign Team + Start work;
                 everything else is read-only until status flips to in_progress. */}
@@ -964,7 +964,7 @@ function HeaderMeta({ label, value, title }: { label: string; value: string; tit
 // Each action runs a window.confirm step before firing — matches the Android
 // AlertDialog. Dispatch additionally collects the qty via window.prompt so
 // the operator can choose how much to push to the next stage.
-function ActionBar({ detail, onReload }: { detail: JobCardDetail; onReload: () => void }) {
+function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDetail; onReload: () => void; reloading?: boolean }) {
   const [busy, setBusy] = useState(false);
   const status = detail.status ?? "";
   const isLocked = !!detail.is_locked && !detail.force_unlocked;
@@ -985,9 +985,18 @@ function ActionBar({ detail, onReload }: { detail: JobCardDetail; onReload: () =
         body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
       });
       if (!res.ok) {
-        let detailText: string;
-        try { detailText = await res.text(); } catch { detailText = `HTTP ${res.status}`; }
-        throw new Error(detailText || `HTTP ${res.status}`);
+        // The backend returns lifecycle rejections as a structured envelope
+        // ({"detail": {"error": ..., "message": ...}} on 409s). Parse it so the
+        // operator sees the human message (e.g. "Can only complete in_progress
+        // JCs (currently 'completed')") instead of a raw JSON blob.
+        const msg = await readApiErrorMessage(res, `HTTP ${res.status}`);
+        // A rejection almost always means this button was stale: the JC's
+        // status advanced out-of-band (another device, an automated dispatch,
+        // or this operator's own earlier click that already succeeded). Re-sync
+        // the detail so the CTA corrects itself instead of letting the operator
+        // re-fire the same doomed action against an already-advanced JC.
+        onReload();
+        throw new Error(msg);
       }
       window.alert(opts.okMessage);
       onReload();
@@ -1079,6 +1088,12 @@ function ActionBar({ detail, onReload }: { detail: JobCardDetail; onReload: () =
       <LockableButton
         lockState={lockState}
         busy={busy}
+        // Disabled while a refetch is in flight: during a reload the page keeps
+        // showing the stale detail (loading only blanks the page on first load),
+        // so without this the just-clicked CTA would stay live against an
+        // about-to-change status — the classic double-submit "currently
+        // 'completed'" rejection. Re-enables once fresh detail lands.
+        disabled={reloading}
         onClick={onClick}
         variant="primary"
         className="h-9 px-4 text-[13px] font-bold tracking-wide"
