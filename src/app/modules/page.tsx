@@ -60,10 +60,10 @@ export default function ModulesPage() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    // Hide the Admin tile from non-admins. The /modules/admin route also
-    // gates itself, but suppressing the entry point keeps the grid honest
-    // for operators who don't have the permission.
-    const visible = me?.is_admin ? MODULES : MODULES.filter((m) => m.route !== "admin");
+    // Hide admin-only tiles (Admin / Purchase / QC / Sample / Transfer)
+    // from non-admins. Each module's root page also inline-gates itself for
+    // direct navigation; suppressing the entry point keeps the grid honest.
+    const visible = me?.is_admin ? MODULES : MODULES.filter((m) => !m.adminOnly);
     if (!q) return visible;
     return visible.filter((m) => m.title.toLowerCase().includes(q));
   }, [query, me]);

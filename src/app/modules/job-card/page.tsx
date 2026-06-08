@@ -16,10 +16,12 @@ import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
 import { useRequireAuth, deriveRowLockIndicator, useUserInitial, useUserScope } from "@/lib/user";
+import { userHasWarehouse } from "@/lib/warehouseScope";
 // W4-MED-3/M10 — single context-driven subscription point.
 import { UserProvider, useUserCtx } from "./_UserContext";
 import { userMayForceUnlock } from "./_useLockState";
 import { JC_LIST_PAGE_SIZE, SEARCH_DEBOUNCE_MS } from "@/lib/constants";
+import { friendlyApiError } from "@/lib/apiErrors";
 import { BackLink } from "@/components/BackLink";
 import { ActionButton, LockableButton } from "./_ActionButton";
 import {
@@ -453,7 +455,7 @@ function JobCardListingPageBody() {
         }
       } catch (e) {
         if (controller.signal.aborted) return;
-        setError(e instanceof Error ? e.message : "Failed to load job cards");
+        setError(friendlyApiError(e));
         setRows([]);
         setPagination({});
         setSearchMeta(null);
@@ -875,7 +877,7 @@ function JobCardGroupedGrid({ rows, onReload }: { rows: JobCardRow[]; onReload: 
 // C2 (Wave 4) — dense table view used on md+ viewports. Hides plan
 // grouping (the card view keeps that affordance on small screens for
 // glance-friendly scanning) and surfaces every row with the columns the
-// audit asked for: JC#, SO#, FG SKU, Plant, Phase, Status, Lock, Created,
+// audit asked for: JC#, SO#, FG SKU, Plant, Stage, Status, Lock, Created,
 // Action. Cost columns would be gated by useSeesCost — none are
 // surfaced in the list endpoint today, so the gate is a no-op here but
 // the seam exists for future column additions.
@@ -903,7 +905,7 @@ function JobCardTable({ rows, onReload }: { rows: JobCardRow[]; onReload: () => 
             <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">SO #</th>
             <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">FG SKU</th>
             <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden lg:table-cell">Plant</th>
-            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden lg:table-cell">Phase</th>
+            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden lg:table-cell">Stage</th>
             <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Status</th>
             <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden xl:table-cell">Lock</th>
             <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden md:table-cell">Plan Date</th>
@@ -1244,7 +1246,7 @@ function RowActions({
       }
       onReload();
     } catch (e) {
-      window.alert(`Failed: ${e instanceof Error ? e.message : "unknown error"}`);
+      window.alert(friendlyApiError(e));
     }
   }
 
@@ -1278,7 +1280,7 @@ function RowActions({
       window.alert("Job card force-unlocked.");
       onReload();
     } catch (e) {
-      window.alert(`Failed: ${e instanceof Error ? e.message : "unknown error"}`);
+      window.alert(friendlyApiError(e));
     }
   }
 
@@ -1382,12 +1384,15 @@ function EmptyState({
 
   // If the user is scoped to specific factories AND they're filtering to a
   // factory outside that scope, the server returned 0 rows because of the
-  // scope intersection — flag that explicitly.
+  // scope intersection — flag that explicitly.  Uses the shared warehouse
+  // matcher so an admin-typed "W202" / "W-202" / "w-202" all resolve the
+  // same way (previously a strict includes() locked legitimately-assigned
+  // operators out of their own plant).
   const factoryOutOfScope =
-    factory &&
+    !!factory &&
     !userScope.isAdmin &&
     userScope.warehouses.length > 0 &&
-    !userScope.warehouses.includes(factory);
+    !userHasWarehouse(userScope.warehouses, factory);
 
   return (
     <div className="bg-white border border-[var(--aws-border)] rounded-md p-10 text-center text-[var(--text-secondary)]">

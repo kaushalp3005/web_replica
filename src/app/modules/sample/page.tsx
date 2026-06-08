@@ -8,10 +8,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
-import { BackLink } from "@/components/BackLink";
-import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
+import { Breadcrumbs } from "@/components/Breadcrumbs";
+import { useRequireAuth, useUserInitial, useMe, useIsAdmin } from "@/lib/user";
 import { sampleCaps } from "@/lib/sample-roles";
-import { listRequisitions, type Requisition } from "@/lib/sample";
+import { listRequisitions, WAREHOUSES, type Requisition } from "@/lib/sample";
 import { loadSampleListCache, saveSampleListCache } from "@/lib/sample-list-cache";
 import { STATUS_STYLES, TYPE_LABEL, StatusPill } from "./_shared";
 
@@ -52,12 +52,13 @@ export default function SampleQueuePage() {
   const authed = useRequireAuth(router.replace);
   const initial = useUserInitial();
   const me = useMe();
+  const isAdmin = useIsAdmin();
   const caps = useMemo(() => sampleCaps(me), [me]);
 
   const [cache] = useState(() => loadSampleListCache());
   const [status, setStatus] = useState(() => cache?.status ?? "");
   const [sampleType, setSampleType] = useState(() => cache?.sampleType ?? "");
-  const [entity, setEntity] = useState(() => cache?.entity ?? "");
+  const [warehouse, setWarehouse] = useState(() => cache?.warehouse ?? "");
   const [rows, setRows] = useState<Requisition[]>(() => cache?.rows ?? []);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -69,6 +70,10 @@ export default function SampleQueuePage() {
   const firstRun = useRef(true);
   useEffect(() => {
     if (!authed) return;
+    // Admin-gate (R8): non-admins shouldn't even hit the list endpoint —
+    // they'd 401 anyway, and we don't want to leak filter state into the
+    // cache for them. The denial banner below covers the UI.
+    if (!isAdmin) return;
     let cancelled = false;
     (async () => {
       // On the very first run, if we hydrated rows from cache, skip the
@@ -77,10 +82,10 @@ export default function SampleQueuePage() {
       firstRun.current = false;
       setError(null);
       try {
-        const data = await listRequisitions({ status, sample_type: sampleType, entity, limit: 200 });
+        const data = await listRequisitions({ status, sample_type: sampleType, warehouse, limit: 200 });
         if (cancelled) return;
         setRows(data);
-        saveSampleListCache({ status, sampleType, entity, rows: data, scrollY: 0 });
+        saveSampleListCache({ status, sampleType, warehouse, rows: data, scrollY: 0 });
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load requisitions");
       } finally {
@@ -88,7 +93,7 @@ export default function SampleQueuePage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [authed, status, sampleType, entity, cache]);
+  }, [authed, isAdmin, status, sampleType, warehouse, cache]);
 
   function openRow(id: number) {
     router.push(`/modules/sample/${id}`);
@@ -107,15 +112,35 @@ export default function SampleQueuePage() {
     );
   }
 
+  if (!isAdmin) {
+    return (
+      <Shell initial={initial} router={router}>
+        <Breadcrumbs items={[{ label: "Modules", href: "/modules" }, { label: "Sample" }]} className="mb-3" />
+        <h1 className="text-[22px] leading-7 font-semibold text-[var(--text-primary)] mb-3">Sample Requisitions</h1>
+        <section className="bg-white border border-[var(--aws-border)] rounded-md p-6 text-[13px] text-[var(--text-secondary)]">
+          You don&rsquo;t have access to the Sample module. Ask an administrator to grant you access, or switch to a different account.
+        </section>
+      </Shell>
+    );
+  }
+
   return (
     <Shell initial={initial} router={router}>
-      <BackLink parentHref="/modules" label="Modules" className="mb-3" />
+      <Breadcrumbs items={[{ label: "Modules", href: "/modules" }, { label: "Sample" }]} className="mb-3" />
       <div className="flex flex-wrap items-center gap-3 mb-5">
         <div className="min-w-0">
           <h1 className="text-[22px] leading-7 font-semibold text-[var(--text-primary)]">Sample Requisitions</h1>
           <p className="text-[12px] text-[var(--text-secondary)] mt-0.5">{rows.length} shown</p>
         </div>
         <div className="flex-1" />
+        <button
+          onClick={() => router.push("/modules/sample/rm-issue-forms")}
+          className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:bg-[var(--surface-subtle)]"
+        >RM forms</button>
+        <button
+          onClick={() => router.push("/modules/sample/npd")}
+          className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:bg-[var(--surface-subtle)]"
+        >NPD samples</button>
         {caps.canRequest && (
           <button
             onClick={() => router.push("/modules/sample/new")}
@@ -134,10 +159,9 @@ export default function SampleQueuePage() {
           <option value="">All statuses</option>
           {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
         </select>
-        <select className="form-input !w-auto" value={entity} onChange={(e) => setEntity(e.target.value)} aria-label="Entity">
-          <option value="">All entities</option>
-          <option value="cfpl">CFPL</option>
-          <option value="cdpl">CDPL</option>
+        <select className="form-input !w-auto" value={warehouse} onChange={(e) => setWarehouse(e.target.value)} aria-label="Warehouse">
+          <option value="">All warehouses</option>
+          {WAREHOUSES.map((w) => <option key={w} value={w}>{w}</option>)}
         </select>
         {loading && <span className="self-center text-[12px] text-[var(--text-muted)]">Refreshing…</span>}
       </div>
@@ -152,32 +176,43 @@ export default function SampleQueuePage() {
         </div>
       ) : (
         <>
-          {/* Mobile: cards. md+: table. (responsive — hide columns via layout swap, not overflow.) */}
+          {/* Mobile: cards. md+: full-field table. Long values truncate with a
+              hover tooltip (title) showing the full text. */}
           <div className="grid grid-cols-1 gap-2 md:hidden">
             {rows.map((r) => (
               <button key={r.id} onClick={() => openRow(r.id)}
                 className="text-left bg-white border border-[var(--aws-border)] rounded-md p-3 hover:border-[var(--aws-orange)]">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-semibold text-[13px] text-[var(--text-primary)]">{r.requisition_number}</span>
+                  <span className="font-semibold text-[13px] text-[var(--text-primary)] truncate" title={r.requisition_number}>{r.requisition_number}</span>
                   <StatusPill status={r.status} />
                 </div>
-                <div className="mt-1 text-[12px] text-[var(--text-secondary)] flex flex-wrap gap-x-3">
+                <div className="mt-1 text-[12px] text-[var(--text-secondary)] flex flex-wrap gap-x-3 gap-y-0.5">
+                  <span title={`Request ID ${r.request_id ?? ""}`}>#{r.request_id ?? "—"}</span>
                   <span>{TYPE_LABEL[r.sample_type] ?? r.sample_type}</span>
-                  <span className="uppercase">{r.entity}</span>
+                  <span>{r.warehouse}</span>
+                  {r.quantity != null && <span>Qty {r.quantity}</span>}
                   <span>{(r.created_at ?? "").slice(0, 10)}</span>
                 </div>
+                {r.npd_target_name && (
+                  <div className="mt-1 text-[12px] text-[var(--text-secondary)] truncate" title={r.npd_target_name}>Target: {r.npd_target_name}</div>
+                )}
               </button>
             ))}
           </div>
 
-          <div className="hidden md:block bg-white border border-[var(--aws-border)] rounded-md overflow-hidden">
+          <div className="hidden md:block bg-white border border-[var(--aws-border)] rounded-md overflow-x-auto">
             <table className="w-full text-[13px]">
               <thead>
                 <tr className="bg-[var(--surface-subtle)] text-left text-[12px] text-[var(--text-secondary)]">
+                  <th className="px-3 py-2 font-semibold">Request ID</th>
                   <th className="px-3 py-2 font-semibold">Requisition</th>
                   <th className="px-3 py-2 font-semibold">Type</th>
                   <th className="px-3 py-2 font-semibold">Status</th>
-                  <th className="px-3 py-2 font-semibold">Entity</th>
+                  <th className="px-3 py-2 font-semibold">Warehouse</th>
+                  <th className="px-3 py-2 font-semibold">Target article</th>
+                  <th className="px-3 py-2 font-semibold text-right">Qty</th>
+                  <th className="px-3 py-2 font-semibold">Purpose</th>
+                  <th className="px-3 py-2 font-semibold">Team</th>
                   <th className="px-3 py-2 font-semibold">Created</th>
                 </tr>
               </thead>
@@ -185,11 +220,16 @@ export default function SampleQueuePage() {
                 {rows.map((r) => (
                   <tr key={r.id} onClick={() => openRow(r.id)}
                     className="border-t border-[var(--surface-divider)] hover:bg-[var(--surface-subtle)] cursor-pointer">
-                    <td className="px-3 py-2 font-medium text-[var(--text-primary)]">{r.requisition_number}</td>
-                    <td className="px-3 py-2">{TYPE_LABEL[r.sample_type] ?? r.sample_type}</td>
+                    <td className="px-3 py-2 text-[var(--text-secondary)] tabular-nums">{r.request_id ?? "—"}</td>
+                    <td className="px-3 py-2 font-medium text-[var(--text-primary)] max-w-[180px] truncate" title={r.requisition_number}>{r.requisition_number}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">{TYPE_LABEL[r.sample_type] ?? r.sample_type}</td>
                     <td className="px-3 py-2"><StatusPill status={r.status} /></td>
-                    <td className="px-3 py-2 uppercase">{r.entity}</td>
-                    <td className="px-3 py-2 text-[var(--text-secondary)]">{(r.created_at ?? "").slice(0, 10)}</td>
+                    <td className="px-3 py-2">{r.warehouse}</td>
+                    <td className="px-3 py-2 max-w-[200px] truncate" title={r.npd_target_name ?? ""}>{r.npd_target_name ?? "—"}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{r.quantity ?? "—"}</td>
+                    <td className="px-3 py-2 max-w-[160px] truncate" title={r.purpose_tag ?? ""}>{r.purpose_tag ?? "—"}</td>
+                    <td className="px-3 py-2 max-w-[160px] truncate" title={r.requestor_team ?? ""}>{r.requestor_team ?? "—"}</td>
+                    <td className="px-3 py-2 text-[var(--text-secondary)] whitespace-nowrap">{(r.created_at ?? "").slice(0, 10)}</td>
                   </tr>
                 ))}
               </tbody>

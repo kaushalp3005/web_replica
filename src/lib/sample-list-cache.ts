@@ -8,7 +8,7 @@ import type { Requisition } from "./sample";
 export interface SampleListCache {
   status: string;
   sampleType: string;
-  entity: string;
+  warehouse: string;
   rows: Requisition[];
   scrollY: number;
 }

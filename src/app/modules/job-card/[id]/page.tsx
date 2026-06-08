@@ -12,6 +12,7 @@
 // for line so the operator sees the same form on web as on mobile.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { BrandMark } from "@/components/BrandMark";
 import {
   consumptionStateFromDetail,
@@ -19,13 +20,15 @@ import {
   rejectionsFromDetail,
   controlSampleFromDetail,
   pmVarianceFromDetail,
+  additivesFromDetail,
   type PmVarianceState,
   type RejectionRow,
 } from "./outputAccounting";
 import { useParams, useRouter } from "next/navigation";
 import { apiFetch, readApiErrorMessage, userStore } from "@/lib/auth";
-import { useMe, useRequireAuth, useUserInitial } from "@/lib/user";
+import { useIsAdmin, useMe, useRequireAuth, useUserInitial } from "@/lib/user";
 import { BALANCE_TOLERANCE_KG, WEIGHT_SAMPLE_COUNT } from "@/lib/constants";
+import { friendlyApiError } from "@/lib/apiErrors";
 import { BackLink } from "@/components/BackLink";
 import { LockBanner } from "../_LockBanner";
 import { lockBannerId, useLockState, userMayForceUnlock } from "../_useLockState";
@@ -116,6 +119,18 @@ type ByproductRow = {
   // categories (control_sample, pm_*, dust, etc.).
   material_name?: string | null;
   bom_line_id?: number | null;
+};
+
+// Additive consumption row as returned by the server in detail.additives.
+// Mirrors the row shape persisted to job_card_additive_consumption_v2.
+type AdditiveServerRow = {
+  additive_id?: number | null;
+  /** all_sku.particulars when picked from the catalog dropdown. */
+  sku_name?: string | null;
+  /** Free-text name when sku_name is null ("Others" path). */
+  material_name?: string | null;
+  qty_kg?: number | string | null;
+  remarks?: string | null;
 };
 
 type AnnexureRow = Record<string, unknown>;
@@ -217,6 +232,10 @@ type JobCardDetail = {
   consumption_lines?: ConsumptionLine[];
   balance_materials?: BalanceMaterialRow[];
   byproducts?: ByproductRow[];
+  /** Additive consumption rows — data-keeping only.  See
+   *  job_card_additive_consumption_v2 + jc_additives_v2 service.  Not
+   *  counted in the conservation identity. */
+  additives?: AdditiveServerRow[];
   qc?: Record<string, unknown> | null;
 
   annexure_a_b_metal_detection?: AnnexureRow[];
@@ -257,12 +276,185 @@ const STATUS_STYLES: Record<string, { bg: string; fg: string; ring: string }> = 
   cancelled:         { bg: "#f4f4f4", fg: "#687078", ring: "#d5dbdb" },
 };
 
+// Lifecycle lock — fields on Output & Accounting / Quality / Remarks are
+// uneditable until the operator clicks START (status flips to in_progress).
+// Returns true for the pre-start statuses, false for in_progress/completed/
+// closed/cancelled. The "closed"/"cancelled" terminal states have their own
+// lock semantics via lock.isLocked + admin override; this predicate is only
+// concerned with the START gate.
+function isLifecycleLocked(status: string | null | undefined): boolean {
+  if (!status) return true;
+  return status === "locked"
+      || status === "unlocked"
+      || status === "assigned"
+      || status === "material_received";
+}
+
 // Factory for a blank off-grade row. Centralised so the default seed,
 // the "+ Add another" handler, and any future reset code all start from
 // the same shape (and adding a new field on RejectionRow updates one
 // place instead of three).
 function BLANK_REJECTION_ROW(): RejectionRow {
   return { category: "", bomLineId: null, materialName: "", qty: "", remarks: "" };
+}
+
+// ── Additives: data-keeping consumption for fully-consumed seasoning ──
+//
+// Operators record Salt / Sugar / Citric Acid / Oils / Cayenne Pepper /
+// Gum Powder etc. that go INTO the batch but produce zero leftover. The
+// rows are written to job_card_additive_consumption_v2 and surfaced in
+// the Accounting Summary as a separate "Additives" total — they do NOT
+// feed the conservation identity (would otherwise create false unbalance
+// because there's no matching output column).
+//
+// A row uses either:
+//   • sku_name   — picked from the additive dropdown (driven by all_sku
+//                  particulars that match additive name patterns)
+//   • custom_name — free-text when the operator selects "Others"
+type AdditiveRow = {
+  /** Selected from the dropdown.  "_other" is a sentinel meaning "use
+   *  custom_name".  Empty string = nothing picked yet. */
+  sku_name: string;
+  /** Filled only when sku_name === "_other".  Surfaces in the saved
+   *  row's material_name column. */
+  custom_name: string;
+  qty: string;
+  remarks: string;
+};
+
+function BLANK_ADDITIVE_ROW(): AdditiveRow {
+  return { sku_name: "", custom_name: "", qty: "", remarks: "" };
+}
+
+// Canonical additive category labels. Used both for the dropdown
+// fallback (when no SKUs come back from /sku-lookup yet) and as the
+// search seed when the page mounts.  The frontend issues one
+// /sku-lookup search per category and unions the results into a
+// deduped, sorted list of options.
+const ADDITIVE_CATEGORIES = [
+  "Salt",
+  "Sugar",
+  "Gum Powder",
+  "Citric Acid",
+  "Oil",
+  "Cayenne Pepper",
+  "Pepper",
+] as const;
+
+// ── R10 — per-batch summary computation ──────────────────────────────
+// Module-scope helper used by AccountingSummaryCard's per-batch
+// breakdown + the total roll-up. Mirrors the in-component `summary`
+// useMemo but sources from the persisted detail arrays filtered by
+// batch_id (instead of from live form state), so closed batches show
+// snapshot-accurate values regardless of which batch is currently
+// selected for editing. Also tolerant of nulls: a freshly-opened
+// batch with no saved data returns zeros across the board.
+type BatchSummaryArticle = {
+  bom_line_id: number | null;
+  material_sku_name: string;
+  item_type: string;
+  uom: string;
+};
+function _num(v: unknown): number {
+  if (v == null || v === "") return 0;
+  const n = typeof v === "number" ? v : parseFloat(String(v));
+  return Number.isFinite(n) ? n : 0;
+}
+function computeBatchSummary(
+  batch: BatchRow,
+  detail: JobCardDetail,
+  articles: BatchSummaryArticle[],
+): SummaryCardData {
+  const batchId = batch.batch_id;
+  // Consumption rows (PM excluded — they don't convert into FG mass).
+  const consumption = consumptionStateFromDetail(detail.consumption_lines, batchId);
+  const articleByKey = new Map<string, BatchSummaryArticle>();
+  for (const a of articles) {
+    const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
+    articleByKey.set(key, a);
+  }
+  const isRmKey = (k: string) => {
+    const a = articleByKey.get(k);
+    return a ? (a.item_type || "").toUpperCase() !== "PM" : true;
+  };
+  const rmConsumedKg = Object.entries(consumption).reduce(
+    (s, [k, v]) => s + (isRmKey(k) ? _num(v) : 0),
+    0,
+  );
+  // Balance materials
+  const balance = balanceStateFromDetail(detail.balance_materials, batchId);
+  const balTotal = Object.values(balance).reduce((s, v) => s + _num(v), 0);
+  // Off-grade (excluding wastage and control_sample) + wastage
+  const rejections = rejectionsFromDetail(detail.byproducts, detail.balance_materials, batchId);
+  const offgradeTotal = rejections.reduce(
+    (s, r) => s + (r.category !== "wastage" ? _num(r.qty) : 0),
+    0,
+  );
+  const wastageTotal = rejections.reduce(
+    (s, r) => s + (r.category === "wastage" ? _num(r.qty) : 0),
+    0,
+  );
+  // Additives — data-keeping; do NOT participate in the conservation
+  // identity (no matching output column).
+  const addRows = additivesFromDetail(detail.additives, batchId);
+  const additivesKg = addRows.reduce((s, a) => s + _num(a.qty), 0);
+  // Control sample
+  const ctrlSample = _num(
+    controlSampleFromDetail(detail.byproducts, detail.balance_materials, batchId),
+  );
+  // Batch-row stored fields (canonical snapshot for closed batches;
+  // null for open batches → treated as 0).
+  const fgOutKg = _num(batch.fg_actual_kg) || _num(batch.produced_qty_kg);
+  const rawProcessLoss = _num(batch.process_loss_kg);
+  const lossKg = rawProcessLoss + wastageTotal;
+  const egaKg = _num(batch.extra_give_away_qty);
+  // Per-batch input claim → falls back to summed consumption when the
+  // operator opened the batch without entering an input qty.
+  const claimedInput = _num(batch.input_qty_kg);
+  const totalInput = claimedInput > 0 ? claimedInput : rmConsumedKg;
+  const inputBasis: SummaryCardData["inputBasis"] =
+    claimedInput > 0 ? "indent" : rmConsumedKg > 0 ? "consumption" : "none";
+  // Conservation identity + balance check
+  const totalAccounted =
+    fgOutKg + rawProcessLoss + balTotal + offgradeTotal + ctrlSample + wastageTotal + egaKg;
+  const balanceDiffSrv = batch.balance_difference_qty;
+  const balanceDiffComputed = totalInput > 0 ? totalInput - totalAccounted : null;
+  // Prefer server-stored value (set on close), compute live for open.
+  const balanceDiff = balanceDiffSrv != null
+    ? _num(balanceDiffSrv)
+    : balanceDiffComputed;
+  const balanceDiffPct = balanceDiff != null && totalInput > 0
+    ? Math.abs(balanceDiff / totalInput) * 100
+    : null;
+  const isBalanced = batch.is_balanced != null
+    ? batch.is_balanced
+    : balanceDiff != null
+      ? Math.abs(balanceDiff) < BALANCE_TOLERANCE_KG
+        || (balanceDiffPct != null && balanceDiffPct <= 0.10)
+      : null;
+  // Loss percentages — denominator is FG output (operator rule).
+  const denom = fgOutKg;
+  const pct = (n: number) => denom > 0 ? (n / denom) * 100 : null;
+  return {
+    rmConsumedKg,
+    fgOutKg,
+    egaKg,
+    additivesKg,
+    lossKg,
+    balTotal,
+    offgradeTotal,
+    ctrlSample,
+    processLossPct: pct(lossKg),
+    egaLossPct: denom > 0 && egaKg > 0 ? (egaKg / denom) * 100 : null,
+    invisibleLossPct: denom > 0 ? ((lossKg + egaKg) / denom) * 100 : null,
+    totalLossPct: denom > 0 ? ((lossKg + egaKg + offgradeTotal) / denom) * 100 : null,
+    offgradePct: pct(offgradeTotal),
+    balanceDiff,
+    balanceDiffPct,
+    isBalanced,
+    tolerancePct: 0.10,
+    inputBasis,
+  };
 }
 
 // Off-Grade categories (renamed from "Rejection" per operator) — mirror
@@ -387,6 +579,12 @@ function fmtDateTime(iso?: string | null): string {
   if (!iso) return "—";
   try { return new Date(iso).toLocaleString(); } catch { return iso; }
 }
+// R10 — full error-mapping catalog moved into @/lib/apiErrors so the
+// same translations apply on planning / plan-list / SO pages. The local
+// `friendlyJobCardError` alias preserves every existing call site
+// without a rename churn.
+const friendlyJobCardError = friendlyApiError;
+
 function num(v: string | null | undefined): number {
   if (v == null) return 0;
   const n = parseFloat(v);
@@ -425,7 +623,7 @@ async function runForceUnlockJc(
     window.alert("Job card force-unlocked.");
     onReload();
   } catch (e) {
-    window.alert(`Failed: ${e instanceof Error ? e.message : "unknown error"}`);
+    window.alert(friendlyJobCardError(e));
   }
 }
 
@@ -516,7 +714,7 @@ function JobCardDetailPageBody() {
         setChain(chainJson);
       } catch (e) {
         if (controller.signal.aborted) return;
-        setError(e instanceof Error ? e.message : "Failed to load job card");
+        setError(friendlyApiError(e));
       } finally {
         if (!controller.signal.aborted) setLoading(false);
       }
@@ -621,7 +819,20 @@ function JobCardDetailPageBody() {
               onReload={reload}
             />
             <ActionBar detail={detail} onReload={reload} />
-            {/* R13 — the phased-closure controls + table now live inside the
+            {/* R10 — lifecycle hint: production hasn't started yet. The
+                Overview tab stays editable so Assign Team + Start work;
+                everything else is read-only until status flips to in_progress. */}
+            {isLifecycleLocked(detail.status) ? (
+              <div
+                role="status"
+                className="mb-3 px-3 py-2 rounded border text-[12px] bg-[#fbeced] border-[#e6bcbe] text-[#9a393e]"
+              >
+                <strong>Job card not started.</strong> Assign a team on the{" "}
+                <em>Overview</em> tab and click <strong>START</strong> to enable
+                Output &amp; Accounting, Quality, and Remarks.
+              </div>
+            ) : null}
+            {/* R13 — the batch-closure controls + table now live inside the
                 Accounting Summary card (Output & Accounting tab), not here. */}
             <TabStrip value={tab} onChange={setTab} />
             <TabPanel
@@ -781,7 +992,7 @@ function ActionBar({ detail, onReload }: { detail: JobCardDetail; onReload: () =
       window.alert(opts.okMessage);
       onReload();
     } catch (e) {
-      window.alert(`Failed: ${e instanceof Error ? e.message : "unknown error"}`);
+      window.alert(friendlyJobCardError(e));
     } finally {
       setBusy(false);
     }
@@ -878,21 +1089,25 @@ function ActionBar({ detail, onReload }: { detail: JobCardDetail; onReload: () =
   );
 }
 
-// ── R13/C9 Phased closure band ───────────────────────────────────────────
+// ── R13/C9 Batch closure band ────────────────────────────────────────────
 //
-// Surfaces the current phase + history for the JC and exposes Open / Close
-// phase controls. Backed by:
-//   GET  /job-cards-v2/{id}/phases
-//   POST /job-cards-v2/{id}/phase/open
-//   POST /job-cards-v2/{id}/phase/{phase_id}/close
+// Surfaces the current batch + history for the JC and exposes Open / Close
+// batch controls.  Backed by:
+//   GET  /job-cards-v2/{id}/batches
+//   POST /job-cards-v2/{id}/batches/open
+//   POST /job-cards-v2/{id}/batches/{batch_id}/close
 //
 // The auto-dispatch downstream (B9) is handled by the server on close — we
-// just refresh the JC payload + the phase list after the modal confirms.
+// just refresh the JC payload + the batch list after the modal confirms.
+//
+// (Renamed from "phase" in Stage 1 of the Batch redesign.  Functional
+// changes — multi-open batches, per-batch accounting fields, IST
+// timestamps — land in Stage 2.)
 
-type PhaseRow = {
-  phase_id: number;
-  phase_number: number;
-  phase_date: string | null;
+type BatchRow = {
+  batch_id: number;
+  batch_number: number;
+  batch_date: string | null;
   status: string;
   planned_qty_kg: number | string | null;
   produced_qty_kg: number | string | null;
@@ -902,21 +1117,37 @@ type PhaseRow = {
   closed_at: string | null;
   ended_at: string | null;
   notes: string | null;
+  // Stage 2 (migration 038): IST literals stamped at open / close.
+  // Human-readable strings like "2026-06-04 14:32:15 IST".  TIMESTAMPTZ
+  // siblings (opened_at, closed_at, ended_at) remain the canonical
+  // ordering / math columns.
+  opened_at_ist: string | null;
+  closed_at_ist: string | null;
+  ended_at_ist: string | null;
+  // Stage 2 per-batch summary columns surfaced by the view.
+  input_qty_kg: number | string | null;
+  fg_actual_kg: number | string | null;
+  fg_actual_units: number | string | null;
+  process_loss_kg: number | string | null;
+  control_sample_kg: number | string | null;
+  is_balanced: boolean | null;
+  balance_difference_qty: number | string | null;
+  closure_remarks: string | null;
 };
 
-function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () => void }) {
-  const [phases, setPhases] = useState<PhaseRow[]>([]);
+function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () => void }) {
+  const [batches, setBatches] = useState<BatchRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [openingNotes, setOpeningNotes] = useState("");
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
-  const [closeModal, setCloseModal] = useState<PhaseRow | null>(null);
+  const [closeModal, setCloseModal] = useState<BatchRow | null>(null);
 
   const isPackingStage = isPackingStageJc(detail.stage);
 
   // W3-MED-6 — AbortController per call so a remount or rapid JC switch
-  // doesn't leave a stale request racing the current one. The current
+  // doesn't leave a stale request racing the current one.  The current
   // controller is captured in a closure and the caller can cancel it on
   // unmount via the cleanup returned from useEffect.
   const refresh = useMemo(() => {
@@ -925,18 +1156,17 @@ function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
       setLoadError(null);
       try {
         const res = await apiFetch(
-          `/api/v1/production/job-cards-v2/${detail.job_card_id}/phases`,
+          `/api/v1/production/job-cards-v2/${detail.job_card_id}/batches`,
           { signal },
         );
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = (await res.json()) as { phases?: PhaseRow[] };
-        setPhases(Array.isArray(data.phases) ? data.phases : []);
+        const data = (await res.json()) as { batches?: BatchRow[] };
+        setBatches(Array.isArray(data.batches) ? data.batches : []);
       } catch (e) {
-        // Aborts are expected on unmount — don't surface those as errors.
         if (e instanceof DOMException && e.name === "AbortError") return;
         if (signal?.aborted) return;
-        setPhases([]);
-        setLoadError("failed to load phases");
+        setBatches([]);
+        setLoadError("failed to load batches");
       } finally {
         if (!signal?.aborted) setLoading(false);
       }
@@ -946,50 +1176,44 @@ function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
 
   useEffect(() => {
     const ctrl = new AbortController();
-    // W4-HIGH-5 — defer refresh() past the synchronous effect body. refresh()
-    // calls setLoading(true) inline, which trips react-hooks/set-state-in-effect
-    // when invoked directly from inside useEffect. Wrapping the CALL (rather
-    // than the inner setLoading) keeps refresh()'s reuse from other call sites
-    // — they pass an explicit signal and don't need the deferral.
     queueMicrotask(() => { void refresh(ctrl.signal); });
     return () => ctrl.abort();
   }, [refresh]);
 
-  const openPhase = phases.find((p) => p.status === "open") ?? null;
-  const closedCount = phases.filter((p) => p.status === "closed").length;
-  const totalCount = phases.length;
+  const openBatch = batches.find((p) => p.status === "open") ?? null;
+  const closedCount = batches.filter((p) => p.status === "closed").length;
+  const totalCount = batches.length;
 
-  // Column totals for the phasewise table footer.
-  const phaseTotals = useMemo(() => {
+  // Column totals for the batchwise table footer.
+  const batchTotals = useMemo(() => {
     let produced = 0, rm = 0, ega = 0;
-    for (const p of phases) {
+    for (const p of batches) {
       produced += num(String(p.produced_qty_kg ?? ""));
       rm += num(String(p.rm_consumed_kg ?? ""));
       ega += num(String(p.extra_give_away_qty ?? ""));
     }
     return { produced, rm, ega };
-  }, [phases]);
+  }, [batches]);
 
-  // Open Today's Phase eligibility — the server itself enforces the heavier
-  // rules; here we surface the button when no phase is currently open AND
-  // the JC is in one of the statuses the backend accepts. W3-MED-5 — switched
-  // from a deny-list (!closed && !cancelled) to an allow-list so future
-  // terminal statuses (e.g. 'rejected') don't leak the button through. We
-  // also gate on the lock state — a locked JC must be unlocked first.
+  // Open Today's Batch eligibility — the server itself enforces the
+  // heavier rules; here we surface the button when no batch is currently
+  // open AND the JC is in one of the statuses the backend accepts.
+  // W3-MED-5 — allow-list so future terminal statuses (e.g. 'rejected')
+  // don't leak the button through. Locked JCs must be unlocked first.
   const status = detail.status ?? "";
   const lockState = useLockState(detail);
   const canOpen =
-    !openPhase &&
+    !openBatch &&
     (status === "assigned" || status === "material_received" || status === "in_progress") &&
     !lockState.isLocked;
 
-  async function doOpenPhase() {
+  async function doOpenBatch() {
     setFeedback(null);
     setBusy(true);
     try {
       const body: Record<string, unknown> = {};
       if (openingNotes.trim()) body.notes = openingNotes.trim();
-      const res = await apiFetch(`/api/v1/production/job-cards-v2/${detail.job_card_id}/phase/open`, {
+      const res = await apiFetch(`/api/v1/production/job-cards-v2/${detail.job_card_id}/batches/open`, {
         method: "POST",
         body: JSON.stringify(body),
       });
@@ -998,11 +1222,11 @@ function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
         throw new Error(txt || `HTTP ${res.status}`);
       }
       setOpeningNotes("");
-      setFeedback({ kind: "ok", msg: "Phase opened." });
+      setFeedback({ kind: "ok", msg: "Batch opened." });
       await refresh();
       onReload();
     } catch (e) {
-      setFeedback({ kind: "err", msg: e instanceof Error ? e.message : "Failed to open phase." });
+      setFeedback({ kind: "err", msg: friendlyJobCardError(e) });
     } finally {
       setBusy(false);
     }
@@ -1012,14 +1236,10 @@ function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
     <div>
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)]">Phase</div>
+          <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)]">Batch</div>
           {loading ? (
-            <div className="text-[12px] text-[var(--text-muted)] italic">Loading phases…</div>
+            <div className="text-[12px] text-[var(--text-muted)] italic">Loading batches…</div>
           ) : loadError ? (
-            // W3-MED-6 — surface a retry affordance when the phases call
-            // failed. The previous behaviour silently degraded to "No
-            // open phase" which mis-led the operator into thinking the
-            // JC had no phase activity at all.
             <div className="text-[12px] text-[var(--aws-error)] flex items-center gap-2">
               <span>{loadError}</span>
               <button
@@ -1030,11 +1250,11 @@ function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
                 retry
               </button>
             </div>
-          ) : openPhase ? (
+          ) : openBatch ? (
             <div className="text-[13px] text-[var(--text-primary)]">
-              <span className="font-semibold">Phase {openPhase.phase_number}</span>
-              {openPhase.phase_date ? (
-                <span className="ml-2 text-[var(--text-secondary)]">· {openPhase.phase_date}</span>
+              <span className="font-semibold">Batch {openBatch.batch_number}</span>
+              {openBatch.batch_date ? (
+                <span className="ml-2 text-[var(--text-secondary)]">· {openBatch.batch_date}</span>
               ) : null}
               <span className="ml-2 text-[var(--text-muted)] text-[11px]">
                 {closedCount} of {totalCount} closed
@@ -1042,7 +1262,7 @@ function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
             </div>
           ) : (
             <div className="text-[13px] text-[var(--text-secondary)]">
-              No open phase
+              No open batch
               {totalCount > 0 ? (
                 <span className="ml-2 text-[var(--text-muted)] text-[11px]">
                   · {closedCount} of {totalCount} closed
@@ -1052,39 +1272,10 @@ function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
           )}
         </div>
 
-        <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
-          {canOpen ? (
-            <>
-              <input
-                type="text"
-                placeholder="Notes (optional)"
-                value={openingNotes}
-                onChange={(e) => setOpeningNotes(e.target.value)}
-                disabled={busy}
-                className={`${inputCls} sm:max-w-[220px]`}
-              />
-              {/* C10 (Wave 4) — Open / Close Phase via LockableButton so the
-                  lock CTA tooltip + role-aware enable matches the rest of
-                  the surface. */}
-              <LockableButton
-                lockState={lockState}
-                busy={busy}
-                busyLabel="Opening…"
-                onClick={() => void doOpenPhase()}
-              >
-                Open Today&apos;s Phase
-              </LockableButton>
-            </>
-          ) : openPhase ? (
-            <LockableButton
-              lockState={lockState}
-              busy={busy}
-              onClick={() => setCloseModal(openPhase)}
-            >
-              Close Phase
-            </LockableButton>
-          ) : null}
-        </div>
+        {/* Open / Close controls moved up to the Batch Context panel
+            (top of the Output & Accounting form) so the operator's
+            primary lifecycle actions sit next to the batch selector.
+            BatchBand here keeps the history table below; no buttons. */}
       </div>
 
       {feedback ? (
@@ -1098,16 +1289,16 @@ function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
         </div>
       ) : null}
 
-      {/* Phasewise Output — detailed per-phase produced / RM / EGA + total. */}
-      {phases.length > 0 ? (
+      {/* Batchwise Output — detailed per-batch produced / RM / EGA + total. */}
+      {batches.length > 0 ? (
         <div className="mt-3">
           <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)] mb-1">
-            Phasewise Output
+            Batchwise Output
           </div>
           <table className="w-full text-[12px] border-collapse">
             <thead className="bg-[var(--surface-subtle)]">
               <tr className="border-b border-[var(--aws-border)]">
-                <th className="px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Phase</th>
+                <th className="px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Batch</th>
                 <th className="px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Date</th>
                 <th className="px-2 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Produced (kg)</th>
                 <th className="px-2 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden sm:table-cell">RM (kg)</th>
@@ -1115,15 +1306,32 @@ function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
               </tr>
             </thead>
             <tbody>
-              {phases.map((p) => (
-                <tr key={p.phase_id} className="border-b border-[var(--aws-border)]">
+              {batches.map((p) => (
+                <tr key={p.batch_id} className="border-b border-[var(--aws-border)]">
                   <td className="px-2 py-1 font-semibold text-[var(--text-primary)]">
-                    {p.phase_number}
+                    {p.batch_number}
                     {p.status === "open" ? (
                       <span className="ml-1 text-[10px] font-normal text-[var(--text-muted)]">(open)</span>
                     ) : null}
                   </td>
-                  <td className="px-2 py-1 text-[var(--text-secondary)]">{fmtPhaseDate(p.phase_date)}</td>
+                  <td className="px-2 py-1 text-[var(--text-secondary)]">
+                    <div>{fmtBatchDate(p.batch_date)}</div>
+                    {/* Stage 2 IST literal — surfaced under the date so
+                        the operator sees the floor's local clock-face
+                        for the open or close event without doing TZ
+                        math.  Falls back silently when the column is
+                        empty (legacy rows pre-migration-038). */}
+                    {p.status === "open" && p.opened_at_ist ? (
+                      <div className="text-[10px] text-[var(--text-muted)]">
+                        opened {p.opened_at_ist}
+                      </div>
+                    ) : null}
+                    {p.status !== "open" && p.closed_at_ist ? (
+                      <div className="text-[10px] text-[var(--text-muted)]">
+                        closed {p.closed_at_ist}
+                      </div>
+                    ) : null}
+                  </td>
                   <td className="px-2 py-1 text-right font-mono">{fmtNum(p.produced_qty_kg)}</td>
                   <td className="px-2 py-1 text-right font-mono hidden sm:table-cell">{fmtNum(p.rm_consumed_kg)}</td>
                   <td className="px-2 py-1 text-right font-mono hidden sm:table-cell">{fmtNum(p.extra_give_away_qty)}</td>
@@ -1133,9 +1341,9 @@ function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
             <tfoot>
               <tr className="border-t border-[var(--aws-border-strong)] font-semibold">
                 <td className="px-2 py-1" colSpan={2}>Total</td>
-                <td className="px-2 py-1 text-right font-mono">{fmtNum(phaseTotals.produced)}</td>
-                <td className="px-2 py-1 text-right font-mono hidden sm:table-cell">{fmtNum(phaseTotals.rm)}</td>
-                <td className="px-2 py-1 text-right font-mono hidden sm:table-cell">{fmtNum(phaseTotals.ega)}</td>
+                <td className="px-2 py-1 text-right font-mono">{fmtNum(batchTotals.produced)}</td>
+                <td className="px-2 py-1 text-right font-mono hidden sm:table-cell">{fmtNum(batchTotals.rm)}</td>
+                <td className="px-2 py-1 text-right font-mono hidden sm:table-cell">{fmtNum(batchTotals.ega)}</td>
               </tr>
             </tfoot>
           </table>
@@ -1144,8 +1352,8 @@ function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
 
       {closeModal ? (() => {
         // Compute the close-modal defaults + snapshot from JC detail.
-        // What the server actually stores on /phase/close is small —
-        // see the close_phase docstring in services/job_card_phase_v2.py.
+        // What the server actually stores on /batches/{id}/close is small —
+        // see the close_batch docstring in services/job_card_batch_v2.py.
         // The modal pre-populates from the operator's last Output save:
         //   - producedKg ← detail.section_5_output.fg_actual_kg
         //   - rmConsumedKg ← Σ detail.consumption_lines[].actual_consumed_qty
@@ -1221,8 +1429,8 @@ function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
           : null;
 
         return (
-          <PhaseCloseModal
-            phase={closeModal}
+          <BatchCloseModal
+            batch={closeModal}
             jcId={detail.job_card_id}
             isPackingStage={isPackingStage}
             defaults={{
@@ -1253,10 +1461,10 @@ function PhaseBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
   );
 }
 
-function PhaseCloseModal({
-  phase, jcId, isPackingStage, defaults, summarySnapshot, onClose, onDone,
+function BatchCloseModal({
+  batch, jcId, isPackingStage, defaults, summarySnapshot, onClose, onDone,
 }: {
-  phase: PhaseRow;
+  batch: BatchRow;
   jcId: number;
   isPackingStage: boolean;
   /** Pre-fill values pulled from the JC detail (last saved output +
@@ -1284,6 +1492,19 @@ function PhaseCloseModal({
   const [producedKg, setProducedKg] = useState(defaults.producedKg);
   const [rmConsumedKg, setRmConsumedKg] = useState(defaults.rmConsumedKg);
   const [extraGiveAway, setExtraGiveAway] = useState(defaults.extraGiveAway);
+  // Stage 3 final: per-batch partial dispatch.  Defaults to the full
+  // produced qty (the legacy behaviour) so a default Close still ships
+  // everything downstream.  Operator can lower it to keep material at
+  // this stage; server clamps to [0, producedKg].
+  const [dispatchKg, setDispatchKg] = useState(defaults.producedKg);
+  // Mirror dispatch default to producedKg whenever the operator edits
+  // the produced field — unless they've already typed a custom dispatch.
+  const dispatchTouched = useRef(false);
+  useEffect(() => {
+    if (!dispatchTouched.current) {
+      setDispatchKg(producedKg);
+    }
+  }, [producedKg]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1301,9 +1522,9 @@ function PhaseCloseModal({
     // this the most common UX failure here was leaving the input blank,
     // parseFloat'ing "" → NaN, falling through the validation above as
     // "Produced qty is required" — but typing "0" by accident silently
-    // closed the phase with zero output.
+    // closed the batch with zero output.
     if (produced === 0) {
-      if (!window.confirm("Close this phase with produced_qty_kg = 0? This will mark the phase as closed with no output recorded.")) {
+      if (!window.confirm("Close this batch with produced_qty_kg = 0? This will mark the batch as closed with no output recorded.")) {
         return;
       }
     }
@@ -1316,9 +1537,19 @@ function PhaseCloseModal({
       const v = parseFloat(extraGiveAway);
       if (Number.isFinite(v)) body.extra_give_away_qty = v;
     }
+    // Dispatch qty — server defaults to full produced when omitted, so
+    // only send the field when the operator explicitly chose a lower
+    // (or zero) amount.  This keeps wire payloads minimal for the
+    // common full-dispatch case.
+    if (dispatchKg.trim() !== "") {
+      const v = parseFloat(dispatchKg);
+      if (Number.isFinite(v) && v >= 0 && v !== produced) {
+        body.dispatch_qty_kg = v;
+      }
+    }
     setBusy(true);
     try {
-      const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/phase/${phase.phase_id}/close`, {
+      const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/batches/${batch.batch_id}/close`, {
         method: "POST",
         body: JSON.stringify(body),
       });
@@ -1328,13 +1559,21 @@ function PhaseCloseModal({
       }
       await onDone();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to close phase.");
+      setError(friendlyJobCardError(e));
     } finally {
       setBusy(false);
     }
   }
 
-  return (
+  // BatchCloseModal is rendered from inside BatchBand, which lives
+  // inside the AccountingTab's <form>.  Nesting <form> elements is
+  // invalid HTML (Next 16 emits a hydration error).  Portal the modal
+  // to document.body so the inner <form> is a sibling of the outer
+  // form rather than a descendant.  SSR-safe: only portal when window
+  // exists; on the server render nothing (the modal only opens after
+  // a client-side click anyway).
+  if (typeof document === "undefined") return null;
+  return createPortal(
     <div
       role="dialog"
       aria-modal="true"
@@ -1346,7 +1585,7 @@ function PhaseCloseModal({
         className="bg-white border border-[var(--aws-border)] rounded-md shadow-lg w-full max-w-md p-5"
       >
         <h3 className="text-[14px] font-semibold text-[var(--text-primary)] mb-3">
-          Close Phase {phase.phase_number}
+          Close Batch {batch.batch_number}
         </h3>
 
         {/* Re-check snapshot from the last saved accounting. Read-only.
@@ -1429,6 +1668,40 @@ function PhaseCloseModal({
               placeholder="0.00"
             />
           ) : null}
+          {/* Stage 3 final: partial dispatch.  Defaults to producedKg
+              and follows it.  Operator can lower it to keep material
+              at this stage (e.g. dispatch 80 of 100 kg; remainder
+              available for a subsequent dispatch). */}
+          <div>
+            <FormNumber
+              label="Dispatch qty to next stage (kg)"
+              value={dispatchKg}
+              onChange={(v) => {
+                dispatchTouched.current = true;
+                setDispatchKg(v);
+              }}
+              disabled={busy}
+              placeholder="0.00"
+            />
+            {(() => {
+              const p = parseFloat(producedKg);
+              const d = parseFloat(dispatchKg);
+              if (!Number.isFinite(p) || !Number.isFinite(d)) return null;
+              const remainder = p - d;
+              if (remainder <= 0.001) {
+                return (
+                  <p className="mt-1 text-[10px] text-[var(--text-muted)] italic">
+                    Dispatching the full produced qty downstream.
+                  </p>
+                );
+              }
+              return (
+                <p className="mt-1 text-[10px] text-[#8a5e10]">
+                  {d.toFixed(2)} kg will ship downstream; {remainder.toFixed(2)} kg stays at this stage.
+                </p>
+              );
+            })()}
+          </div>
         </div>
         {error ? (
           <p className="mt-3 text-[12px] text-[var(--aws-error)]">{error}</p>
@@ -1452,11 +1725,12 @@ function PhaseCloseModal({
                 : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
             ].join(" ")}
           >
-            {busy ? "Closing…" : "Close Phase"}
+            {busy ? "Closing…" : "Close Batch"}
           </button>
         </div>
       </form>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -1477,10 +1751,16 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
   // to useMe() (subscribes to userStore + storage events) so the menu
   // re-evaluates the Force-Unlock gate when /me refreshes mid-session.
   const me = useMe();
+  const isAdmin = useIsAdmin();
   const status = detail.status ?? "";
 
   const editable    = status !== "completed" && status !== "closed" && status !== "cancelled";
-  const cancellable = status === "locked" || status === "unlocked" || status === "assigned";
+  // R10 — Cancel JC is admin-only on the server (router gate added with
+  // migration 043). Mirror that here so non-admin operators never see the
+  // menu item; eliminates the "Cancel" → 403 surprise. Status range
+  // unchanged: a JC past 'assigned' must be closed, not cancelled.
+  const cancellable = (status === "locked" || status === "unlocked" || status === "assigned")
+                       && isAdmin;
   const closeable   = status === "completed";
   // C3-H1 + H2 — use the shared util so the menu agrees with the LockBanner
   // CTA on who's allowed to force-unlock (admin / floor_manager /
@@ -1533,7 +1813,7 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
       window.alert(okMsg);
       onReload();
     } catch (e) {
-      window.alert(`Failed: ${e instanceof Error ? e.message : "unknown error"}`);
+      window.alert(friendlyJobCardError(e));
     }
   }
 
@@ -1881,7 +2161,7 @@ function TeamPanel({ detail, onReload }: { detail: JobCardDetail; onReload: () =
       setPending("");
       onReload();
     } catch (err) {
-      setFeedback({ kind: "err", msg: err instanceof Error ? err.message : "Assign failed." });
+      setFeedback({ kind: "err", msg: friendlyApiError(err) });
     } finally {
       setSubmitting(false);
     }
@@ -1999,8 +2279,10 @@ function RemarksTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
   // C3: lock gate. /remarks 409s when JC is locked — disable inputs + submit.
+  // R10 — also gated by lifecycle: no remarks until START is clicked.
   const lock = useLockState(detail);
-  const inputsDisabled = submitting || lock.isLocked;
+  const lifecycleLocked = isLifecycleLocked(detail.status);
+  const inputsDisabled = submitting || lock.isLocked || lifecycleLocked;
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -2138,7 +2420,7 @@ function SignOffsTab({ detail, onReload }: { detail: JobCardDetail; onReload: ()
       setFeedback({ kind: "ok", msg: "Signed." });
       onReload();
     } catch (err) {
-      setFeedback({ kind: "err", msg: err instanceof Error ? err.message : "Sign-off failed." });
+      setFeedback({ kind: "err", msg: friendlyApiError(err) });
     } finally {
       setSubmitting(false);
     }
@@ -2240,6 +2522,168 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
   // pipeline.
   const lock = useLockState(detail);
 
+  // ── Stage 3: per-batch form binding ─────────────────────────────────
+  // Fetches all batches for this JC so the BatchSelector dropdown can
+  // populate (and so we can resolve the default selected batch when the
+  // operator lands).  When the user picks a different batch, the
+  // *FromServer memos below re-filter and the resync effect repopulates
+  // every input — the form becomes a view onto that batch's persisted
+  // accounting state.
+  const [batches, setBatches] = useState<BatchRow[]>([]);
+  const [batchesLoading, setBatchesLoading] = useState(false);
+  // R10 — fetch helper extracted so user-initiated batch actions
+  // (doOpenBatch, BatchCloseModal save) can refetch deterministically
+  // without depending on the 60s auto-poll's re-render cascade. The
+  // previous [detail] dependency caused every auto-poll to refetch
+  // batches → new array reference → perBatchSummaries recompute →
+  // collapsibles flash + auto-pick effect re-evaluate → silent
+  // selectedBatchId switches. Deps below stay on the JC id so a
+  // navigation between JCs still loads fresh batches.
+  const refetchBatches = useCallback(async (signal?: AbortSignal) => {
+    setBatchesLoading(true);
+    try {
+      const res = await apiFetch(
+        `/api/v1/production/job-cards-v2/${detail.job_card_id}/batches`,
+        signal ? { signal } : undefined,
+      );
+      if (!res.ok) return;
+      const j = (await res.json()) as { batches?: BatchRow[] };
+      if (signal?.aborted) return;
+      setBatches(Array.isArray(j.batches) ? j.batches : []);
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
+      // Defensive: a 5xx (e.g. migration 038 missing) shouldn't break
+      // the page.  The selector just shows an empty list and the
+      // save path falls back to server-side default resolution.
+    } finally {
+      if (!signal?.aborted) setBatchesLoading(false);
+    }
+  }, [detail.job_card_id]);
+  useEffect(() => {
+    const ctrl = new AbortController();
+    void refetchBatches(ctrl.signal);
+    return () => ctrl.abort();
+    // Re-fetch only when the JC id changes (navigation between JCs).
+    // Auto-poll re-fetches detail every 60s but NOT batches — those
+    // are refreshed explicitly by doOpenBatch + the close modal so
+    // the perBatchSummaries memo / collapsibles don't flash on every
+    // poll. refetchBatches() itself is stable as long as job_card_id
+    // doesn't change.
+  }, [detail.job_card_id, refetchBatches]);
+
+  // Selected batch — drives form hydration + the POST body's batch_id.
+  // Default to the highest-numbered open batch on first load; falls
+  // back to the highest-numbered closed batch when no open exists; null
+  // means "legacy / pre-batch" (form hydrates from rows with batch_id
+  // IS NULL).
+  const [selectedBatchId, setSelectedBatchId] = useState<number | null>(null);
+  useEffect(() => {
+    // Reset on detail reload so navigating between JCs doesn't carry
+    // a stale selection across.  When batches arrive, pick the best
+    // default and surface it.
+    //
+    // R10 — multi-open support: with concurrent open batches per JC
+    // (one per production line / shift), opening a NEW batch must NOT
+    // yank the operator off the one they were already typing into. So
+    // auto-pick only fires when:
+    //   1. selectedBatchId is null (initial load), OR
+    //   2. the previously-selected batch is no longer in the list
+    //      (was cancelled or removed).
+    // Otherwise we keep the existing selection — the operator switches
+    // batches manually via the dropdown when they're ready.
+    if (batches.length === 0) {
+      setSelectedBatchId(null);
+      return;
+    }
+    if (selectedBatchId != null
+        && batches.some((b) => b.batch_id === selectedBatchId)) {
+      return;
+    }
+    const sorted = [...batches].sort((a, b) => b.batch_number - a.batch_number);
+    const open = sorted.find((b) => b.status === "open");
+    const fallback = sorted[0];
+    setSelectedBatchId((open ?? fallback).batch_id);
+  }, [batches, selectedBatchId]);
+
+  const selectedBatch = useMemo(
+    () => batches.find((b) => b.batch_id === selectedBatchId) ?? null,
+    [batches, selectedBatchId],
+  );
+  // Stage 3: form is read-only when no batch picked, or the picked
+  // batch is closed/cancelled.  Operator opens a fresh batch to record.
+  const batchIsOpen = selectedBatch?.status === "open";
+
+  // ── Stage 3 final: across-batches rollup ────────────────────────
+  // Sums the per-batch summary columns from every batch row.  Read-
+  // only display strip rendered inside the Batch Context panel so the
+  // operator can see the JC's total throughput at a glance without
+  // visiting the legacy BatchBand history table.
+  const batchRollup = useMemo(() => {
+    const num = (v: number | string | null | undefined): number => {
+      if (v == null || v === "") return 0;
+      const n = typeof v === "number" ? v : parseFloat(String(v));
+      return Number.isFinite(n) ? n : 0;
+    };
+    let openCount = 0, closedCount = 0, cancelledCount = 0;
+    let producedTotal = 0;
+    let inputTotal = 0;
+    let processLossTotal = 0;
+    let egaTotal = 0;
+    let controlSampleTotal = 0;
+    // R10 — closed-only totals: feed the "remaining FG to produce"
+    // hint on the next batch so the operator sees what's still owed,
+    // not the JC's original planned figure. In-flight (open) batches
+    // are excluded because their qty is still being typed; cancelled
+    // batches are excluded because they never produced anything.
+    let closedProducedKg = 0;
+    let closedProducedUnits = 0;
+    for (const b of batches) {
+      if (b.status === "open") openCount += 1;
+      else if (b.status === "closed") closedCount += 1;
+      else cancelledCount += 1;
+      producedTotal      += num(b.produced_qty_kg);
+      inputTotal         += num(b.input_qty_kg);
+      processLossTotal   += num(b.process_loss_kg);
+      egaTotal           += num(b.extra_give_away_qty);
+      controlSampleTotal += num(b.control_sample_kg);
+      if (b.status === "closed") {
+        closedProducedKg    += num(b.fg_actual_kg)    || num(b.produced_qty_kg);
+        closedProducedUnits += num(b.fg_actual_units);
+      }
+    }
+    return {
+      total: batches.length,
+      openCount, closedCount, cancelledCount,
+      producedTotal, inputTotal, processLossTotal,
+      egaTotal, controlSampleTotal,
+      closedProducedKg, closedProducedUnits,
+    };
+  }, [batches]);
+
+  // ── R10 — diff-on-save: dirty-section mask ──────────────────────────
+  // The Edit Batch flow sends ONLY the sections the operator actually
+  // touched, so unrelated fields on the server are never overwritten
+  // with stale values. Each section's onChange call site invokes
+  // markSectionDirty(section). doSave (in onSubmit further down) reads
+  // dirtyMaskRef.current to decide which keys to include in the body.
+  // Cleared on successful save AND on selectedBatchId change so
+  // switching batches starts with a clean slate.
+  //
+  // Distinct from the form-level `markDirty()` further down — that
+  // guard (formDirty ref) only blocks the auto-poll resync; this mask
+  // controls which sections appear in the POST body.
+  type DirtySection =
+    | "output_qty"
+    | "consumption"
+    | "byproducts"
+    | "balance"
+    | "additives"
+    | "control_sample";
+  const dirtyMaskRef = useRef<Set<DirtySection>>(new Set());
+  const markSectionDirty = useCallback((section: DirtySection) => {
+    dirtyMaskRef.current.add(section);
+  }, []);
+
   // ── Catalogue: every RM+PM article on the BOM. Primary source is the
   // backend's bom_lines (surfaced on every stage); fallback is the per-JC
   // indent rows (rm_indents + pm_indents) — same fallback the Java code
@@ -2266,15 +2710,70 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
       return out;
     }, [detail]);
 
-  // ── Initial state — prefilled from section_5_output the same way the
-  // Android OutputAccountingFragment.populateDataInner does it. The
-  // useEffect below re-syncs whenever those backend values change, so a
-  // successful save followed by an onReload() also refreshes the form
-  // (otherwise the operator would see stale empty values after re-mount
-  // with cached props vs. the actual saved record).
-  const fgKgFromServer    = detail.section_5_output?.fg_actual_kg    != null ? String(detail.section_5_output.fg_actual_kg)    : "";
-  const fgUnitsFromServer = detail.section_5_output?.fg_actual_units != null ? String(detail.section_5_output.fg_actual_units) : "";
-  const lossFromServer    = detail.section_5_output?.process_loss_kg != null ? String(detail.section_5_output.process_loss_kg) : "";
+  // ── Initial state — R10 per-batch scoped.  Previously sourced from
+  // section_5_output (JC-level), which carried Batch 1's saved FG /
+  // process-loss values into Batch 2 the moment it was opened. The
+  // operator opened a fresh batch and immediately saw 540 kg / 1.00 kg
+  // already filled in — leading to the per-batch summary double-counting
+  // FG and reporting nonsense Total losses.
+  //
+  // Resolution order per field:
+  //   1. Closed batch: BatchRow snapshot (canonical, set on close).
+  //   2. Open batch with saved output rows: latest job_card_output_v2
+  //      row for THIS batch (preserves operator's typed value across
+  //      reloads while the batch is still open).
+  //   3. Freshly-opened batch / no batch selected: empty (operator
+  //      enters fresh).
+  // The legacy section_5_output fallback is kept only for pre-batch
+  // JCs that never opened a batch row.
+  // Consolidated batch-scoped FG / process-loss defaults. One useMemo
+  // returning a struct keeps the React Compiler's memoization
+  // preservation check happy (vs. three separate useMemos sharing the
+  // same upstream refs).
+  const batchScopedDefaults = useMemo(() => {
+    const sec5 = detail.section_5_output;
+    const sec5Kg    = sec5?.fg_actual_kg    != null ? String(sec5.fg_actual_kg)    : "";
+    const sec5Units = sec5?.fg_actual_units != null ? String(sec5.fg_actual_units) : "";
+    const sec5Loss  = sec5?.process_loss_kg != null ? String(sec5.process_loss_kg) : "";
+    if (!selectedBatch) {
+      return { fgKg: sec5Kg, fgUnits: sec5Units, loss: sec5Loss };
+    }
+    // Closed batch: BatchRow snapshot is canonical.
+    let fgKg = selectedBatch.fg_actual_kg != null ? String(selectedBatch.fg_actual_kg) : "";
+    let fgUnits = selectedBatch.fg_actual_units != null ? String(selectedBatch.fg_actual_units) : "";
+    let loss = selectedBatch.process_loss_kg != null ? String(selectedBatch.process_loss_kg) : "";
+    // Open batch with saved output rows: fall through to the latest
+    // job_card_output_v2 row for THIS batch so the operator sees their
+    // typed values after a reload (BatchRow's fg_actual_kg stays null
+    // until close).
+    if (selectedBatch.status === "open" && Array.isArray(detail.outputs)) {
+      let latest: Record<string, unknown> | null = null;
+      let latestId = -Infinity;
+      for (const o of detail.outputs) {
+        const row = o as Record<string, unknown>;
+        const bid = row.batch_id;
+        if (bid == null || Number(bid) !== selectedBatch.batch_id) continue;
+        const oid = Number(row.output_id ?? 0);
+        if (oid > latestId) {
+          latest = row;
+          latestId = oid;
+        }
+      }
+      if (latest) {
+        if (!fgKg    && latest.output_qty_kg    != null) fgKg    = String(latest.output_qty_kg);
+        if (!fgUnits && latest.output_qty_units != null) fgUnits = String(latest.output_qty_units);
+        if (!loss    && latest.process_loss_kg  != null) loss    = String(latest.process_loss_kg);
+      }
+    }
+    return { fgKg, fgUnits, loss };
+  }, [
+    selectedBatch,
+    detail.outputs,
+    detail.section_5_output,
+  ]);
+  const fgKgFromServer    = batchScopedDefaults.fgKg;
+  const fgUnitsFromServer = batchScopedDefaults.fgUnits;
+  const lossFromServer    = batchScopedDefaults.loss;
 
   const [fgActualUnits, setFgActualUnits] = useState(fgUnitsFromServer);
   const [fgActualKg,    setFgActualKg]    = useState(fgKgFromServer);
@@ -2294,6 +2793,91 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
   const formDirty = useRef(false);
   const markDirty = useCallback(() => { formDirty.current = true; }, []);
 
+  // Stage 3: switching batches is a deliberate user action that
+  // *should* override the form-dirty guard.  If the operator has
+  // unsaved typing, confirm before discarding.  Clearing formDirty
+  // before setSelectedBatchId lets the existing resync useEffect
+  // refresh the form to the new batch's persisted state.
+  const changeBatch = useCallback((nextId: number | null) => {
+    if (nextId === selectedBatchId) return;
+    if (formDirty.current) {
+      const ok = window.confirm(
+        "You have unsaved changes on this batch. Discard and switch?",
+      );
+      if (!ok) return;
+    }
+    formDirty.current = false;
+    setSelectedBatchId(nextId);
+  }, [selectedBatchId]);
+
+  // ── Admin override (closed-batch editing) ─────────────────────────
+  // A closed batch is normally read-only.  Admins can flip this flag
+  // to re-edit the output snapshot in-place; the save POSTs an
+  // `admin_override: true` body which the server validates against
+  // the caller's role before writing.  Reset whenever the operator
+  // navigates to a different batch (so the override doesn't silently
+  // leak across batches).
+  const isAdmin = useIsAdmin();
+  const [adminOverride, setAdminOverride] = useState(false);
+  useEffect(() => {
+    setAdminOverride(false);
+    // R10 — switching batches resets BOTH dirty flags so an unrelated
+    // batch's pending edits don't leak into the next one's save body.
+    //
+    // CRITICAL: formDirty.current must also be cleared here, not just
+    // by the changeBatch dropdown handler. The auto-pick effect at
+    // line ~2450 (which fires when a new batch is opened or the
+    // batches array reshuffles) also mutates selectedBatchId — without
+    // this reset, the form-state resync effects further down would see
+    // formDirty=true and SKIP, leaving the previous batch's typed
+    // values in scope. The next "Save Batch" click would then write
+    // those stale values into the newly-selected batch_id, silently
+    // corrupting per-batch data. dirtyMaskRef + formDirty MUST be
+    // cleared together; the resync effects re-seed every visible field
+    // from the server snapshot for the new batch.
+    dirtyMaskRef.current.clear();
+    formDirty.current = false;
+  }, [selectedBatchId]);
+
+  // ── Open / Close batch actions (moved up from BatchBand) ──────────
+  // Buttons live alongside the selector in the Batch Context panel so
+  // the operator's eye doesn't have to jump between sections.  The
+  // legacy BatchBand inside AccountingSummaryCard keeps the history
+  // table; its inline buttons hide when these are visible.
+  const [batchActionBusy, setBatchActionBusy] = useState(false);
+  const [batchActionMsg, setBatchActionMsg] = useState<
+    { kind: "ok" | "err"; msg: string } | null
+  >(null);
+  const [closeBatchModal, setCloseBatchModal] = useState<BatchRow | null>(null);
+
+  const doOpenBatch = useCallback(async () => {
+    setBatchActionMsg(null);
+    setBatchActionBusy(true);
+    try {
+      const res = await apiFetch(
+        `/api/v1/production/job-cards-v2/${detail.job_card_id}/batches/open`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+      if (!res.ok) {
+        throw new Error(
+          await readApiErrorMessage(res, `HTTP ${res.status}`),
+        );
+      }
+      setBatchActionMsg({ kind: "ok", msg: "Batch opened." });
+      // R10 — explicit refresh; the [detail.job_card_id]-only batches
+      // effect won't pick up the new batch otherwise. Run both: the
+      // parent reload refreshes the JC detail (consumption_lines etc.
+      // for the new batch_id appear) and refetchBatches updates the
+      // selector + per-batch summary list.
+      await refetchBatches();
+      onReload();
+    } catch (e) {
+      setBatchActionMsg({ kind: "err", msg: friendlyJobCardError(e) });
+    } finally {
+      setBatchActionBusy(false);
+    }
+  }, [detail.job_card_id, onReload, refetchBatches]);
+
   // Re-sync on detail reload. Skipped when the operator has unsaved
   // input (formDirty.current === true) so an auto-poll doesn't wipe the
   // form mid-entry. Save handlers reset formDirty before reload, so a
@@ -2307,24 +2891,45 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
     });
   }, [fgKgFromServer, fgUnitsFromServer, lossFromServer]);
 
-  // EGA hydration. Prefer the accounting aggregate (single source of
-  // truth for the summed value); fall back to the consolidated row in
-  // balance_materials (material_name='CONSOLIDATED', balance_type=
-  // 'extra_given') for JCs saved before /accounting was refetched, or
-  // when /accounting is absent on older payloads.
+  // EGA hydration — R10 per-batch scoped (was JC-level via
+  // detail.accounting.extra_give_away_qty, which leaked Batch 1's
+  // closure EGA into Batch 2's form when the operator opened a fresh
+  // batch). Order:
+  //   1. Closed batch: BatchRow snapshot (set on close).
+  //   2. Open batch: the consolidated balance_materials row tagged
+  //      with THIS batch_id and balance_type='extra_given'.
+  //   3. Freshly-opened batch / no batch: empty.
+  // Legacy JC-level fallback only when no batch is selected at all
+  // (pre-batch JCs that never opened a batch row).
   const egaFromServer = useMemo(() => {
+    if (selectedBatch?.extra_give_away_qty != null) {
+      const v = Number(selectedBatch.extra_give_away_qty);
+      if (Number.isFinite(v) && v > 0) return String(v);
+    }
+    if (selectedBatch != null) {
+      const fromBal = (detail.balance_materials ?? []).find((b) => {
+        if (b.balance_type !== "extra_given") return false;
+        const bid = (b as Record<string, unknown>).batch_id;
+        return bid != null && Number(bid) === selectedBatch.batch_id;
+      });
+      if (fromBal && fromBal.qty_kg != null && Number(fromBal.qty_kg) > 0) {
+        return String(fromBal.qty_kg);
+      }
+      return "";
+    }
+    // Legacy fallback — pre-batch JCs only.
     const fromAcct = detail.accounting?.extra_give_away_qty;
     if (fromAcct != null && fromAcct !== "" && Number(fromAcct) > 0) {
       return String(fromAcct);
     }
-    const fromBal = (detail.balance_materials ?? []).find(
+    const fromBalLegacy = (detail.balance_materials ?? []).find(
       (b) => b.balance_type === "extra_given",
     );
-    if (fromBal && fromBal.qty_kg != null && Number(fromBal.qty_kg) > 0) {
-      return String(fromBal.qty_kg);
+    if (fromBalLegacy && fromBalLegacy.qty_kg != null && Number(fromBalLegacy.qty_kg) > 0) {
+      return String(fromBalLegacy.qty_kg);
     }
     return "";
-  }, [detail.accounting?.extra_give_away_qty, detail.balance_materials]);
+  }, [selectedBatch, detail.accounting?.extra_give_away_qty, detail.balance_materials]);
   const [extraGiveawayQty, setExtraGiveawayQty] = useState(egaFromServer);
   useEffect(() => {
     if (formDirty.current) return;
@@ -2343,8 +2948,8 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
   // recorded. One balance qty per BOM article (returned rows; defaults to 0 on
   // save when blank). Rejection rows = off-grade byproducts + control_sample.
   const consumptionFromServer = useMemo(
-    () => consumptionStateFromDetail(detail.consumption_lines),
-    [detail.consumption_lines],
+    () => consumptionStateFromDetail(detail.consumption_lines, selectedBatchId),
+    [detail.consumption_lines, selectedBatchId],
   );
   // C3-MED-7 — track which keys have a saved consumption row on the
   // server so the VarianceChip can stay quiet when the operator has
@@ -2358,12 +2963,12 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
     return out;
   }, [consumptionFromServer]);
   const balanceFromServer = useMemo(
-    () => balanceStateFromDetail(detail.balance_materials),
-    [detail.balance_materials],
+    () => balanceStateFromDetail(detail.balance_materials, selectedBatchId),
+    [detail.balance_materials, selectedBatchId],
   );
   const rejectionsFromServer = useMemo(
-    () => rejectionsFromDetail(detail.byproducts, detail.balance_materials),
-    [detail.byproducts, detail.balance_materials],
+    () => rejectionsFromDetail(detail.byproducts, detail.balance_materials, selectedBatchId),
+    [detail.byproducts, detail.balance_materials, selectedBatchId],
   );
 
   const [consumption, setConsumption] = useState<Record<string, string>>(consumptionFromServer);
@@ -2376,13 +2981,25 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
     rejectionsFromServer.length > 0 ? rejectionsFromServer : [BLANK_REJECTION_ROW()],
   );
 
+  // Additives — data-keeping rows that DO NOT participate in the
+  // conservation identity. Server-side rows arrive on detail.additives
+  // (added by jc_additives_v2). Default-seed a single blank row so the
+  // operator can start typing without clicking "+ Add another".
+  const additivesFromServer = useMemo<AdditiveRow[]>(
+    () => additivesFromDetail(detail.additives, selectedBatchId),
+    [detail.additives, selectedBatchId],
+  );
+  const [additives, setAdditives] = useState<AdditiveRow[]>(
+    additivesFromServer.length > 0 ? additivesFromServer : [BLANK_ADDITIVE_ROW()],
+  );
+
   // R10/C6 — dedicated QC Sample input. Wire value is always kg; the
   // displayUnit toggle is state-only and flips between kg ↔ g for the
   // input field. Saved as a byproducts row category='control_sample' on
   // submit (matches the backend save path unchanged).
   const controlSampleFromServer = useMemo(
-    () => controlSampleFromDetail(detail.byproducts, detail.balance_materials),
-    [detail.byproducts, detail.balance_materials],
+    () => controlSampleFromDetail(detail.byproducts, detail.balance_materials, selectedBatchId),
+    [detail.byproducts, detail.balance_materials, selectedBatchId],
   );
   const [controlSampleKg, setControlSampleKg] = useState<string>(controlSampleFromServer);
   const [qcSampleDisplayUnit, setQcSampleDisplayUnit] = useState<"kg" | "g">("kg");
@@ -2391,8 +3008,8 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
   // byproducts row with category=pm_* and uom=<chosen pcs uom>. Filtered
   // out of the generic rejections list by rejectionsFromDetail.
   const pmVarianceFromServer = useMemo(
-    () => pmVarianceFromDetail(detail.byproducts, "PCS"),
-    [detail.byproducts],
+    () => pmVarianceFromDetail(detail.byproducts, "PCS", selectedBatchId),
+    [detail.byproducts, selectedBatchId],
   );
   const [pmVariance, setPmVariance] = useState<PmVarianceState>(pmVarianceFromServer);
 
@@ -2417,10 +3034,15 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
       );
       setControlSampleKg(controlSampleFromServer);
       setPmVariance(pmVarianceFromServer);
+      setAdditives(
+        additivesFromServer.length > 0
+          ? additivesFromServer
+          : [BLANK_ADDITIVE_ROW()],
+      );
     });
   }, [
     consumptionFromServer, balanceFromServer, rejectionsFromServer,
-    controlSampleFromServer, pmVarianceFromServer,
+    controlSampleFromServer, pmVarianceFromServer, additivesFromServer,
   ]);
 
   const [submitting, setSubmitting] = useState(false);
@@ -2442,11 +3064,51 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
   const expectedKg    = detail.section_1_product?.batch_size_kg ?? null;
   const netWtPerUnit  = detail.section_1_product?.net_wt_per_unit_kg ?? null;
 
+  // R10 — remaining FG to produce, net of what already-closed batches
+  // booked. Once batch 1 closes with 500 kg of a 1000 kg JC, batch 2
+  // should see "Expected 500 kg" not "Expected 1000 kg". Open batches
+  // are excluded (their qty is still being typed); cancelled batches
+  // are excluded (zero contribution). Falls back to the JC-level
+  // expected when no batches have closed yet, and clamps at 0 so an
+  // over-produced JC doesn't render a negative number.
+  const remainingExpectedKg = useMemo(() => {
+    if (expectedKg == null) return null;
+    const remaining = Number(expectedKg) - batchRollup.closedProducedKg;
+    return Math.max(0, remaining);
+  }, [expectedKg, batchRollup.closedProducedKg]);
+  const remainingExpectedUnits = useMemo(() => {
+    if (expectedUnits == null) return null;
+    const remaining = Number(expectedUnits) - batchRollup.closedProducedUnits;
+    return Math.max(0, remaining);
+  }, [expectedUnits, batchRollup.closedProducedUnits]);
+
   // RM Issued (kg): sum of rm_indents.issued_qty. Stages 2+ stay at 0
   // because RM is only issued on stage 1 — same accounting as the Android.
   const rmIssuedKg = useMemo(() => {
     return (detail.rm_indents ?? []).reduce((acc, r) => acc + num(String(r.issued_qty ?? 0)), 0);
   }, [detail.rm_indents]);
+
+  // R10 — RM-only consumption total from the operator's typed Output &
+  // Accounting form. Mirrors the rmConsumptionSum derivation inside
+  // onSubmit + the BatchBand BatchCloseModal default; lifted here so the
+  // Batch Context panel's Close Batch modal can pre-fill RM consumed
+  // instead of leaving it blank. PM articles excluded because they
+  // don't convert into FG mass (same rule as the Accounting Summary).
+  const rmConsumedTypedKg = useMemo(() => {
+    const byKey = new Map<string, typeof articles[number]>();
+    for (const a of articles) {
+      const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
+      byKey.set(key, a);
+    }
+    const isRmKey = (k: string) => {
+      const a = byKey.get(k);
+      return a ? (a.item_type || "").toUpperCase() !== "PM" : true;
+    };
+    return Object.entries(consumption).reduce(
+      (s, [k, v]) => s + (isRmKey(k) ? num(v) : 0),
+      0,
+    );
+  }, [articles, consumption]);
 
   // Per-BOM-line prescribed qty for the variance chip (qty only — no
   // cost). Mirrors the server computation in
@@ -2511,12 +3173,33 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
   // Auto-fill kg when the operator enters units (Android: autoCalcFgActualKg).
   function onChangeUnits(v: string) {
     markDirty();
+    markSectionDirty("output_qty");
     setFgActualUnits(v);
     if (netWtPerUnit && netWtPerUnit > 0) {
       const u = parseInt(v, 10);
       if (Number.isFinite(u)) setFgActualKg((u * netWtPerUnit).toFixed(2));
     }
   }
+  // R10 — bidirectional FG kg ↔ FG units auto-calc. The units → kg
+  // direction lives in onChangeUnits above; this is the mirror image
+  // (operator types kg, units back-fill via kg / netWtPerUnit, rounded
+  // to the nearest whole unit). Mirrors Android's autoCalcFgActualUnits.
+  // No-op when netWtPerUnit is missing or zero (per-piece SKUs without
+  // a configured unit weight just stay manual).
+  const onChangeFgActualKg = useCallback((v: string) => {
+    markSectionDirty("output_qty");
+    setFgActualKg(v);
+    if (netWtPerUnit && netWtPerUnit > 0) {
+      const kg = parseFloat(v);
+      if (Number.isFinite(kg)) {
+        setFgActualUnits(String(Math.round(kg / netWtPerUnit)));
+      }
+    }
+  }, [markSectionDirty, netWtPerUnit]);
+  const onChangeProcessLoss = useCallback((v: string) => {
+    markSectionDirty("output_qty");
+    setProcessLoss(v);
+  }, [markSectionDirty]);
 
   // Operator-stated: Process Loss % should read off FG Actual Kg, not
   // rm_issued + carried_in. The previous total-input denominator went to
@@ -2703,12 +3386,22 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
       ? (egaAbsKg / lossDenom) * 100
       : null;
 
+    // Additives qty (data-keeping bucket). Set further below once the
+    // additives state hook exists; default to 0 here so the SummaryCard
+    // can render even on fresh JCs that haven't recorded any additives.
+    const additivesKgTotal = additives.reduce((acc, a) => acc + num(a.qty), 0);
+
     return {
       // RM consumed surfaces operator's typed RM total (excludes PM) —
       // used by the qty strip "RM Consumed" KV and as the conservation
       // input when the canonical indent flow was skipped.
       rmConsumedKg: canonicalInput > 0 ? canonicalInput : rmConsumptionTotal,
-      fgOutKg, lossKg, balTotal, offgradeTotal, ctrlSample,
+      fgOutKg,
+      // EGA qty — surfaced explicitly in the summary so the operator
+      // sees the kg value alongside the EGA Loss % strip below.
+      egaKg: egaAbsKg,
+      additivesKg: additivesKgTotal,
+      lossKg, balTotal, offgradeTotal, ctrlSample,
       // R9 percentages — server-authoritative when available, live preview otherwise.
       processLossPct:   processLossPctSrv   ?? localProcessLossPct,
       egaLossPct:       egaLossPctSrv       ?? localEgaLossPct,
@@ -2724,29 +3417,201 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
   }, [
     fgActualKg, processLoss, balance, rejections, controlSampleKg, rmIssuedKg,
     carriedInKg, egaLossPctFromServer, allowedTolerancePctUnits, effectiveAccounting,
-    consumption, extraGiveawayQty,
+    consumption, extraGiveawayQty, additives,
   ]);
 
+  // R10 — Per-batch accounting summaries.  computeBatchSummary
+  // sources each batch's metrics from the persisted detail arrays
+  // (consumption_lines / balance_materials / byproducts / additives)
+  // filtered by batch_id, plus the BatchRow's stored snapshot fields
+  // (fg_actual_kg, process_loss_kg, control_sample_kg, is_balanced,
+  // balance_difference_qty).  For the currently-selected batch we
+  // substitute the LIVE in-component `summary` (which folds in the
+  // operator's typed-but-unsaved edits) so the per-batch card + the
+  // total roll-up reflect what's about to be saved, not the stale
+  // server snapshot.
+  const perBatchSummaries = useMemo(
+    () => batches.map((b) => ({
+      batch: b,
+      summary: b.batch_id === selectedBatchId
+        ? summary
+        : computeBatchSummary(b, detail, articles),
+    })),
+    [batches, selectedBatchId, summary, detail, articles],
+  );
+  // Roll-up: sum mass buckets across batches and re-derive percentages
+  // + the global is_balanced from the aggregate denominators.
+  const totalSummary = useMemo<SummaryCardData>(() => {
+    let rmConsumedKg = 0, fgOutKg = 0, egaKg = 0, additivesKg = 0;
+    let lossKg = 0, balTotal = 0, offgradeTotal = 0, ctrlSample = 0;
+    let totalInput = 0;
+    for (const { batch, summary: s } of perBatchSummaries) {
+      rmConsumedKg  += s.rmConsumedKg;
+      fgOutKg       += s.fgOutKg;
+      egaKg         += s.egaKg;
+      additivesKg   += s.additivesKg;
+      lossKg        += s.lossKg;
+      balTotal      += s.balTotal;
+      offgradeTotal += s.offgradeTotal;
+      ctrlSample    += s.ctrlSample;
+      const claimed = num(String(batch.input_qty_kg ?? 0));
+      totalInput += claimed > 0 ? claimed : s.rmConsumedKg;
+    }
+    const totalAccounted =
+      fgOutKg + lossKg + balTotal + offgradeTotal + ctrlSample + egaKg;
+    const balanceDiff = totalInput > 0 ? totalInput - totalAccounted : null;
+    const balanceDiffPct = balanceDiff != null && totalInput > 0
+      ? Math.abs(balanceDiff / totalInput) * 100
+      : null;
+    const isBalanced = balanceDiff != null
+      ? Math.abs(balanceDiff) < BALANCE_TOLERANCE_KG
+        || (balanceDiffPct != null && balanceDiffPct <= allowedTolerancePctUnits)
+      : null;
+    const denom = fgOutKg;
+    const pct = (n: number) => denom > 0 ? (n / denom) * 100 : null;
+    return {
+      rmConsumedKg, fgOutKg, egaKg, additivesKg,
+      lossKg, balTotal, offgradeTotal, ctrlSample,
+      processLossPct: pct(lossKg),
+      egaLossPct: denom > 0 && egaKg > 0 ? (egaKg / denom) * 100 : null,
+      invisibleLossPct: denom > 0 ? ((lossKg + egaKg) / denom) * 100 : null,
+      totalLossPct: denom > 0 ? ((lossKg + egaKg + offgradeTotal) / denom) * 100 : null,
+      offgradePct: pct(offgradeTotal),
+      balanceDiff,
+      balanceDiffPct,
+      isBalanced,
+      tolerancePct: allowedTolerancePctUnits,
+      inputBasis: totalInput > 0 ? "indent" : "none",
+    };
+  }, [perBatchSummaries, allowedTolerancePctUnits]);
+
   // Off-Grade row mutators ─────────────────────────────────────────────────
-  // All three mark the form dirty so the auto-poll guard above skips
-  // resync until the operator saves.
+  // markDirty() guards the auto-poll resync; markSectionDirty("byproducts")
+  // flags the section for diff-on-save inclusion. Off-grade rows persist
+  // into job_card_byproducts_v2 via the "byproducts" payload key.
   function addRejection() {
     markDirty();
+    markSectionDirty("byproducts");
     setRejections((rs) => [...rs, BLANK_REJECTION_ROW()]);
   }
   function updateRejection(i: number, patch: Partial<RejectionRow>) {
     markDirty();
+    markSectionDirty("byproducts");
     setRejections((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   }
   function removeRejection(i: number) {
     markDirty();
+    markSectionDirty("byproducts");
     setRejections((rs) => rs.filter((_, j) => j !== i));
   }
+
+  // Additive row mutators ──────────────────────────────────────────────────
+  function addAdditive() {
+    markDirty();
+    markSectionDirty("additives");
+    setAdditives((as) => [...as, BLANK_ADDITIVE_ROW()]);
+  }
+  function updateAdditive(i: number, patch: Partial<AdditiveRow>) {
+    markDirty();
+    markSectionDirty("additives");
+    setAdditives((as) => as.map((a, j) => (j === i ? { ...a, ...patch } : a)));
+  }
+  function removeAdditive(i: number) {
+    markDirty();
+    markSectionDirty("additives");
+    setAdditives((as) => as.filter((_, j) => j !== i));
+  }
+
+  // Additive dropdown options — pulled from /sku-lookup once per
+  // additive category and deduped client-side.  Falls back to the
+  // canonical category labels when the catalog fetch hasn't landed yet
+  // (or when the endpoint is unavailable), so the dropdown always has
+  // *something* even on a fresh dev DB.
+  const [additiveOptions, setAdditiveOptions] = useState<string[]>(
+    [...ADDITIVE_CATEGORIES],
+  );
+  useEffect(() => {
+    // One pass of /sku-lookup searches at mount.  Each query goes
+    // through the same fetch as the SO sku-lookup picker — the server
+    // matches `particulars` with case + space tolerance, so "salt"
+    // returns "Salt Powdered", "Iodised Salt", etc.
+    let cancelled = false;
+    void (async () => {
+      const seen = new Set<string>();
+      const merged: string[] = [];
+      for (const cat of ADDITIVE_CATEGORIES) {
+        try {
+          const res = await apiFetch(
+            `/api/v1/so/sku-lookup?search=${encodeURIComponent(cat)}`,
+          );
+          if (!res.ok) continue;
+          // Server returns SKULookupResponse: `{options: {particulars: string[], ...}}`.
+          // The previous shape read `.results[].particulars` which didn't
+          // exist; the dropdown was silently falling back to the
+          // hardcoded ADDITIVE_CATEGORIES list every time.
+          const j = (await res.json()) as {
+            options?: { particulars?: string[] };
+          };
+          for (const name of j.options?.particulars ?? []) {
+            const trimmed = (name ?? "").trim();
+            if (!trimmed) continue;
+            const key = trimmed.toLowerCase();
+            if (seen.has(key)) continue;
+            seen.add(key);
+            merged.push(trimmed);
+          }
+        } catch {
+          /* network blip — keep walking the other categories */
+        }
+      }
+      if (cancelled) return;
+      // Always offer the canonical categories as a fallback at the top
+      // of the list — even when the catalog returns nothing useful,
+      // the operator can still pick a category name and save.
+      const out: string[] = [];
+      const seenFinal = new Set<string>();
+      for (const cat of ADDITIVE_CATEGORIES) {
+        if (!seenFinal.has(cat.toLowerCase())) {
+          seenFinal.add(cat.toLowerCase());
+          out.push(cat);
+        }
+      }
+      for (const name of merged) {
+        if (!seenFinal.has(name.toLowerCase())) {
+          seenFinal.add(name.toLowerCase());
+          out.push(name);
+        }
+      }
+      out.sort((a, b) => a.localeCompare(b));
+      setAdditiveOptions(out);
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // Submit ─────────────────────────────────────────────────────────────────
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setFeedback(null);
+
+    // Stage 3 guard: refuse to submit when no open batch is selected.
+    // Admin override (closed batch + checkbox toggled) bypasses this
+    // check — the POST body's admin_override flag tells the server to
+    // accept the save against a closed batch.  Server still validates
+    // the caller is admin before honouring it.
+    if (selectedBatchId == null) {
+      setFeedback({
+        kind: "err",
+        msg: "Pick a batch before saving output.",
+      });
+      return;
+    }
+    if (!batchIsOpen && !adminOverrideActive) {
+      setFeedback({
+        kind: "err",
+        msg: "Open a batch (or enable admin override) before saving output.",
+      });
+      return;
+    }
 
     // null vs 0 distinction:
     //   - blank input → null (operator hasn't recorded yet)
@@ -2754,6 +3619,15 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
     // The previous `num(fgActualKg) || null` dropped a legitimate 0
     // because `0 || null` is null. Check the string for emptiness first.
     const body: Record<string, unknown> = {
+      // Stage 3: tag this save with the selected batch so the server
+      // routes every row (consumption / byproducts / balance /
+      // additives) to that batch_id.  When omitted, server falls back
+      // to its single-open-batch default; explicit beats default.
+      batch_id:          selectedBatchId,
+      // Admin override flag — only set when the picked batch is closed
+      // AND the operator has checked the override box AND they're an
+      // admin.  Server gates on user.is_admin before honouring it.
+      ...(adminOverrideActive ? { admin_override: true } : {}),
       fg_actual_kg:      fgActualKg.trim()    === "" ? null : num(fgActualKg),
       fg_actual_units:   fgActualUnits.trim() === "" ? null : parseInt(fgActualUnits, 10),
       fg_expected_kg:    expectedKg,
@@ -2885,6 +3759,63 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
     // happens to declare.
     body.balance_materials = balanceMaterials;
 
+    // Additives — data-keeping rows.  Server route persists each row to
+    // job_card_additive_consumption_v2 and the GET /accounting response
+    // surfaces a rolled-up total alongside the rest of the summary.
+    // Drop blank rows so we don't write empty placeholders.
+    body.additives = additives
+      .filter((a) => num(a.qty) > 0 && (a.sku_name || a.custom_name))
+      .map((a) => ({
+        sku_name: a.sku_name === "_other" ? null : a.sku_name || null,
+        material_name: a.sku_name === "_other"
+          ? (a.custom_name || null)
+          : null,
+        qty_kg: num(a.qty),
+        remarks: a.remarks || null,
+      }));
+
+    // R10 — Edit Batch diff-on-save: prune sections the operator didn't
+    // touch so unchanged data on the server is preserved untouched.
+    // First-save (no batchHasData yet) sends everything as before.
+    // The backend now treats an omitted section as "leave alone" — see
+    // server_replica/app/modules/production/router.py RecordOutputV2Request
+    // None-defaults and the matching `is not None` guards.
+    if (batchHasData) {
+      const dirty = dirtyMaskRef.current;
+      if (!dirty.has("output_qty")) {
+        delete body.fg_actual_kg;
+        delete body.fg_actual_units;
+        delete body.fg_expected_kg;
+        delete body.fg_expected_units;
+        delete body.process_loss_kg;
+      }
+      if (!dirty.has("consumption")) {
+        delete body.rm_consumed;
+        delete body.pm_consumed;
+      }
+      // Wire-side: control_sample is persisted as a byproducts row
+      // (category='control_sample'), so a dirty control_sample needs the
+      // byproducts payload included too — and vice versa. Include the
+      // section only when neither key is dirty AND we drop it.
+      if (!dirty.has("byproducts") && !dirty.has("control_sample")) {
+        delete body.byproducts;
+      }
+      if (!dirty.has("balance")) {
+        delete body.balance_materials;
+      }
+      if (!dirty.has("additives")) {
+        delete body.additives;
+      }
+      const hasAnyChange =
+        dirty.has("output_qty")     || dirty.has("consumption")
+        || dirty.has("byproducts")  || dirty.has("balance")
+        || dirty.has("additives")   || dirty.has("control_sample");
+      if (!hasAnyChange) {
+        setFeedback({ kind: "err", msg: "Nothing changed — edit a field before saving." });
+        return;
+      }
+    }
+
     setSubmitting(true);
     try {
       const res = await apiFetch(`/api/v1/production/job-cards-v2/${detail.job_card_id}/outputs`, {
@@ -2996,7 +3927,7 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
         console.warn("[save-output] /accounting/summary threw:", err);
         setFeedback({
           kind: "err",
-          msg: `Output saved, but the accounting summary call threw: ${err instanceof Error ? err.message : "unknown"}. Complete will be blocked.`,
+          msg: `Output saved, but the accounting summary call threw: ${friendlyApiError(err)}. Complete will be blocked.`,
         });
       }
       // C3-H3 — backup GET /accounting in case the summary PUT above
@@ -3017,9 +3948,13 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
       // fetch resyncs the form state from the server (operator's edits
       // are now persisted, the server response is canonical).
       formDirty.current = false;
+      // R10 — reset the section dirty mask too; future edits start fresh
+      // and the Edit Batch button correctly reflects "no pending changes"
+      // until the operator types again.
+      dirtyMaskRef.current.clear();
       onReload();
     } catch (err) {
-      setFeedback({ kind: "err", msg: err instanceof Error ? err.message : "Failed to save output." });
+      setFeedback({ kind: "err", msg: friendlyJobCardError(err) });
     } finally {
       setSubmitting(false);
     }
@@ -3033,7 +3968,38 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
   // C3: any operational input is disabled when locked. We compute this
   // OR with submitting so the save-in-flight state still wins (you can't
   // edit mid-flight either).
-  const inputsDisabled = submitting || lock.isLocked;
+  // Stage 3: also disabled when no batch is selected or the selected
+  // batch isn't open — closed/cancelled batches are read-only views
+  // of their persisted accounting state.  Admin override flips a
+  // closed batch back to editable so admins can correct mistakes
+  // post-close (the save POSTs admin_override=true and the server
+  // gates that against the caller's role).
+  const noBatchPicked = selectedBatchId == null;
+  const adminOverrideActive = adminOverride && isAdmin && !!selectedBatch && !batchIsOpen;
+  const formGatedByBatch = noBatchPicked || (!batchIsOpen && !adminOverrideActive);
+  // R10 — Lifecycle gate: every field stays read-only until the operator
+  // clicks START (status flips to in_progress). Admin override does NOT
+  // bypass this — the override is for closed-batch edits, not pre-start.
+  const lifecycleLocked = isLifecycleLocked(detail.status);
+  const inputsDisabled = submitting || lock.isLocked || formGatedByBatch || lifecycleLocked;
+  // R10 — Has the selected batch ever been saved? Used to label the submit
+  // button as "Save Batch" (first save) vs "Edit Batch" (subsequent edits).
+  // produced_qty_kg is the canonical "Save Output ran" signal — set by the
+  // /outputs endpoint, untouched by open_batch (open_batch only sets
+  // input_qty_kg, so checking input_qty_kg would mislabel a freshly-opened
+  // batch as already-saved).
+  const batchHasData = !!selectedBatch && (
+    selectedBatch.produced_qty_kg != null ||
+    selectedBatch.fg_actual_kg    != null
+  );
+  // R10 — submit-button label state machine:
+  //   has data           → EDIT BATCH    (subsequent edit save)
+  //   batch open, no data → SAVE BATCH   (first save of this batch)
+  //   else                → SAVE OUTPUT  (legacy / disabled fallback when
+  //                                       no editable batch exists)
+  const submitLabel = batchHasData
+    ? "EDIT BATCH"
+    : (batchIsOpen || adminOverrideActive) ? "SAVE BATCH" : "SAVE OUTPUT";
   // C3-MED-1 — stable banner id for inputs to point aria-describedby at.
   const bannerId = lockBannerId(detail.job_card_id);
   const describedBy = inputsDisabled && lock.isLocked ? bannerId : undefined;
@@ -3062,16 +4028,212 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
           onReload,
         )}
       />
+      {/* ── Stage 3: batch context selector ──────────────────────────────
+          Shown above FG Output so the form's "what am I editing" is
+          unambiguous.  Picks the active batch (form rebinds to it
+          on change).  When no batch is selected / picked batch is
+          closed, the entire form below is read-only and Save Output
+          is disabled with a clear message. */}
+      <Panel title="Batch context">
+        {/* Stage 3 final: across-batches rollup strip.  Sums the per-
+            batch summary columns so the operator sees the JC's total
+            throughput without leaving the form. */}
+        {batches.length > 0 ? (
+          <dl className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-x-3 sm:gap-x-4 gap-y-2 mb-3 pb-3 border-b border-[var(--aws-border)]">
+            <KV
+              label={
+                <span className="block leading-tight">
+                  Batches
+                  <span className="block text-[8px] normal-case font-normal text-[var(--text-muted)] tracking-normal mt-0">
+                    {batchRollup.openCount} open · {batchRollup.closedCount} closed
+                    {batchRollup.cancelledCount > 0 ? ` · ${batchRollup.cancelledCount} cancelled` : ""}
+                  </span>
+                </span>
+              }
+              value={<span><strong>{batchRollup.total}</strong></span>}
+            />
+            <KV
+              label="Total Produced"
+              value={<span><span>{fmtNum(batchRollup.producedTotal)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>}
+            />
+            <KV
+              label="Total Input"
+              value={<span><span>{fmtNum(batchRollup.inputTotal)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>}
+            />
+            <KV
+              label="Process Loss"
+              value={<span><span>{fmtNum(batchRollup.processLossTotal)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>}
+            />
+            <KV
+              label="EGA"
+              value={<span><span>{fmtNum(batchRollup.egaTotal)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>}
+            />
+            <KV
+              label="QC Sample"
+              value={<span><span>{fmtNum(batchRollup.controlSampleTotal)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>}
+            />
+          </dl>
+        ) : null}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-2 flex-wrap">
+          <label className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)] sm:w-[110px]">
+            Recording for
+          </label>
+          {batchesLoading && batches.length === 0 ? (
+            <span className="text-[12px] text-[var(--text-muted)] italic">
+              loading batches…
+            </span>
+          ) : batches.length === 0 ? (
+            <span className="text-[12px] text-[var(--text-secondary)]">
+              No batches yet — click <strong>Open Batch</strong> to create the first one.
+            </span>
+          ) : (
+            <select
+              value={selectedBatchId ?? ""}
+              onChange={(e) => {
+                const raw = e.target.value;
+                changeBatch(raw === "" ? null : parseInt(raw, 10));
+              }}
+              disabled={submitting || lock.isLocked}
+              className={`${inputCls} max-w-full sm:max-w-[420px] flex-1 min-w-[200px]`}
+              aria-label="Select batch for recording"
+            >
+              {[...batches]
+                .sort((a, b) => b.batch_number - a.batch_number)
+                .map((b) => {
+                  const status = b.status === "open"
+                    ? "open"
+                    : b.status === "closed" ? "closed" : "cancelled";
+                  const istHint = b.status === "open"
+                    ? (b.opened_at_ist ? ` · opened ${b.opened_at_ist}` : "")
+                    : (b.closed_at_ist ? ` · closed ${b.closed_at_ist}` : "");
+                  return (
+                    <option key={b.batch_id} value={b.batch_id}>
+                      Batch {b.batch_number} ({status}){istHint}
+                    </option>
+                  );
+                })}
+            </select>
+          )}
+          {/* Open / Close buttons — single source of truth for batch
+              lifecycle.  BatchBand below still shows the history table
+              but its inline Open/Close buttons are suppressed when these
+              are visible (avoiding duplicate controls).
+              R10 — once the JC is marked completed, non-admin operators
+              can no longer open new batches or close existing ones; only
+              admin keeps the affordance for post-complete corrections.
+              Admin override checkbox below (visible only on closed
+              batches) is unaffected — it remains the canonical way to
+              edit a sealed batch's data. */}
+          {detail.status !== "completed" || isAdmin ? (
+            <div className="flex items-center gap-2 sm:ml-auto">
+              <button
+                type="button"
+                onClick={() => void doOpenBatch()}
+                disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked}
+                title={lifecycleLocked ? "Start the job card first" : undefined}
+                className="h-7 px-3 text-[11px] font-semibold rounded-[2px] border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {batchActionBusy ? "…" : "Open Batch"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setCloseBatchModal(selectedBatch)}
+                disabled={
+                  batchActionBusy || submitting || lock.isLocked || lifecycleLocked ||
+                  !selectedBatch || !batchIsOpen
+                }
+                title={lifecycleLocked ? "Start the job card first" : undefined}
+                className="h-7 px-3 text-[11px] font-semibold rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[var(--text-primary)] hover:border-[var(--aws-orange)] disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Close Batch
+              </button>
+            </div>
+          ) : null}
+        </div>
+        {batchActionMsg ? (
+          <div
+            role="status"
+            className={[
+              "text-[12px] px-2 py-1.5 rounded border mb-2",
+              batchActionMsg.kind === "ok"
+                ? "bg-[#eaf6ed] border-[#b6dbb1] text-[#1d8102]"
+                : "bg-[#fdf3f1] border-[#f0c7be] text-[#b1361e]",
+            ].join(" ")}
+          >
+            {batchActionMsg.msg}
+          </div>
+        ) : null}
+        {/* Status banners — closed batch with admin override toggle for
+            admins, plain warning for non-admins.  When admin override is
+            on, the form below becomes editable and Save Output posts
+            admin_override=true. */}
+        {selectedBatch && !batchIsOpen ? (
+          isAdmin ? (
+            <div
+              role="status"
+              className="text-[12px] px-2 py-1.5 rounded border bg-[#fff7e6] border-[#f0d099] text-[#8a5e10] flex flex-col sm:flex-row sm:items-center gap-2"
+            >
+              <span className="flex-1">
+                Batch {selectedBatch.batch_number} is {selectedBatch.status}.{" "}
+                {adminOverrideActive ? (
+                  <strong>Admin override active</strong>
+                ) : (
+                  <>Editing is disabled by default.</>
+                )}
+              </span>
+              <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={adminOverride}
+                  onChange={(e) => setAdminOverride(e.target.checked)}
+                  className="accent-[var(--aws-orange)]"
+                />
+                <span className="text-[11px] font-semibold">
+                  Admin override — edit closed batch
+                </span>
+              </label>
+            </div>
+          ) : (
+            <div
+              role="status"
+              className="text-[12px] px-2 py-1.5 rounded border bg-[#fff7e6] border-[#f0d099] text-[#8a5e10]"
+            >
+              Batch {selectedBatch.batch_number} is {selectedBatch.status}. The form below is read-only — only admins can edit closed batches.
+            </div>
+          )
+        ) : selectedBatch == null && batches.length > 0 ? (
+          <div
+            role="status"
+            className="text-[12px] px-2 py-1.5 rounded border bg-[#fff7e6] border-[#f0d099] text-[#8a5e10]"
+          >
+            Pick a batch above to load its recorded output.
+          </div>
+        ) : null}
+      </Panel>
+
       {/* ── FG Output ───────────────────────────────────────────────────── */}
       <Panel title="FG Output">
         <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3 mb-4">
-          <KV label="FG Expected Units" value={expectedUnits != null ? String(expectedUnits) : "—"} />
-          <KV label="FG Expected Kg"    value={fmtKg(expectedKg)} />
+          {/* R10 — once one or more batches have closed, the Expected
+              labels surface what's still owed to the JC (planned minus
+              already-produced) instead of the JC-level total, so the
+              operator targeting batch N+1 sees the right ceiling. The
+              backend body still POSTs the JC-level expected via
+              `fg_expected_kg` / `fg_expected_units` (server-side
+              accounting math unchanged). */}
+          <KV
+            label={batchRollup.closedCount > 0 ? "FG Remaining Units" : "FG Expected Units"}
+            value={remainingExpectedUnits != null ? String(remainingExpectedUnits) : "—"}
+          />
+          <KV
+            label={batchRollup.closedCount > 0 ? "FG Remaining Kg" : "FG Expected Kg"}
+            value={remainingExpectedKg != null ? fmtKg(remainingExpectedKg) : "—"}
+          />
           <KV label="RM Issued (kg)"    value={fmtKg(rmIssuedKg)} />
         </dl>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
           <FormNumber label="FG Actual Units" value={fgActualUnits} onChange={onChangeUnits} disabled={inputsDisabled} />
-          <FormNumber label="FG Actual Kg"    value={fgActualKg}    onChange={setFgActualKg}    disabled={inputsDisabled} />
+          <FormNumber label="FG Actual Kg"    value={fgActualKg}    onChange={onChangeFgActualKg}    disabled={inputsDisabled} />
         </div>
 
         {/* Material Consumption — one row per BOM article */}
@@ -3091,7 +4253,7 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
                     type="number" step="any" placeholder={`Qty (${a.uom})`}
                     className={`${inputCls} col-span-3 lg:col-span-2`}
                     value={consumption[key] ?? ""}
-                    onChange={(e) => setConsumption((c) => ({ ...c, [key]: e.target.value }))}
+                    onChange={(e) => { markSectionDirty("consumption"); setConsumption((c) => ({ ...c, [key]: e.target.value })); }}
                     onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
                     disabled={inputsDisabled}
                     aria-disabled={inputsDisabled}
@@ -3116,6 +4278,98 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
             })}
           </div>
         )}
+
+        {/* Additives — data-keeping consumption for fully-consumed
+            seasoning (Salt, Sugar, Citric Acid, Oils, etc.).  Optional;
+            does NOT participate in the conservation identity. Rows
+            persist to job_card_additive_consumption_v2 via the same
+            POST /outputs body. */}
+        <SubsectionLabel>
+          Additives
+          <span className="block sm:inline ml-0 sm:ml-2 text-[10px] font-normal text-[var(--text-muted)] normal-case tracking-normal">
+            data-keeping · not counted in balance
+          </span>
+        </SubsectionLabel>
+        <div className="space-y-2 mb-4">
+          {additives.map((a, i) => (
+            <div key={i} className="grid grid-cols-12 gap-2 items-start">
+              <select
+                className={`${inputCls} col-span-12 sm:col-span-4`}
+                value={a.sku_name}
+                onChange={(e) => updateAdditive(i, {
+                  sku_name: e.target.value,
+                  // Drop any custom_name the moment the operator picks
+                  // a real SKU so we never persist mismatched values.
+                  custom_name: e.target.value === "_other" ? a.custom_name : "",
+                })}
+                disabled={inputsDisabled}
+                aria-disabled={inputsDisabled}
+                aria-describedby={describedBy}
+              >
+                <option value="">— Select additive —</option>
+                {additiveOptions.map((o) => (
+                  <option key={o} value={o}>{o}</option>
+                ))}
+                <option value="_other">Others (free-text)</option>
+              </select>
+              {a.sku_name === "_other" ? (
+                // Global-SKU typeahead — searches all_sku via the same
+                // /sku-lookup endpoint the category dropdown uses, but
+                // unconstrained to the additive category list so the
+                // operator can attach any registered material.  Free-
+                // typed text is still preserved as a fallback for off-
+                // catalog names.
+                <AdditiveOtherPicker
+                  value={a.custom_name}
+                  onChange={(v) => updateAdditive(i, { custom_name: v })}
+                  disabled={inputsDisabled}
+                  className="col-span-12 sm:col-span-3"
+                />
+              ) : (
+                <div className="hidden sm:block sm:col-span-3" />
+              )}
+              <input
+                type="number"
+                step="any"
+                placeholder="Qty (kg)"
+                className={`${inputCls} col-span-6 sm:col-span-2`}
+                value={a.qty}
+                onChange={(e) => updateAdditive(i, { qty: e.target.value })}
+                onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
+                disabled={inputsDisabled}
+                aria-disabled={inputsDisabled}
+                aria-describedby={describedBy}
+              />
+              <input
+                type="text"
+                placeholder="Remarks (optional)"
+                className={`${inputCls} col-span-5 sm:col-span-2`}
+                value={a.remarks}
+                onChange={(e) => updateAdditive(i, { remarks: e.target.value })}
+                disabled={inputsDisabled}
+                aria-disabled={inputsDisabled}
+                aria-describedby={describedBy}
+              />
+              <button
+                type="button"
+                onClick={() => removeAdditive(i)}
+                disabled={inputsDisabled}
+                aria-label="Remove additive row"
+                className="col-span-1 inline-flex items-center justify-center h-9 text-[var(--aws-error)] disabled:opacity-30"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={addAdditive}
+            disabled={inputsDisabled}
+            className="text-[11px] text-[var(--aws-link)] hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            + Add another
+          </button>
+        </div>
 
         {/* Off-Grade — dynamic rows. A blank row is always seeded so the
             operator can enter a single off-grade record without first
@@ -3239,7 +4493,7 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
 
         {/* Process Loss + computed % */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2">
-          <FormNumber label="Process Loss (kg)" value={processLoss} onChange={setProcessLoss} disabled={inputsDisabled} />
+          <FormNumber label="Process Loss (kg)" value={processLoss} onChange={onChangeProcessLoss} disabled={inputsDisabled} />
           <div>
             <FormLabel>Process Loss %</FormLabel>
             <div className={`${inputCls} bg-[var(--surface-subtle)] flex items-center`}>
@@ -3302,6 +4556,7 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
                 }
                 onChange={(e) => {
                   const v = e.target.value;
+                  markSectionDirty("control_sample");
                   if (v.trim() === "") {
                     setControlSampleKg("");
                     return;
@@ -3353,7 +4608,7 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
                     type="number" step="any" placeholder="0"
                     className={`${inputCls} col-span-4 sm:col-span-3`}
                     value={balance[key] ?? ""}
-                    onChange={(e) => setBalance((b) => ({ ...b, [key]: e.target.value }))}
+                    onChange={(e) => { markSectionDirty("balance"); setBalance((b) => ({ ...b, [key]: e.target.value })); }}
                     onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
                     disabled={inputsDisabled}
                     aria-disabled={inputsDisabled}
@@ -3422,17 +4677,60 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
       ) : null}
 
       {/* ── Accounting Summary ──────────────────────────────────────────── */}
-      <AccountingSummaryCard summary={summary} detail={detail} onReload={onReload} />
+      <AccountingSummaryCard
+        summary={summary}
+        perBatchSummaries={perBatchSummaries}
+        totalSummary={totalSummary}
+        selectedBatchId={selectedBatchId}
+        detail={detail}
+        onReload={onReload}
+      />
 
       <FormFooter
         feedback={feedback}
         submitting={submitting}
-        submitLabel="SAVE OUTPUT"
+        submitLabel={submitLabel}
         // C3-MED-6 — disable on lock OR submit. FormFooter ORs with
         // `submitting` internally too but passing the merged flag keeps
         // the aria-describedby story consistent with the inputs above.
         disabled={inputsDisabled}
       />
+      {/* Close Batch modal driven by the Batch Context panel button.
+          Same component BatchBand uses inside AccountingSummaryCard;
+          rendered here so the close flow lives next to its trigger. */}
+      {closeBatchModal ? (
+        <BatchCloseModal
+          batch={closeBatchModal}
+          jcId={detail.job_card_id}
+          isPackingStage={isPackingStageJc(detail.stage)}
+          defaults={{
+            producedKg: fgActualKg,
+            // R10 — pre-fill from the operator's typed RM consumption
+            // (RM-only, PM excluded) so Close Batch doesn't surface an
+            // empty field when the data was already entered in the form
+            // above. Match the BatchBand-version default's behaviour.
+            rmConsumedKg: rmConsumedTypedKg > 0 ? rmConsumedTypedKg.toFixed(3) : "",
+            extraGiveAway: extraGiveawayQty,
+          }}
+          summarySnapshot={{
+            fgActualKg: num(fgActualKg) || null,
+            balanceDiff: null,
+            isBalanced: null,
+            tolerancePct: 0.10,
+            totalLossPct: null,
+          }}
+          onClose={() => setCloseBatchModal(null)}
+          onDone={async () => {
+            setCloseBatchModal(null);
+            // R10 — explicit batches refresh paired with onReload so
+            // the per-batch summary list picks up the newly-closed
+            // batch's snapshot fields immediately. Auto-poll no longer
+            // refreshes batches on its own (see refetchBatches above).
+            await refetchBatches();
+            onReload();
+          }}
+        />
+      ) : null}
     </form>
   );
 }
@@ -3459,6 +4757,16 @@ type SummaryCardData = {
    *  Drives the "RM Consumed" KV and the balance-difference denominator. */
   rmConsumedKg: number;
   fgOutKg: number;
+  /** EGA qty (kg).  Operator's typed value when present, otherwise
+   *  reconstructed from the server's ega_loss_pct × total_input fallback.
+   *  Mirrors the egaAbsKg value used by the conservation identity so the
+   *  card and the balance check stay in lock-step. */
+  egaKg: number;
+  /** Additives consumption total (kg).  Display-only — flagged in the
+   *  summary as a "data-keeping" loss bucket that does NOT feed the
+   *  conservation identity (additives are 100 % consumed by intent, so
+   *  they would otherwise create artificial imbalance). */
+  additivesKg: number;
   lossKg: number;
   balTotal: number;
   offgradeTotal: number;
@@ -3486,122 +4794,24 @@ type SummaryCardData = {
   inputBasis: "indent" | "consumption" | "none";
 };
 
-// Deterministic DD Mon YYYY for a phase_date ('YYYY-MM-DD' string). Avoids
+// Deterministic DD Mon YYYY for a batch_date ('YYYY-MM-DD' string). Avoids
 // locale/timezone-dependent Date formatting. Returns "—" when absent.
-const _PHASE_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-function fmtPhaseDate(d: string | null | undefined): string {
+const _BATCH_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function fmtBatchDate(d: string | null | undefined): string {
   if (!d) return "—";
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d));
   if (!m) return String(d);
   const mi = parseInt(m[2], 10) - 1;
-  return mi >= 0 && mi <= 11 ? `${m[3]} ${_PHASE_MONTHS[mi]} ${m[1]}` : String(d);
+  return mi >= 0 && mi <= 11 ? `${m[3]} ${_BATCH_MONTHS[mi]} ${m[1]}` : String(d);
 }
 
-function AccountingSummaryCard({
-  summary,
-  detail,
-  onReload,
-}: {
-  summary: SummaryCardData;
-  /** Full JC detail + reload — passed to the embedded PhaseBand, which owns
-   *  the phasewise table + Open/Close phase controls (moved here from the
-   *  former top-of-page band) and the /phase open + close wiring. */
-  detail: JobCardDetail;
-  onReload: () => void;
-}) {
-  const unbalanced = summary.isBalanced === false;
-  const balanceDiffAbs = summary.balanceDiff != null ? Math.abs(summary.balanceDiff) : 0;
-
-  // Render the headline IS BALANCED chip with a tick / cross glyph.
-  const balancedChip =
-    summary.isBalanced == null ? (
-      <span className="text-[var(--text-muted)]">—</span>
-    ) : summary.isBalanced ? (
-      <span className="inline-flex items-center gap-1 text-[var(--text-success)] font-semibold">
-        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="currentColor">
-          <path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" />
-        </svg>
-        Balanced
-      </span>
-    ) : (
-      <span className="inline-flex items-center gap-1 text-[var(--aws-error)] font-semibold">
-        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="currentColor">
-          <path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
-        </svg>
-        Not balanced
-      </span>
-    );
-
+// R10 — KV grid + percentages strip extracted from AccountingSummaryCard
+// so the TOTAL roll-up and each per-batch collapsible can share the same
+// layout. Pure presentational — `summary` is the only input.
+function SummaryGrid({ summary }: { summary: SummaryCardData }) {
   return (
-    <Panel title="Accounting Summary">
-      {unbalanced ? (
-        <div
-          role="alert"
-          className={[
-            "mb-3 rounded-md border px-3 py-2 sm:px-4 sm:py-3",
-            "bg-[#fdf3f1] border-[#f0c7be] text-[#b1361e]",
-            "text-[13px]",
-          ].join(" ")}
-        >
-          <span className="font-semibold">Unbalanced by {balanceDiffAbs.toFixed(2)} kg</span>
-          {summary.balanceDiffPct != null ? (
-            <span className="ml-1">({summary.balanceDiffPct.toFixed(2)}%)</span>
-          ) : null}
-          <span className="ml-1">— resolve before closing this job card.</span>
-        </div>
-      ) : null}
-
-      {/* ── Headline status strip ────────────────────────────────────
-          Is Balanced · Balance Difference · Closure Tolerance.
-          • mobile:     1-col stack (avoids ellipsised values)
-          • sm (640+):  3-col equal split — three labels are short
-                        enough to fit comfortably
-          The tolerance KV reads bom_header.allowed_balance_tolerance_pct
-          (or the system default 0.10 %); it's the threshold the
-          /complete endpoint uses for |diff| / total_input — surfacing
-          it lets the operator self-verify before hitting Close. */}
-      <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 sm:gap-x-4 gap-y-3 mb-3 pb-3 border-b border-[var(--aws-border)]">
-        <KV label="Is Balanced"          value={balancedChip} />
-        <KV
-          label="Balance Difference"
-          value={
-            summary.balanceDiff == null
-              ? (
-                <span className="text-[var(--text-muted)] italic text-[11px]">
-                  no input recorded
-                </span>
-              )
-              : (
-                <span className={unbalanced ? "text-[var(--aws-error)] font-semibold" : ""}>
-                  {summary.balanceDiff.toFixed(2)} kg
-                  {summary.balanceDiffPct != null ? (
-                    <span className="text-[var(--text-muted)] ml-1 font-normal">
-                      ({summary.balanceDiffPct.toFixed(2)}%)
-                    </span>
-                  ) : null}
-                </span>
-              )
-          }
-        />
-      </dl>
-
-      {/* ── Phasewise output + controls (R13) — the phase status, Open/Close
-          buttons, close modal, and the per-phase produced / RM / EGA table,
-          moved here from the former top-of-page band. PhaseBand owns the
-          /phases fetch and the /phase/open + /phase/{id}/close wiring. ──── */}
-      <div className="mb-3 pb-3 border-b border-[var(--aws-border)]">
-        <PhaseBand detail={detail} onReload={onReload} />
-      </div>
-
-      {/* ── Quantity row ─────────────────────────────────────────────
-          RM Consumed leads (operator-stated), then FG Output, then the
-          loss buckets. Breakpoints scale gradually so labels never
-          truncate uncomfortably:
-          • mobile:   2-col (3 rows × 2)
-          • sm 640:   3-col (2 rows × 3)
-          • md 768:   3-col (still readable on tablets in portrait)
-          • lg 1024:  6-col (single line on desktop) */}
-      <dl className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-x-3 sm:gap-x-4 gap-y-3 mb-3">
+    <>
+      <dl className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-8 gap-x-3 sm:gap-x-4 gap-y-3 mb-3">
         <KV label="RM Consumed"
             value={<span><span>{fmtNum(summary.rmConsumedKg)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>} />
         <KV label="FG Output"
@@ -3617,22 +4827,26 @@ function AccountingSummaryCard({
           }
           value={<span><span>{fmtNum(summary.lossKg)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>}
         />
+        <KV label="Extra Giveaway (EGA)"
+            value={<span><span>{fmtNum(summary.egaKg)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>} />
         <KV label="Balance Material"
             value={<span><span>{fmtNum(summary.balTotal)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>} />
         <KV label="Off-grade Total"
             value={<span><span>{fmtNum(summary.offgradeTotal)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>} />
         <KV label="Control Sample"
             value={<span><span>{fmtNum(summary.ctrlSample)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>} />
+        <KV
+          label={
+            <span className="block leading-tight">
+              Additives
+              <span className="block text-[8px] normal-case font-normal text-[var(--text-muted)] tracking-normal mt-0">
+                data only · not in balance
+              </span>
+            </span>
+          }
+          value={<span><span>{fmtNum(summary.additivesKg)}</span><span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span></span>}
+        />
       </dl>
-
-      {/* ── Percentages row ──────────────────────────────────────────
-          R9 block with operator-stated thresholds. Values above the
-          threshold render bold + red — display-only, the /complete
-          gate still rests on is_balanced. PL+EGA Loss % = Process
-          Loss % + EGA Loss %.
-          • mobile:   2-col (3 rows — last row half-full)
-          • sm 640:   3-col (2 rows — last row 2/3 full)
-          • md 768:   5-col (single line) */}
       <dl className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-x-3 sm:gap-x-4 gap-y-3 pt-3 border-t border-[var(--aws-border)]">
         <KV label="Process Loss %"      value={lossPctChip(summary.processLossPct, 1.5)} />
         <KV label="EGA Loss %"          value={lossPctChip(summary.egaLossPct,     1.0)} />
@@ -3640,7 +4854,312 @@ function AccountingSummaryCard({
         <KV label="Off-grade %"         value={lossPctChip(summary.offgradePct,    1.0)} />
         <KV label="Total Loss %"        value={lossPctChip(summary.totalLossPct,   3.0)} />
       </dl>
+    </>
+  );
+}
+
+function AccountingSummaryCard({
+  summary,
+  perBatchSummaries,
+  totalSummary,
+  selectedBatchId,
+  detail,
+  onReload,
+}: {
+  /** Live summary for the currently-selected batch (reflects unsaved
+   *  form edits). Retained for backwards-compat with the legacy single-
+   *  summary header chip; the new layout reads from totalSummary instead. */
+  summary: SummaryCardData;
+  /** One entry per batch (selected batch's entry uses the live summary
+   *  so unsaved edits surface in its collapsible). Drives the per-batch
+   *  collapsible sections rendered below the TOTAL. */
+  perBatchSummaries: { batch: BatchRow; summary: SummaryCardData }[];
+  /** Sum across batches, recomputed from perBatchSummaries (so the
+   *  selected batch's live edits also propagate into the total). */
+  totalSummary: SummaryCardData;
+  selectedBatchId: number | null;
+  /** Full JC detail + reload — passed to the embedded BatchBand, which owns
+   *  the batchwise table + Open/Close batch controls (moved here from the
+   *  former top-of-page band) and the /batches open + close wiring. */
+  detail: JobCardDetail;
+  onReload: () => void;
+}) {
+  // R10 — header headlines now describe the TOTAL across batches so the
+  // operator sees the JC-wide balance status. Per-batch is_balanced /
+  // balance_difference stay inside each collapsible section.
+  void summary;
+  const unbalanced = totalSummary.isBalanced === false;
+  const balanceDiffAbs = totalSummary.balanceDiff != null ? Math.abs(totalSummary.balanceDiff) : 0;
+
+  // Render the headline IS BALANCED chip with a tick / cross glyph.
+  // R10 — driven by totalSummary (across all batches), not the
+  // previously-passed `summary` (which was selected-batch only).
+  const renderBalancedChip = (s: SummaryCardData) =>
+    s.isBalanced == null ? (
+      <span className="text-[var(--text-muted)]">—</span>
+    ) : s.isBalanced ? (
+      <span className="inline-flex items-center gap-1 text-[var(--text-success)] font-semibold">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="currentColor">
+          <path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" />
+        </svg>
+        Balanced
+      </span>
+    ) : (
+      <span className="inline-flex items-center gap-1 text-[var(--aws-error)] font-semibold">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="currentColor">
+          <path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
+        </svg>
+        Not balanced
+      </span>
+    );
+
+  const renderHeadlines = (s: SummaryCardData, unbalancedForHeader: boolean) => (
+    <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 sm:gap-x-4 gap-y-3 mb-3 pb-3 border-b border-[var(--aws-border)]">
+      <KV label="Is Balanced" value={renderBalancedChip(s)} />
+      <KV
+        label="Balance Difference"
+        value={
+          s.balanceDiff == null
+            ? (
+              <span className="text-[var(--text-muted)] italic text-[11px]">
+                no input recorded
+              </span>
+            )
+            : (
+              <span className={unbalancedForHeader ? "text-[var(--aws-error)] font-semibold" : ""}>
+                {s.balanceDiff.toFixed(2)} kg
+                {s.balanceDiffPct != null ? (
+                  <span className="text-[var(--text-muted)] ml-1 font-normal">
+                    ({s.balanceDiffPct.toFixed(2)}%)
+                  </span>
+                ) : null}
+              </span>
+            )
+        }
+      />
+    </dl>
+  );
+
+  return (
+    <Panel title="Accounting Summary">
+      {unbalanced ? (
+        <div
+          role="alert"
+          className={[
+            "mb-3 rounded-md border px-3 py-2 sm:px-4 sm:py-3",
+            "bg-[#fdf3f1] border-[#f0c7be] text-[#b1361e]",
+            "text-[13px]",
+          ].join(" ")}
+        >
+          <span className="font-semibold">
+            Total unbalanced by {balanceDiffAbs.toFixed(2)} kg
+          </span>
+          {totalSummary.balanceDiffPct != null ? (
+            <span className="ml-1">({totalSummary.balanceDiffPct.toFixed(2)}%)</span>
+          ) : null}
+          <span className="ml-1">— resolve before closing this job card.</span>
+        </div>
+      ) : null}
+
+      {/* ── Batchwise output + controls (R13) — the batch status, Open/Close
+          buttons, close modal, and the per-batch produced / RM / EGA table,
+          moved here from the former top-of-page band. BatchBand owns the
+          /batches fetch and the /batches/open + /batches/{id}/close wiring. */}
+      <div className="mb-3 pb-3 border-b border-[var(--aws-border)]">
+        <BatchBand detail={detail} onReload={onReload} />
+      </div>
+
+      {/* ── TOTAL roll-up (R10) — always visible, non-collapsible.
+          Headlines (Is Balanced / Balance Difference) + the same KV grid
+          + percentages strip used per batch below. The operator sees the
+          JC-wide aggregate at a glance without expanding any batch. */}
+      <div className="mb-3 pb-3 border-b border-[var(--aws-border)]">
+        <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)] mb-2">
+          Total · across {perBatchSummaries.length}{" "}
+          {perBatchSummaries.length === 1 ? "batch" : "batches"}
+        </div>
+        {renderHeadlines(totalSummary, unbalanced)}
+        <SummaryGrid summary={totalSummary} />
+      </div>
+
+      {/* ── Per-batch collapsible sections (R10).  Each batch's saved
+          metrics get their own card; the currently-selected batch
+          starts expanded (so the operator sees the one they're editing),
+          others start collapsed. Closed batches surface BatchRow
+          snapshot values; the open batch surfaces the LIVE form state
+          (substituted in perBatchSummaries upstream). */}
+      {perBatchSummaries.map(({ batch, summary: bs }) => {
+        const isSelected = batch.batch_id === selectedBatchId;
+        const batchUnbalanced = bs.isBalanced === false;
+        return (
+          <details
+            key={batch.batch_id}
+            open={isSelected}
+            className="mb-2 border border-[var(--aws-border)] rounded-md"
+          >
+            <summary className="cursor-pointer select-none px-3 py-2 text-[12px] font-semibold text-[var(--text-primary)] flex items-center gap-2 hover:bg-[var(--aws-bg-tint)]">
+              <span>Batch {batch.batch_number}</span>
+              <span className="text-[10px] font-normal text-[var(--text-muted)]">
+                · {batch.status}
+                {batch.opened_at_ist ? ` · opened ${batch.opened_at_ist}` : ""}
+                {batch.closed_at_ist ? ` · closed ${batch.closed_at_ist}` : ""}
+              </span>
+              {bs.isBalanced != null ? (
+                <span
+                  className={[
+                    "ml-auto text-[10px] font-semibold px-1.5 py-0.5 rounded",
+                    bs.isBalanced
+                      ? "bg-[#eaf6ed] text-[#1d8102]"
+                      : "bg-[#fdf3f1] text-[#b1361e]",
+                  ].join(" ")}
+                >
+                  {bs.isBalanced ? "Balanced" : "Not balanced"}
+                </span>
+              ) : null}
+            </summary>
+            <div className="px-3 pb-3 pt-2 border-t border-[var(--aws-border)]">
+              {renderHeadlines(bs, batchUnbalanced)}
+              <SummaryGrid summary={bs} />
+            </div>
+          </details>
+        );
+      })}
     </Panel>
+  );
+}
+
+// ── Additive "Others" picker — live typeahead against /sku-lookup ─────
+//
+// Mounted only when the additive row has sku_name === "_other". Lets
+// the operator search the global all_sku catalog (not just the curated
+// additive category list) so any registered material can be tracked.
+// Free-typed text is still preserved if the operator wants an off-
+// catalog name — the dropdown is a suggestion, not a constraint.
+function AdditiveOtherPicker({
+  value, onChange, disabled, className,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const [opts, setOpts] = useState<string[]>([]);
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(-1);
+  const blurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const q = value.trim();
+    if (q.length < 2) {
+      setOpts([]);
+      setOpen(false);
+      setActive(-1);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const res = await apiFetch(
+          `/api/v1/so/sku-lookup?search=${encodeURIComponent(q)}`,
+        );
+        if (!res.ok) return;
+        const j = (await res.json()) as {
+          options?: { particulars?: string[] };
+        };
+        const list = (j.options?.particulars ?? [])
+          .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+          .slice(0, 25);
+        if (cancelled) return;
+        setOpts(list);
+        // Auto-open only when we actually have suggestions to show —
+        // avoids an empty popover hanging around on a no-match query.
+        setOpen(list.length > 0);
+        setActive(-1);
+      } catch {
+        /* network blip — leave the dropdown alone; the typed text
+           remains valid as a free-text custom material name. */
+      }
+    }, 250);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [value]);
+
+  function pick(name: string) {
+    onChange(name);
+    setOpen(false);
+    setActive(-1);
+  }
+
+  return (
+    <div className={`relative ${className ?? ""}`}>
+      <input
+        type="text"
+        placeholder="Search SKU…"
+        className={inputCls}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onFocus={() => {
+          if (opts.length > 0) setOpen(true);
+        }}
+        onBlur={() => {
+          // Delay close so a mousedown on an option still fires.  The
+          // ref-stored timer is cleared on unmount so a fast-typing
+          // operator doesn't keep the dropdown open after the picker
+          // unmounts (sku_name flipped off "_other").
+          blurTimer.current = setTimeout(() => setOpen(false), 150);
+        }}
+        onKeyDown={(e) => {
+          if (!open || opts.length === 0) return;
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setActive((i) => Math.min(opts.length - 1, i + 1));
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setActive((i) => Math.max(0, i - 1));
+          } else if (e.key === "Enter" && active >= 0) {
+            e.preventDefault();
+            pick(opts[active]);
+          } else if (e.key === "Escape") {
+            setOpen(false);
+            setActive(-1);
+          }
+        }}
+        disabled={disabled}
+        aria-disabled={disabled}
+        autoComplete="off"
+        role="combobox"
+        aria-expanded={open}
+        aria-autocomplete="list"
+      />
+      {open && opts.length > 0 ? (
+        <ul
+          role="listbox"
+          className="absolute z-10 top-full left-0 right-0 mt-0.5 max-h-56 overflow-y-auto bg-white border border-[var(--aws-border-strong)] rounded-[2px] shadow-lg text-[12px]"
+        >
+          {opts.map((o, idx) => (
+            <li key={o}>
+              <button
+                type="button"
+                role="option"
+                aria-selected={idx === active}
+                onMouseDown={(e) => {
+                  // Pre-empt blur so the click lands before the
+                  // 150 ms close timer fires above.
+                  e.preventDefault();
+                  if (blurTimer.current) clearTimeout(blurTimer.current);
+                  pick(o);
+                }}
+                className={[
+                  "w-full text-left px-2 py-1.5 hover:bg-[var(--surface-subtle)]",
+                  idx === active ? "bg-[var(--surface-subtle)]" : "",
+                ].join(" ")}
+              >
+                {o}
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 
@@ -3924,7 +5443,7 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
     } catch (e) {
       setNotifyFeedback({
         kind: "err",
-        msg: e instanceof Error ? e.message : "Failed to notify QC.",
+        msg: friendlyApiError(e),
       });
     } finally {
       setNotifyingQc(false);
@@ -3963,7 +5482,7 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
       setMdFailed(""); setMdDough(""); setMdOven(""); setMdBaking(""); setMdRemarks("");
       onReload();
     } catch (e) {
-      setFeedback({ kind: "err", msg: e instanceof Error ? e.message : "Failed to save metal check." });
+      setFeedback({ kind: "err", msg: friendlyApiError(e) });
     } finally {
       setAddingMetal(false);
     }
@@ -4063,16 +5582,18 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
       setFeedback({ kind: "ok", msg: "Quality saved." });
       onReload();
     } catch (e) {
-      setFeedback({ kind: "err", msg: e instanceof Error ? e.message : "Failed to save quality." });
+      setFeedback({ kind: "err", msg: friendlyApiError(e) });
     } finally {
       setProgress(null);
       setSavingQuality(false);
     }
   }
 
-  // Per-section disabled flags — combined with the lock state.
-  const metalDisabled = addingMetal || lock.isLocked;
-  const qualityDisabled = savingQuality || lock.isLocked;
+  // Per-section disabled flags — combined with the lock state + R10
+  // lifecycle gate (fields stay read-only until START is clicked).
+  const lifecycleLocked = isLifecycleLocked(detail.status);
+  const metalDisabled = addingMetal || lock.isLocked || lifecycleLocked;
+  const qualityDisabled = savingQuality || lock.isLocked || lifecycleLocked;
 
   return (
     <>

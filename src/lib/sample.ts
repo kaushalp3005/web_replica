@@ -5,7 +5,7 @@
 
 import { apiFetch, readApiErrorMessage } from "./auth";
 
-export type SampleType = "BASIS_RM" | "BASIS_FG" | "NPD" | "INTERNAL";
+export type SampleType = "BASIS_RM" | "BASIS_FG" | "NPD" | "INTERNAL" | "TRIAL";
 
 export type SampleStatus =
   | "DRAFT" | "SUBMITTED" | "BH_APPROVED" | "BH_REJECTED"
@@ -17,6 +17,11 @@ export type ArticleRole = "RM" | "FG" | "NPD_INPUT" | "NPD_OUTPUT";
 export type PurposeTag =
   | "CUSTOMER_DISPLAY" | "CUSTOMER_ISSUE" | "TASTING_SENSORY"
   | "PHYSICAL_PARAMETERS" | "INTERNAL_OTHER";
+
+export type Warehouse =
+  | "W202" | "A185" | "A68" | "F53" | "A101" | "D-39" | "D-514" | "Rishi" | "Supreme";
+export const WAREHOUSES: Warehouse[] =
+  ["W202", "A185", "A68", "F53", "A101", "D-39", "D-514", "Rishi", "Supreme"];
 
 export interface Article {
   id?: number;
@@ -55,6 +60,7 @@ export interface AuditEntry {
 
 export interface Requisition {
   id: number;
+  request_id?: number;               // 8-digit BIGINT request handle (generated)
   requisition_number: string;
   sample_type: SampleType;
   status: SampleStatus;
@@ -63,12 +69,16 @@ export interface Requisition {
   purpose_tag?: PurposeTag | null;
   purpose_note?: string | null;
   base_bom_id?: number | null;
+  npd_target_name?: string | null;   // requested new NPD article name
+  quantity?: number | null;          // requested quantity (free float)
   npd_draft_bom_id?: number | null;
   linked_job_card_id?: number | null;
   linked_gate_pass_id?: number | null;
   converted_from_id?: number | null;
   converted_to_external?: boolean;
-  entity?: string;
+  warehouse?: string;
+  transporter_name?: string | null;
+  vehicle_number?: string | null;
   cancellation_reason?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
@@ -101,7 +111,7 @@ export interface GatePass {
   last_printed_at?: string | null;
   voided?: boolean;
   void_reason?: string | null;
-  entity?: string;
+  warehouse?: string;
   sample_details?: GatePassDetails | null;
 }
 
@@ -114,6 +124,10 @@ export interface NpdLine {
   item_type?: "rm" | "pm" | null;
   delta_type?: "UNCHANGED" | "ADDED" | "MODIFIED" | "REMOVED";
   original_qty?: number | string | null;
+  // Per-ingredient ownership (NPD plan §3). CUSTOMER / off-master lines are
+  // recorded for traceability only — they get no inventory posting.
+  ownership?: "OWN" | "CUSTOMER";
+  is_off_master?: boolean;
   line_order?: number;
   notes?: string | null;
 }
@@ -147,7 +161,7 @@ function post(path: string, body?: unknown): Promise<Response> {
 export interface ListFilters {
   status?: string;
   sample_type?: string;
-  entity?: string;
+  warehouse?: string;
   limit?: number;
   offset?: number;
 }
@@ -156,7 +170,7 @@ export async function listRequisitions(f: ListFilters = {}): Promise<Requisition
   const q = new URLSearchParams();
   if (f.status) q.set("status", f.status);
   if (f.sample_type) q.set("sample_type", f.sample_type);
-  if (f.entity) q.set("entity", f.entity);
+  if (f.warehouse) q.set("warehouse", f.warehouse);
   q.set("limit", String(f.limit ?? 50));
   q.set("offset", String(f.offset ?? 0));
   return jsonOrThrow(await apiFetch(`/api/v1/sample/requisitions?${q}`), "Failed to load requisitions");
@@ -168,13 +182,19 @@ export async function getRequisition(id: number): Promise<Requisition> {
 
 export interface RequisitionCreate {
   sample_type: SampleType;
-  entity?: string;
+  warehouse: Warehouse;
   requestor_team?: string;
   purpose_tag?: PurposeTag;
   purpose_note?: string;
   base_bom_id?: number;
+  npd_target_name?: string;
+  quantity?: number;
   internal_override?: boolean;
-  articles: Array<Omit<Article, "id" | "issued_qty">>;
+  transporter_name?: string;
+  vehicle_number?: string;
+  // Optional — issuance flows (Basis RM/FG, Internal) send article lines; NPD /
+  // TRIAL requests omit them (the backend defaults to an empty list).
+  articles?: Array<Omit<Article, "id" | "issued_qty">>;
 }
 
 export async function createRequisition(body: RequisitionCreate): Promise<Requisition> {
@@ -262,16 +282,37 @@ interface SkuLookupResponse {
 
 export async function skuSearch(text: string): Promise<string[]> {
   if (!text.trim()) return [];
-  const res = await apiFetch(`/api/v1/so/sku-lookup?search=${encodeURIComponent(text)}`);
-  if (!res.ok) return [];
-  const data = (await res.json()) as SkuLookupResponse;
-  return (data.options?.particulars ?? []).slice(0, 25);
+  // Browser-level fetch errors (server down, DNS, CORS preflight reject)
+  // throw — without this catch the SkuPicker useEffect surfaced the
+  // raw "TypeError: Failed to fetch" as an uncaught render error
+  // overlay. The picker treats "no options" as the safe default state,
+  // so swallowing the network error here lets the page keep working
+  // (the operator sees an empty dropdown until the backend comes back).
+  try {
+    const res = await apiFetch(`/api/v1/so/sku-lookup?search=${encodeURIComponent(text)}`);
+    if (!res.ok) return [];
+    const data = (await res.json()) as SkuLookupResponse;
+    return (data.options?.particulars ?? []).slice(0, 25);
+  } catch {
+    return [];
+  }
 }
 
 export async function skuDetail(particulars: string): Promise<{ sku_id: number; sku_name: string } | null> {
-  const res = await apiFetch(`/api/v1/so/sku-lookup?particulars=${encodeURIComponent(particulars)}`);
-  if (!res.ok) return null;
-  const data = (await res.json()) as SkuLookupResponse;
-  const it = data.selected_item;
-  return it ? { sku_id: it.sku_id, sku_name: it.particulars } : null;
+  try {
+    const res = await apiFetch(`/api/v1/so/sku-lookup?particulars=${encodeURIComponent(particulars)}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as SkuLookupResponse;
+    const it = data.selected_item;
+    return it ? { sku_id: it.sku_id, sku_name: it.particulars } : null;
+  } catch {
+    return null;
+  }
 }
+
+// ── SKU cascade (material_type → item_category → sub_category → particulars) ──
+// The requisition Articles section drives the same four-dropdown cascade the
+// PO/SO manual-entry form uses, all off /api/v1/so/sku-lookup. Re-export the SO
+// client's typed lookup (which returns both the filtered option lists and, when
+// `particulars` is passed, the resolved SKU) so the sample form reuses it.
+export { lookupSku, type SkuLookupParams, type SkuLookupResponse } from "./so";

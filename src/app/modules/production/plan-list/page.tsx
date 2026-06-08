@@ -18,6 +18,7 @@ import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
 import { userStore } from "@/lib/auth";
 import { useRequireAuth, useUserInitial } from "@/lib/user";
+import { friendlyApiError } from "@/lib/apiErrors";
 import { BackLink } from "@/components/BackLink";
 import {
   type PlanRow,
@@ -135,7 +136,7 @@ export default function PlanListPage() {
         setPagination(resp.pagination ?? {});
       } catch (e) {
         if (c.signal.aborted) return;
-        setError(e instanceof Error ? e.message : "Failed to load plans");
+        setError(friendlyApiError(e));
       } finally {
         if (!c.signal.aborted) setLoading(false);
       }
@@ -206,7 +207,7 @@ export default function PlanListPage() {
       setConfirm(null);
       reload();
     } catch (e) {
-      setToast(`Approve failed: ${e instanceof Error ? e.message : "unknown"}`);
+      setToast(`Approve failed: ${friendlyApiError(e)}`);
     } finally {
       setBusy(false);
     }
@@ -221,7 +222,7 @@ export default function PlanListPage() {
       setConfirm(null);
       reload();
     } catch (e) {
-      setToast(`Cancel failed: ${e instanceof Error ? e.message : "unknown"}`);
+      setToast(`Cancel failed: ${friendlyApiError(e)}`);
     } finally {
       setBusy(false);
     }
@@ -1068,7 +1069,7 @@ function PlanInlinePreview({
         const d = await getPlan(planId, c.signal);
         if (!c.signal.aborted) setDetail(d);
       } catch (e) {
-        if (!c.signal.aborted) setError(e instanceof Error ? e.message : "Failed to load plan");
+        if (!c.signal.aborted) setError(friendlyApiError(e));
       } finally {
         if (!c.signal.aborted) setLoading(false);
       }

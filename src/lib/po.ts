@@ -214,6 +214,24 @@ export async function deletePo(transactionNo: string, reason: string): Promise<P
   return res.json();
 }
 
+// ── QC Intimation ──────────────────────────────────────────────────────────────
+export interface QcIntimationBody { line_numbers: number[]; vehicle_number: string; invoice_no: string; }
+export interface QcIntimationRecipient { role: string; phone: string; status: string; error?: string | null; }
+export interface QcIntimationResult {
+  template: string;
+  recipients: QcIntimationRecipient[];
+  skipped: { role: string; reason: string }[];
+  errors: string[];
+}
+export async function sendQcIntimation(transactionNo: string, body: QcIntimationBody): Promise<QcIntimationResult> {
+  const res = await apiFetch(`/api/v1/po/${encodeURIComponent(transactionNo)}/intimation`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (res.status === 404) throw new Error("QC intimation isn't available on this backend yet.");
+  if (!res.ok) throw new Error(await readError(res, "Failed to send intimation"));
+  return res.json();
+}
+
 // Manual create — backend route pending. Mirrors manual-entry.js payload.
 // TODO: type the payload + return once POST /api/v1/purchase/create is implemented on the backend.
 export async function createPo(payload: Record<string, unknown>): Promise<unknown> {

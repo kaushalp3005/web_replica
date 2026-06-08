@@ -21,6 +21,7 @@ import {
   updateSo,
 } from "@/lib/so";
 import { registerOnSignOut, userStore } from "@/lib/auth";
+import { friendlyApiError } from "@/lib/apiErrors";
 import { sessionLoad, sessionSave, sessionClear } from "@/lib/session-state";
 
 // Detail endpoint and list endpoint both return wrapped { line, gst_recon }
@@ -166,7 +167,7 @@ export default function ManualSoUpdatePage() {
         hadDraftRef.current = false;
       } catch (e) {
         if (controller.signal.aborted) return;
-        setError(e instanceof Error ? e.message : "Failed to load SO");
+        setError(friendlyApiError(e));
       } finally {
         if (!controller.signal.aborted) setLoading(false);
       }
@@ -248,7 +249,7 @@ export default function ManualSoUpdatePage() {
       if (e instanceof SoStaleError) {
         setFeedback({ kind: "err", msg: "The SO changed in the database since you opened it. Reload and re-apply your edits." });
       } else {
-        setFeedback({ kind: "err", msg: e instanceof Error ? e.message : "Update failed." });
+        setFeedback({ kind: "err", msg: friendlyApiError(e) });
       }
     } finally {
       setSubmitting(false);

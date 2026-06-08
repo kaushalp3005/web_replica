@@ -10,6 +10,11 @@ export interface ModuleItem {
   stat: string;
   route: string;
   implemented?: boolean;
+  // Hide the tile from non-admins on /modules AND have each module's root
+  // page inline-gate itself for direct navigation. Matches the existing
+  // Admin tile's pattern (route === "admin" was previously hardcoded in
+  // /modules/page.tsx; folded into the flag so the rule lives in one place).
+  adminOnly?: boolean;
   Icon: ComponentType<SVGProps<SVGSVGElement>>;
 }
 
@@ -19,6 +24,16 @@ function PurchaseIcon(props: SVGProps<SVGSVGElement>) {
       <path d="M3 4h2l2.4 11.2a2 2 0 0 0 2 1.6h7.6a2 2 0 0 0 2-1.5L21 8H7" />
       <circle cx="9" cy="20" r="1.4" />
       <circle cx="17" cy="20" r="1.4" />
+    </svg>
+  );
+}
+
+function QcIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" />
+      <rect x="9" y="3" width="6" height="4" rx="1" />
+      <path d="M9 12l2 2 4-4" />
     </svg>
   );
 }
@@ -55,6 +70,17 @@ function SampleIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function TransferIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M4 8h13" />
+      <path d="M14 5l3 3-3 3" />
+      <path d="M20 16H7" />
+      <path d="M10 13l-3 3 3 3" />
+    </svg>
+  );
+}
+
 function AdminIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
@@ -75,7 +101,19 @@ export const MODULES: ModuleItem[] = [
     stat: "PO Creation & Receiving",
     route: "purchase",
     implemented: true,
+    adminOnly: true,
     Icon: PurchaseIcon,
+  },
+  {
+    title: "QC",
+    description:
+      "Inward inspection, readings capture, COA, and verdict — quality gating for incoming material.",
+    badge: "Core",
+    stat: "Inspect & decide",
+    route: "qc",
+    implemented: true,
+    adminOnly: true,
+    Icon: QcIcon,
   },
   {
     title: "Production",
@@ -105,7 +143,19 @@ export const MODULES: ModuleItem[] = [
     stat: "Requisitions · Approvals · Gate passes",
     route: "sample",
     implemented: true,
+    adminOnly: true,
     Icon: SampleIcon,
+  },
+  {
+    title: "Inter-Unit Transfer",
+    description:
+      "Raise transfer requests, dispatch stock between units (warehouse & cold), receive against GRN, and track in-transit pending stock across CFPL/CDPL.",
+    badge: "Logistics",
+    stat: "Requests · Dispatch · Receive · In-Transit",
+    route: "transfer",
+    implemented: true,
+    adminOnly: true,
+    Icon: TransferIcon,
   },
   {
     title: "Admin",
@@ -115,6 +165,7 @@ export const MODULES: ModuleItem[] = [
     stat: "Users · Roles · Permissions",
     route: "admin",
     implemented: true,
+    adminOnly: true,
     Icon: AdminIcon,
   },
 ];

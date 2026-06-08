@@ -95,6 +95,37 @@ export function useIsAdmin(): boolean {
   }, [me]);
 }
 
+// Role membership selector. Returns true when the signed-in user holds the
+// given role_name (or is an admin, who supersedes every role gate). Walks the
+// same MeResponse shapes as useIsAdmin (bare string roles + role envelopes).
+export function useHasRole(roleName: string): boolean {
+  const me = useMe();
+  const isAdmin = useIsAdmin();
+  return useMemo(() => {
+    if (isAdmin) return true;
+    if (!me) return false;
+    const roles = Array.isArray(me.roles) ? me.roles : null;
+    if (!roles) return false;
+    for (const r of roles) {
+      if (typeof r === "string") {
+        if (r === roleName) return true;
+        continue;
+      }
+      if (r && typeof r === "object") {
+        const env = r as MeRoleEnvelope;
+        if (env.code === roleName || env.role_name === roleName) return true;
+      }
+    }
+    return false;
+  }, [me, isAdmin, roleName]);
+}
+
+// Convenience: QC manager (or admin). Gates the verdict control and the
+// post-approval readings edit/add/delete actions in the QC module.
+export function useIsQcManager(): boolean {
+  return useHasRole("qc_manager");
+}
+
 // C1 (Wave 4): extracted helper used by the JC list page row actions and
 // the detail-page Force-Unlock CTA. Returns the canonical effective lock
 // state for a row record — needs only the four fields the list endpoint

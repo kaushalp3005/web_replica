@@ -1,18 +1,23 @@
 "use client";
 
-// Sample requisition wizard (checklist B3) — 4 steps covering all sample types.
-// Articles are sourced ONLY from the SKU lookup (free-text is rejected by the
-// API, 422). Saves a DRAFT, optionally submits for BH approval.
+// New sample requisition — RM / FG / Internal sample types on ONE form (no
+// wizard steps). NPD has its own dedicated section (modules/sample/npd), so it
+// is intentionally NOT offered here. The stages are kept as numbered sections:
+// 1 Type & purpose · 2 Articles · 3 Details · 4 Review. Articles come ONLY from
+// the SKU lookup (free-text is rejected by the API, 422). Saves a DRAFT,
+// optionally submits for BH approval.
 
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
+import { Breadcrumbs, SAMPLE_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial } from "@/lib/user";
 import {
-  createRequisition, submitRequisition, skuSearch, skuDetail,
-  type SampleType, type ArticleRole, type PurposeTag,
+  createRequisition, submitRequisition, WAREHOUSES,
+  type SampleType, type ArticleRole, type PurposeTag, type Warehouse,
 } from "@/lib/sample";
 import { TYPE_LABEL } from "../_shared";
+import { FormSection, ReviewRow, ArticlePicker } from "../_form";
 
 interface DraftArticle {
   sku_id: number;
@@ -24,6 +29,10 @@ interface DraftArticle {
   notes?: string;
 }
 
+// NPD and TRIAL have their own sections (Convert / Trials), so the generic form
+// only offers the straight RM / FG / Internal sample types.
+const TYPE_OPTIONS = (Object.keys(TYPE_LABEL) as SampleType[]).filter((t) => t !== "NPD" && t !== "TRIAL");
+
 const PURPOSE_OPTIONS: { value: PurposeTag; label: string }[] = [
   { value: "CUSTOMER_DISPLAY", label: "Customer display" },
   { value: "CUSTOMER_ISSUE", label: "Customer issue" },
@@ -32,97 +41,40 @@ const PURPOSE_OPTIONS: { value: PurposeTag; label: string }[] = [
   { value: "INTERNAL_OTHER", label: "Internal / other" },
 ];
 
-const ROLE_OPTIONS: ArticleRole[] = ["RM", "FG", "NPD_INPUT", "NPD_OUTPUT"];
+// NPD_INPUT / NPD_OUTPUT roles belong to the NPD section; the generic form
+// only deals with raw-material and finished-good lines.
+const ROLE_OPTIONS: ArticleRole[] = ["RM", "FG"];
 
 function defaultRole(t: SampleType): ArticleRole {
   if (t === "BASIS_RM") return "RM";
   if (t === "BASIS_FG") return "FG";
-  if (t === "NPD") return "NPD_OUTPUT";
   return "RM";
 }
 
-// ── SKU picker ──────────────────────────────────────────────────────────────
-function SkuPicker({ onPick }: { onPick: (s: { sku_id: number; sku_name: string }) => void }) {
-  const [text, setText] = useState("");
-  const [opts, setOpts] = useState<string[]>([]);
-  const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    // All setState lives inside the debounced timeout so none of it runs
-    // synchronously in the effect body (react-hooks/set-state-in-effect).
-    let cancelled = false;
-    const t = setTimeout(async () => {
-      if (!text.trim()) { setOpts([]); setOpen(false); return; }
-      const list = await skuSearch(text);
-      if (!cancelled) { setOpts(list); setOpen(true); }
-    }, 250);
-    return () => { cancelled = true; clearTimeout(t); };
-  }, [text]);
-
-  async function pick(name: string) {
-    setBusy(true);
-    try {
-      const detail = await skuDetail(name);
-      if (detail) onPick(detail);
-    } finally {
-      setBusy(false);
-      setText(""); setOpts([]); setOpen(false);
-    }
-  }
-
-  return (
-    <div className="relative">
-      <input
-        className="form-input" placeholder="Search article (SKU master)…" value={text}
-        onChange={(e) => setText(e.target.value)} onFocus={() => opts.length && setOpen(true)}
-        onBlur={() => setTimeout(() => setOpen(false), 150)}
-        disabled={busy}
-      />
-      {open && opts.length > 0 && (
-        <ul className="absolute z-10 mt-1 w-full max-h-60 overflow-auto bg-white border border-[var(--aws-border-strong)] rounded-[2px] shadow-md">
-          {opts.map((o) => (
-            <li key={o}>
-              {/* onMouseDown + preventDefault: fires before the input's blur and
-                  keeps focus, so the selection always registers (an onClick here
-                  races the onBlur close timer and can be dropped). */}
-              <button type="button" onMouseDown={(e) => { e.preventDefault(); pick(o); }}
-                className="block w-full text-left px-3 py-1.5 text-[13px] hover:bg-[var(--surface-subtle)]">{o}</button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-export default function SampleWizardPage() {
+export default function SampleFormPage() {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
   const initial = useUserInitial();
 
-  const [step, setStep] = useState(1);
   const [sampleType, setSampleType] = useState<SampleType | "">("");
-  const [entity, setEntity] = useState("");
+  const [warehouse, setWarehouse] = useState<Warehouse | "">("");
   const [purposeTag, setPurposeTag] = useState<PurposeTag | "">("");
   const [purposeNote, setPurposeNote] = useState("");
   const [requestorTeam, setRequestorTeam] = useState("");
   const [baseBomId, setBaseBomId] = useState("");
   const [internalOverride, setInternalOverride] = useState(false);
+  const [transporterName, setTransporterName] = useState("");
+  const [vehicleNumber, setVehicleNumber] = useState("");
   const [articles, setArticles] = useState<DraftArticle[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Once the DRAFT is created we stash its id so a failed submit can be retried
-  // (Save & submit) WITHOUT creating a second duplicate requisition.
+  // Stash the created DRAFT id so a failed submit retries submit-only (no dup).
   const [savedId, setSavedId] = useState<number | null>(null);
 
-  const needsBom = sampleType === "BASIS_FG" || sampleType === "NPD";
-
-  const stepOk = useMemo(() => {
-    if (step === 1) return !!sampleType && (entity === "cfpl" || entity === "cdpl");
-    if (step === 2) return articles.length > 0 && articles.every((a) => Number(a.required_qty) > 0 && a.uom.trim());
-    return true;
-  }, [step, sampleType, entity, articles]);
+  const needsBom = sampleType === "BASIS_FG";
+  const canCreate = !!sampleType && !!warehouse;
+  const articlesValid = articles.length > 0 && articles.every((a) => Number(a.required_qty) > 0 && a.uom.trim());
+  const canSubmit = canCreate && articlesValid;
 
   function addArticle(s: { sku_id: number; sku_name: string }) {
     if (articles.some((a) => a.sku_id === s.sku_id)) return;
@@ -146,12 +98,14 @@ export default function SampleWizardPage() {
       if (reqId == null) {
         const req = await createRequisition({
           sample_type: sampleType,
-          entity,
+          warehouse: warehouse as Warehouse,
           requestor_team: requestorTeam || undefined,
           purpose_tag: purposeTag || undefined,
           purpose_note: purposeNote || undefined,
           base_bom_id: baseBomId ? Number(baseBomId) : undefined,
           internal_override: internalOverride,
+          transporter_name: transporterName || undefined,
+          vehicle_number: vehicleNumber || undefined,
           articles: articles.map((a) => ({
             sku_id: a.sku_id, sku_name: a.sku_name, required_qty: Number(a.required_qty),
             uom: a.uom, article_role: a.article_role,
@@ -186,168 +140,154 @@ export default function SampleWizardPage() {
       </header>
 
       <main className="flex-1 max-w-[820px] w-full mx-auto px-4 sm:px-6 py-6">
-        {/* Stepper */}
-        <ol className="flex items-center gap-2 mb-6 text-[12px]">
-          {["Type & purpose", "Articles", "Details", "Review"].map((label, i) => {
-            const n = i + 1;
-            const done = n < step, active = n === step;
-            return (
-              <li key={label} className="flex items-center gap-2">
-                <span className={`w-6 h-6 rounded-full flex items-center justify-center font-semibold ${active ? "bg-[var(--aws-orange)] text-white" : done ? "bg-[#a7f3d0] text-[#047857]" : "bg-[var(--surface-divider)] text-[var(--text-muted)]"}`}>{n}</span>
-                <span className={`hidden sm:inline ${active ? "text-[var(--text-primary)] font-medium" : "text-[var(--text-secondary)]"}`}>{label}</span>
-                {n < 4 && <span className="w-5 h-px bg-[var(--aws-border)]" />}
-              </li>
-            );
-          })}
-        </ol>
+        <Breadcrumbs items={[...SAMPLE_ROOT, { label: "New requisition" }]} className="mb-3" />
+        <h1 className="text-[20px] font-semibold text-[var(--text-primary)] mb-4">New sample requisition</h1>
 
         {error && <div className="mb-4 rounded-md border border-[#f0c7be] bg-[#fdf3f1] px-3 py-2 text-[13px] text-[#b1361e]">{error}</div>}
 
-        <div className="bg-white border border-[var(--aws-border)] rounded-md p-5">
-          {step === 1 && (
-            <div className="space-y-4">
-              <div>
-                <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Sample type</label>
-                <div className="grid grid-cols-2 gap-2">
-                  {(Object.keys(TYPE_LABEL) as SampleType[]).map((t) => (
-                    <button key={t} type="button" onClick={() => setSampleType(t)}
-                      className={`text-left px-3 py-2 rounded-md border text-[13px] ${sampleType === t ? "border-[var(--aws-orange)] bg-[#fbeced]" : "border-[var(--aws-border)] hover:border-[var(--aws-border-strong)]"}`}>
-                      <span className="font-medium">{TYPE_LABEL[t]}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Entity</label>
-                  <select className="form-input" value={entity} onChange={(e) => setEntity(e.target.value)}>
-                    <option value="">Select…</option><option value="cfpl">CFPL</option><option value="cdpl">CDPL</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Purpose</label>
-                  <select className="form-input" value={purposeTag} onChange={(e) => setPurposeTag(e.target.value as PurposeTag)}>
-                    <option value="">Select…</option>
-                    {PURPOSE_OPTIONS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Purpose note (optional)</label>
-                <input className="form-input" value={purposeNote} onChange={(e) => setPurposeNote(e.target.value)} />
-              </div>
-              <div>
-                <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Requestor team (optional)</label>
-                <input className="form-input" value={requestorTeam} onChange={(e) => setRequestorTeam(e.target.value)} />
-              </div>
+        {/* 1 · Type & purpose */}
+        <FormSection n={1} title="Type & purpose">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Sample type</label>
+              <select className="form-input" value={sampleType} onChange={(e) => setSampleType(e.target.value as SampleType)}>
+                <option value="">Select…</option>
+                {TYPE_OPTIONS.map((t) => <option key={t} value={t}>{TYPE_LABEL[t]}</option>)}
+              </select>
             </div>
-          )}
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Warehouse</label>
+              <select className="form-input" value={warehouse} onChange={(e) => setWarehouse(e.target.value as Warehouse)}>
+                <option value="">Select…</option>
+                {WAREHOUSES.map((w) => <option key={w} value={w}>{w}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Purpose</label>
+              <select className="form-input" value={purposeTag} onChange={(e) => setPurposeTag(e.target.value as PurposeTag)}>
+                <option value="">Select…</option>
+                {PURPOSE_OPTIONS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Requestor team (optional)</label>
+              <input className="form-input" value={requestorTeam} onChange={(e) => setRequestorTeam(e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Transporter name (optional)</label>
+              <input className="form-input" value={transporterName} onChange={(e) => setTransporterName(e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Vehicle number (optional)</label>
+              <input className="form-input" value={vehicleNumber} onChange={(e) => setVehicleNumber(e.target.value)} />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Purpose note (optional)</label>
+              <input className="form-input" value={purposeNote} onChange={(e) => setPurposeNote(e.target.value)} />
+            </div>
+          </div>
+        </FormSection>
 
-          {step === 2 && (
-            <div className="space-y-4">
-              <SkuPicker onPick={addArticle} />
-              {articles.length === 0 ? (
-                <p className="text-[13px] text-[var(--text-muted)]">No articles yet. Search the SKU master above to add lines.</p>
-              ) : (
-                <div className="space-y-2">
-                  {articles.map((a, i) => (
-                    <div key={a.sku_id} className="border border-[var(--aws-border)] rounded-md p-3">
-                      <div className="flex items-center justify-between gap-2 mb-2">
-                        <span className="text-[13px] font-medium text-[var(--text-primary)]">{a.sku_name}</span>
-                        <button onClick={() => removeArticle(i)} className="text-[12px] text-[var(--aws-error)] hover:underline">Remove</button>
-                      </div>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                        <label className="text-[11px] text-[var(--text-secondary)]">Qty
-                          <input className="form-input mt-0.5" type="number" min="0" step="0.001" value={a.required_qty}
-                            onChange={(e) => patchArticle(i, { required_qty: e.target.value })} />
-                        </label>
-                        <label className="text-[11px] text-[var(--text-secondary)]">UOM
-                          <input className="form-input mt-0.5" value={a.uom} onChange={(e) => patchArticle(i, { uom: e.target.value })} />
-                        </label>
-                        <label className="text-[11px] text-[var(--text-secondary)]">Role
-                          <select className="form-input mt-0.5" value={a.article_role} onChange={(e) => patchArticle(i, { article_role: e.target.value as ArticleRole })}>
-                            {ROLE_OPTIONS.map((r) => <option key={r} value={r}>{r}</option>)}
-                          </select>
-                        </label>
-                        <label className="text-[11px] text-[var(--text-secondary)]">Pack kg
-                          <input className="form-input mt-0.5" type="number" min="0" step="0.001" value={a.pack_size_kg ?? ""}
-                            onChange={(e) => patchArticle(i, { pack_size_kg: e.target.value })} />
-                        </label>
-                      </div>
+        {/* 2 · Articles */}
+        <FormSection n={2} title="Articles">
+          <div className="space-y-4">
+            <ArticlePicker onAdd={addArticle} />
+            {articles.length === 0 ? (
+              <p className="text-[13px] text-[var(--text-muted)]">No articles yet. Use the dropdowns above to add lines.</p>
+            ) : (
+              <div className="space-y-2">
+                {articles.map((a, i) => (
+                  <div key={a.sku_id} className="border border-[var(--aws-border)] rounded-md p-3">
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <span className="text-[13px] font-medium text-[var(--text-primary)]">{a.sku_name}</span>
+                      <button onClick={() => removeArticle(i)} className="text-[12px] text-[var(--aws-error)] hover:underline">Remove</button>
                     </div>
-                  ))}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <label className="text-[11px] text-[var(--text-secondary)]">Qty
+                        <input className="form-input mt-0.5" type="number" min="0" step="0.001" value={a.required_qty}
+                          onChange={(e) => patchArticle(i, { required_qty: e.target.value })} />
+                      </label>
+                      <label className="text-[11px] text-[var(--text-secondary)]">UOM
+                        <input className="form-input mt-0.5" value={a.uom} onChange={(e) => patchArticle(i, { uom: e.target.value })} />
+                      </label>
+                      <label className="text-[11px] text-[var(--text-secondary)]">Role
+                        <select className="form-input mt-0.5" value={a.article_role} onChange={(e) => patchArticle(i, { article_role: e.target.value as ArticleRole })}>
+                          {ROLE_OPTIONS.map((r) => <option key={r} value={r}>{r}</option>)}
+                        </select>
+                      </label>
+                      <label className="text-[11px] text-[var(--text-secondary)]">Pack kg
+                        <input className="form-input mt-0.5" type="number" min="0" step="0.001" value={a.pack_size_kg ?? ""}
+                          onChange={(e) => patchArticle(i, { pack_size_kg: e.target.value })} />
+                      </label>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </FormSection>
+
+        {/* 3 · Details */}
+        <FormSection n={3} title="Details">
+          {!sampleType ? (
+            <p className="text-[13px] text-[var(--text-muted)]">Select a sample type to see type-specific details.</p>
+          ) : (
+            <div className="space-y-3">
+              {needsBom && (
+                <div>
+                  <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">
+                    Base BOM id <span className="text-[var(--aws-error)]">(required to start production)</span>
+                  </label>
+                  <input className="form-input sm:max-w-xs" type="number" value={baseBomId} onChange={(e) => setBaseBomId(e.target.value)} placeholder="e.g. 42" />
                 </div>
               )}
-            </div>
-          )}
-
-          {step === 3 && (
-            <div className="space-y-4">
-              <div>
-                <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">
-                  Base BOM id {needsBom && <span className="text-[var(--aws-error)]">(required to start production)</span>}
-                </label>
-                <input className="form-input" type="number" value={baseBomId} onChange={(e) => setBaseBomId(e.target.value)}
-                  placeholder={needsBom ? "e.g. 42" : "Not applicable for RM/Internal"} />
-                {sampleType === "NPD" && <p className="mt-1 text-[12px] text-[var(--text-muted)]">For NPD you can clone this BOM into a draft on the detail page after saving.</p>}
-              </div>
               {sampleType === "INTERNAL" && (
                 <label className="flex items-center gap-2 text-[13px] text-[var(--text-secondary)]">
                   <input type="checkbox" checked={internalOverride} onChange={(e) => setInternalOverride(e.target.checked)} />
                   Internal override (allow later conversion to external)
                 </label>
               )}
+              {sampleType === "BASIS_RM" && (
+                <p className="text-[13px] text-[var(--text-muted)]">No extra details for Basis RM — it goes straight to outward after approval.</p>
+              )}
             </div>
           )}
+        </FormSection>
 
-          {step === 4 && (
-            <div className="space-y-3 text-[13px]">
-              <Row label="Type" value={sampleType ? TYPE_LABEL[sampleType] : "—"} />
-              <Row label="Entity" value={entity.toUpperCase() || "—"} />
-              <Row label="Purpose" value={purposeTag || "—"} />
-              <Row label="Articles" value={`${articles.length} line(s)`} />
-              {needsBom && <Row label="Base BOM" value={baseBomId || "— (set before production)"} />}
-              <ul className="mt-2 border-t border-[var(--surface-divider)] pt-2">
-                {articles.map((a) => (
-                  <li key={a.sku_id} className="flex justify-between py-0.5">
-                    <span>{a.sku_name}</span>
-                    <span className="text-[var(--text-secondary)]">{a.required_qty} {a.uom} · {a.article_role}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
+        {/* 4 · Review */}
+        <FormSection n={4} title="Review">
+          <dl className="space-y-1.5 text-[13px]">
+            <ReviewRow label="Type" value={sampleType ? TYPE_LABEL[sampleType] : "—"} />
+            <ReviewRow label="Warehouse" value={warehouse || "—"} />
+            <ReviewRow label="Purpose" value={purposeTag || "—"} />
+            {needsBom && <ReviewRow label="Base BOM" value={baseBomId || "— (set before production)"} />}
+            {transporterName && <ReviewRow label="Transporter" value={transporterName} />}
+            {vehicleNumber && <ReviewRow label="Vehicle no." value={vehicleNumber} />}
+            <ReviewRow label="Articles" value={`${articles.length} line(s)`} />
+          </dl>
+          {articles.length > 0 && (
+            <ul className="mt-2 border-t border-[var(--surface-divider)] pt-2 text-[13px]">
+              {articles.map((a) => (
+                <li key={a.sku_id} className="flex justify-between py-0.5">
+                  <span>{a.sku_name}</span>
+                  <span className="text-[var(--text-secondary)]">{a.required_qty} {a.uom} · {a.article_role}</span>
+                </li>
+              ))}
+            </ul>
           )}
-        </div>
+        </FormSection>
 
-        {/* Nav */}
+        {/* Actions */}
         <div className="flex items-center gap-2 mt-5">
-          <button onClick={() => (step === 1 ? router.push("/modules/sample") : setStep(step - 1))}
-            className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] text-[13px] bg-white hover:bg-[var(--surface-subtle)]">
-            {step === 1 ? "Cancel" : "Back"}
-          </button>
+          <button onClick={() => router.push("/modules/sample")}
+            className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] text-[13px] bg-white hover:bg-[var(--surface-subtle)]">Cancel</button>
           <div className="flex-1" />
-          {step < 4 ? (
-            <button disabled={!stepOk} onClick={() => setStep(step + 1)}
-              className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Next</button>
-          ) : (
-            <>
-              <button disabled={saving} onClick={() => save(false)}
-                className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] text-[13px] bg-white hover:bg-[var(--surface-subtle)] disabled:opacity-50">Save draft</button>
-              <button disabled={saving} onClick={() => save(true)}
-                className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">{saving ? "Saving…" : "Save & submit"}</button>
-            </>
-          )}
+          <button disabled={saving || !canCreate} onClick={() => save(false)}
+            className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] text-[13px] bg-white hover:bg-[var(--surface-subtle)] disabled:opacity-50">Save draft</button>
+          <button disabled={saving || !canSubmit} onClick={() => save(true)}
+            className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">{saving ? "Saving…" : "Save & submit"}</button>
         </div>
       </main>
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between">
-      <span className="text-[var(--text-secondary)]">{label}</span>
-      <span className="font-medium text-[var(--text-primary)]">{value}</span>
     </div>
   );
 }

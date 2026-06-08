@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
-import { BackLink } from "@/components/BackLink";
+import { Breadcrumbs, SAMPLE_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
 import { sampleCaps } from "@/lib/sample-roles";
 import {
@@ -19,6 +19,7 @@ import {
   type Requisition, type NpdDraft, type NpdLine, type RecipientBody,
 } from "@/lib/sample";
 import { StatusPill, TYPE_LABEL } from "../_shared";
+import { ArticlePicker } from "../_form";
 
 type ModalMode =
   | null | "reject" | "cancel" | "gatePass" | "convertFull" | "convertPartial";
@@ -102,7 +103,11 @@ export default function SampleDetailPage() {
       </header>
 
       <main className="flex-1 max-w-[980px] w-full mx-auto px-4 sm:px-6 py-6">
-        <BackLink parentHref="/modules/sample" label="Sample" className="mb-3" />
+        <Breadcrumbs items={[
+          ...SAMPLE_ROOT,
+          ...(req && (req.sample_type === "NPD" || req.sample_type === "TRIAL") ? [{ label: "NPD", href: "/modules/sample/npd" }] : []),
+          { label: req?.requisition_number ?? String(id) },
+        ]} className="mb-3" />
 
         {error && <div className="mb-4 rounded-md border border-[#f0c7be] bg-[#fdf3f1] px-3 py-2 text-[13px] text-[#b1361e]">{error}</div>}
 
@@ -118,12 +123,18 @@ export default function SampleDetailPage() {
                 <h1 className="text-[20px] font-semibold text-[var(--text-primary)]">{req.requisition_number}</h1>
                 <StatusPill status={req.status} />
                 <span className="text-[12px] px-2 py-0.5 rounded bg-[var(--surface-divider)] text-[var(--text-secondary)]">{TYPE_LABEL[req.sample_type] ?? req.sample_type}</span>
-                <span className="text-[12px] uppercase text-[var(--text-muted)]">{req.entity}</span>
+                <span className="text-[12px] text-[var(--text-muted)]">{req.warehouse}</span>
               </div>
               <dl className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-y-2 gap-x-4 text-[13px]">
+                <Field label="Request ID" value={req.request_id != null ? String(req.request_id) : "—"} />
+                <Field label="Warehouse" value={req.warehouse ?? "—"} />
                 <Field label="Purpose" value={req.purpose_tag ?? "—"} />
                 <Field label="Team" value={req.requestor_team ?? "—"} />
+                {req.npd_target_name && <Field label="Target NPD article" value={req.npd_target_name} />}
+                <Field label="Quantity" value={req.quantity != null ? String(req.quantity) : "—"} />
                 <Field label="Base BOM" value={req.base_bom_id != null ? String(req.base_bom_id) : "—"} />
+                <Field label="Transporter" value={req.transporter_name ?? "—"} />
+                <Field label="Vehicle no." value={req.vehicle_number ?? "—"} />
                 <Field label="Created" value={(req.created_at ?? "").slice(0, 10)} />
               </dl>
               {req.purpose_note && <p className="mt-2 text-[13px] text-[var(--text-secondary)]">{req.purpose_note}</p>}
@@ -153,8 +164,8 @@ export default function SampleDetailPage() {
               )}
             </Card>
 
-            {/* NPD draft editor */}
-            {req.sample_type === "NPD" && (
+            {/* NPD / TRIAL draft editor (recipe override + ownership) */}
+            {(req.sample_type === "NPD" || req.sample_type === "TRIAL") && (
               <NpdSection req={req} caps={caps} onChange={refresh} />
             )}
 
@@ -231,7 +242,7 @@ function ActionBar({ req, caps, busy, run, setModal, printGatePass }: {
   }
   if (s === "BH_APPROVED") {
     if ((t === "BASIS_RM" || t === "INTERNAL") && caps.canInventory) P("outward", "Issue outward", () => run(() => issueOutward(req.id)), true);
-    if ((t === "BASIS_FG" || t === "NPD") && caps.canProduction) P("startprod", "Start production", () => run(() => startProduction(req.id)), true);
+    if ((t === "BASIS_FG" || t === "NPD" || t === "TRIAL") && caps.canProduction) P("startprod", "Start production", () => run(() => startProduction(req.id)), true);
   }
   if (s === "IN_PRODUCTION" && caps.canProduction) P("packing", "Mark packing", () => run(() => markPacking(req.id)), true);
   if (s === "PACKING" && caps.canInventory) P("ready", "Mark ready", () => run(() => markReady(req.id)), true);
@@ -291,7 +302,7 @@ function NpdSection({ req, caps, onChange }: { req: Requisition; caps: ReturnTyp
       {req.npd_draft_bom_id == null ? (
         caps.canNpd ? (
           <div className="flex flex-wrap gap-2">
-            <button disabled={busy} onClick={() => wrap(() => createNpdDraft(req.id, { base_bom_id: req.base_bom_id ?? undefined, clone_from_base: !!req.base_bom_id }))}
+            <button disabled={busy} onClick={() => wrap(() => createNpdDraft(req.id, { base_bom_id: req.base_bom_id ?? undefined, fg_sku_name: req.npd_target_name ?? undefined, clone_from_base: !!req.base_bom_id }))}
               className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">
               {req.base_bom_id ? "Create draft (clone base BOM)" : "Create empty draft"}
             </button>
@@ -304,20 +315,39 @@ function NpdSection({ req, caps, onChange }: { req: Requisition; caps: ReturnTyp
             <StatusPillSmall status={draft.status} />
             {draft.promoted_bom_id && <span className="text-[12px] text-[var(--text-success)]">→ BOM #{draft.promoted_bom_id}</span>}
           </div>
+          {/* Add materials — from the SKU master, or free-text off-master below. */}
+          {editable && (
+            <ArticlePicker restrictItemType="rm" onAdd={(s) => setLines((p) =>
+              p.some((x) => x.sku_id === s.sku_id) ? p
+                : [...p, { sku_id: s.sku_id, sku_name: s.sku_name, qty: "1", uom: "kg", item_type: "rm", ownership: "OWN", delta_type: "ADDED" }])} />
+          )}
           {lines.length === 0 ? <Empty>No lines.</Empty> : (
             <table className="w-full text-[13px]">
               <thead><tr className="text-left text-[12px] text-[var(--text-secondary)]">
-                <th className="py-1 font-semibold">Material</th><th className="py-1 font-semibold text-right">Qty</th><th className="py-1 font-semibold">UOM</th><th className="py-1 font-semibold">Type</th>{editable && <th />}
+                <th className="py-1 font-semibold">Material</th>
+                <th className="py-1 font-semibold text-right">Qty</th>
+                <th className="py-1 font-semibold">UOM</th>
+                <th className="py-1 font-semibold">Type</th>
+                <th className="py-1 font-semibold">Ownership</th>
+                {editable && <th />}
               </tr></thead>
               <tbody>
                 {lines.map((ln, i) => (
                   <tr key={ln.id ?? `new-${i}`} className="border-t border-[var(--surface-divider)]">
-                    <td className="py-1">{ln.sku_name}</td>
+                    <td className="py-1">{ln.sku_name}{ln.is_off_master ? <span className="text-[var(--text-muted)]"> · off-master</span> : null}</td>
                     <td className="py-1 text-right">{editable ? (
-                      <input className="form-input !h-7 !w-24 text-right" type="number" step="0.001" value={String(ln.qty)}
+                      <input className="form-input !h-7 !w-20 text-right" type="number" step="0.001" value={String(ln.qty)}
                         onChange={(e) => setLines((p) => p.map((x, idx) => idx === i ? { ...x, qty: e.target.value } : x))} />
                     ) : ln.qty}</td>
-                    <td className="py-1">{ln.uom}</td><td className="py-1">{ln.item_type ?? "—"}</td>
+                    <td className="py-1">{ln.uom}</td>
+                    <td className="py-1">{ln.item_type ?? "—"}</td>
+                    <td className="py-1">{editable ? (
+                      <select className="form-input !h-7 !w-28" value={ln.ownership ?? "OWN"}
+                        onChange={(e) => setLines((p) => p.map((x, idx) => idx === i ? { ...x, ownership: e.target.value as "OWN" | "CUSTOMER", is_off_master: e.target.value === "CUSTOMER" ? true : x.is_off_master } : x))}>
+                        <option value="OWN">Own</option>
+                        <option value="CUSTOMER">Customer</option>
+                      </select>
+                    ) : (ln.ownership === "CUSTOMER" ? <span className="text-[var(--aws-error)]">Customer</span> : "Own")}</td>
                     {editable && <td className="py-1 text-right"><button onClick={() => setLines((p) => p.filter((_, idx) => idx !== i))} className="text-[12px] text-[var(--aws-error)] hover:underline">×</button></td>}
                   </tr>
                 ))}
@@ -326,12 +356,15 @@ function NpdSection({ req, caps, onChange }: { req: Requisition; caps: ReturnTyp
           )}
           {editable && (
             <div className="flex flex-wrap gap-2 pt-1">
-              <button disabled={busy} onClick={() => wrap(() => replaceNpdLines(draft.id, lines.map((l) => ({ ...l, qty: Number(l.qty) || 0 }))))}
+              <button disabled={busy} onClick={() => wrap(() => replaceNpdLines(draft.id, lines.map((l) => ({
+                ...l, qty: Number(l.qty) || 0, ownership: l.ownership ?? "OWN", is_off_master: !!l.is_off_master,
+              }))))}
                 className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] disabled:opacity-50 hover:bg-[var(--surface-subtle)]">Save lines</button>
               <button disabled={busy || lines.length === 0} onClick={() => wrap(() => promoteNpdDraft(draft.id))}
                 className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Promote to live BOM</button>
             </div>
           )}
+          <p className="text-[11px] text-[var(--text-muted)]">Customer-supplied lines are recorded for traceability — no stock is issued for them.</p>
         </div>
       )}
     </Card>

@@ -31,6 +31,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "@/lib/auth";
 import { useMe } from "@/lib/user";
+import { friendlyApiError } from "@/lib/apiErrors";
 import { ActionButton } from "./_ActionButton";
 
 // ── Role matrix (mirrors server_replica/router_amendments.py) ────────────
@@ -210,7 +211,7 @@ export function AmendmentsTab({ jcId }: { jcId: number }) {
     } catch (e) {
       if (signal?.aborted) return;
       if (e instanceof DOMException && e.name === "AbortError") return;
-      setError(e instanceof Error ? e.message : "Failed to load amendments.");
+      setError(friendlyApiError(e));
       setRows([]);
     } finally {
       if (!signal?.aborted) setLoading(false);
@@ -381,7 +382,7 @@ function AmendmentCard({
       }
       onActed(true, `Amendment ${action}d.`);
     } catch (e) {
-      onActed(false, e instanceof Error ? e.message : `Failed to ${action} amendment.`);
+      onActed(false, friendlyApiError(e));
     } finally {
       setBusy(false);
     }
@@ -606,7 +607,7 @@ function ProposeAmendmentModal({
       }
       parsedPayload = v as Record<string, unknown>;
     } catch (e) {
-      setError(`Payload is not valid JSON: ${e instanceof Error ? e.message : "parse error"}`);
+      setError(`Payload is not valid JSON: ${e instanceof Error ? e.message : "parse error"}`); // local parse error stays raw — not an API error
       return;
     }
     // W4-MED-8 — best-effort per-request-type required-keys check. The
@@ -669,7 +670,7 @@ function ProposeAmendmentModal({
       }
       onCreated("Amendment proposed.");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to propose amendment.");
+      setError(friendlyApiError(e));
     } finally {
       setSubmitting(false);
     }

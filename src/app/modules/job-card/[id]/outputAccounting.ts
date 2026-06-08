@@ -23,6 +23,9 @@ export type ConsumptionLineLike = {
   bom_line_id?: number | null;
   material_sku_name?: string | null;
   actual_consumed_qty?: number | string | null;
+  // Stage 2: migration 038 tags every row with the batch it belongs to.
+  // Legacy rows surface NULL until they're re-saved under a batch.
+  batch_id?: number | null;
 };
 
 export type BalanceRowLike = {
@@ -31,6 +34,7 @@ export type BalanceRowLike = {
   balance_type?: string | null;
   qty_kg?: number | string | null;
   remarks?: string | null;
+  batch_id?: number | null;
 };
 
 export type ByproductRowLike = {
@@ -42,7 +46,26 @@ export type ByproductRowLike = {
   // control_sample / pm_* / dust etc. don't carry an article.
   material_name?: string | null;
   bom_line_id?: number | null;
+  batch_id?: number | null;
 };
+
+/** Stage 3 batch filter sentinel.
+ *  - A number       → include only rows whose batch_id equals it.
+ *  - The literal null → include only legacy rows whose batch_id IS NULL.
+ *  - undefined      → no filter (show everything; used by the rollup view).
+ *
+ *  Filtering happens in the FromDetail helpers below so the form state
+ *  always reflects the picked batch in the selector dropdown. */
+export type BatchFilter = number | null | undefined;
+
+function matchesBatch<T extends { batch_id?: number | null }>(
+  row: T,
+  filter: BatchFilter,
+): boolean {
+  if (filter === undefined) return true;
+  if (filter === null) return row.batch_id == null;
+  return row.batch_id === filter;
+}
 
 function lineKey(bomLineId: number | null | undefined, name: string | null | undefined): string {
   return bomLineId != null ? `b${bomLineId}` : `n${name ?? ""}`;
@@ -52,9 +75,11 @@ function lineKey(bomLineId: number | null | undefined, name: string | null | und
  *  recorded `actual_consumed_qty` (job_card_material_consumption_v2). */
 export function consumptionStateFromDetail(
   lines: ConsumptionLineLike[] | undefined | null,
+  batchFilter: BatchFilter = undefined,
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const c of lines ?? []) {
+    if (!matchesBatch(c, batchFilter)) continue;
     const q = c.actual_consumed_qty;
     if (q == null || q === "") continue;
     out[lineKey(c.bom_line_id, c.material_sku_name)] = String(q);
@@ -66,9 +91,11 @@ export function consumptionStateFromDetail(
  *  feed this grid; control_sample / extra_given are surfaced elsewhere. */
 export function balanceStateFromDetail(
   rows: BalanceRowLike[] | undefined | null,
+  batchFilter: BatchFilter = undefined,
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const b of rows ?? []) {
+    if (!matchesBatch(b, batchFilter)) continue;
     if (b.balance_type !== "returned") continue;
     if (b.qty_kg == null || b.qty_kg === "") continue;
     out[lineKey(b.bom_line_id, b.material_name)] = String(b.qty_kg);
@@ -86,9 +113,11 @@ export function balanceStateFromDetail(
 export function rejectionsFromDetail(
   byproducts: ByproductRowLike[] | undefined | null,
   _balanceRows: BalanceRowLike[] | undefined | null,
+  batchFilter: BatchFilter = undefined,
 ): RejectionRow[] {
   const rows: RejectionRow[] = [];
   for (const bp of byproducts ?? []) {
+    if (!matchesBatch(bp, batchFilter)) continue;
     const cat = bp.category ?? "";
     if (cat === "control_sample") continue;
     if (cat.startsWith("pm_")) continue;
@@ -122,14 +151,17 @@ export function rejectionsFromDetail(
 export function controlSampleFromDetail(
   byproducts: ByproductRowLike[] | undefined | null,
   balanceRows: BalanceRowLike[] | undefined | null,
+  batchFilter: BatchFilter = undefined,
 ): string {
   for (const bp of byproducts ?? []) {
+    if (!matchesBatch(bp, batchFilter)) continue;
     if (bp.category === "control_sample" && bp.qty_kg != null && bp.qty_kg !== "") {
       // Canonical path — byproducts row. No warning.
       return String(bp.qty_kg);
     }
   }
   for (const b of balanceRows ?? []) {
+    if (!matchesBatch(b, batchFilter)) continue;
     if (b.balance_type === "control_sample" && b.qty_kg != null && b.qty_kg !== "") {
       if (typeof console !== "undefined") {
         console.warn(
@@ -144,15 +176,58 @@ export function controlSampleFromDetail(
   return "";
 }
 
+/** Additive consumption (data-keeping bucket) — pull rows persisted
+ *  to job_card_additive_consumption_v2. A row with a non-empty sku_name
+ *  was picked from the dropdown; rows with no sku_name + a material_name
+ *  came in via the "Others" free-text path. */
+export type AdditiveDetailRow = {
+  sku_name?: string | null;
+  material_name?: string | null;
+  qty_kg?: number | string | null;
+  remarks?: string | null;
+  batch_id?: number | null;
+};
+
+export type AdditiveStateRow = {
+  sku_name: string;
+  custom_name: string;
+  qty: string;
+  remarks: string;
+};
+
+export function additivesFromDetail(
+  rows: AdditiveDetailRow[] | undefined | null,
+  batchFilter: BatchFilter = undefined,
+): AdditiveStateRow[] {
+  const out: AdditiveStateRow[] = [];
+  for (const r of rows ?? []) {
+    if (!matchesBatch(r, batchFilter)) continue;
+    const sku = (r.sku_name ?? "").trim();
+    const custom = (r.material_name ?? "").trim();
+    out.push({
+      // When a sku_name is present, use it; otherwise the row originated
+      // from "Others" — restore that path so the operator can edit the
+      // custom name without re-entering it.
+      sku_name: sku ? sku : (custom ? "_other" : ""),
+      custom_name: sku ? "" : custom,
+      qty: r.qty_kg != null ? String(r.qty_kg) : "",
+      remarks: r.remarks ?? "",
+    });
+  }
+  return out;
+}
+
 /** R11/C7 — pull each PM variance category's qty + uom from byproducts. */
 export type PmVarianceState = Record<string, { qty: string; uom: string }>;
 
 export function pmVarianceFromDetail(
   byproducts: ByproductRowLike[] | undefined | null,
   defaultUom: string,
+  batchFilter: BatchFilter = undefined,
 ): PmVarianceState {
   const out: PmVarianceState = {};
   for (const bp of byproducts ?? []) {
+    if (!matchesBatch(bp, batchFilter)) continue;
     const cat = bp.category ?? "";
     if (!cat.startsWith("pm_")) continue;
     out[cat] = {

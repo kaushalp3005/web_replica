@@ -329,17 +329,28 @@ export const ENTITY_OPTIONS: { value: string; label: string }[] = [
   { value: "cdpl", label: "CDPL" },
 ];
 
+// Canonical warehouse codes (match the sample backend's WAREHOUSES list + the
+// transfer module). Production floors are only defined for the two production
+// sites (W202, A185); the remaining sites are warehouse/cold-storage with no
+// shop-floor breakdown, so floorsAvailable() returns [] for them.
 export const WAREHOUSE_OPTIONS: { value: string; label: string }[] = [
-  { value: "W-202", label: "W-202" },
-  { value: "A-185", label: "A-185" },
+  { value: "W202", label: "W202" },
+  { value: "A185", label: "A185" },
+  { value: "A68", label: "A68" },
+  { value: "A101", label: "A101" },
+  { value: "F53", label: "F53" },
+  { value: "D-39", label: "D-39" },
+  { value: "D-514", label: "D-514" },
+  { value: "Rishi", label: "Rishi" },
+  { value: "Supreme", label: "Supreme" },
 ];
 
 export const FLOORS_BY_WAREHOUSE: Record<string, string[]> = {
-  "W-202": [
+  "W202": [
     "Lower Basement", "Upper Basement", "First Floor", "First Floor Mezz",
     "Second Floor", "Second Floor Mezz", "Terrace",
   ],
-  "A-185": [
+  "A185": [
     "Roasting Area", "Mezzanine", "Sorting Area", "Printing Area",
     "Dmart Production Area", "Dmart Packing Area", "Cheese Floor",
     "FG store", "FFS Packing Area",

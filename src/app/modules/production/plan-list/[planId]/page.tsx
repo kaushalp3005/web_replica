@@ -12,6 +12,7 @@ import { BrandMark } from "@/components/BrandMark";
 import { useParams, useRouter } from "next/navigation";
 import { userStore } from "@/lib/auth";
 import { useRequireAuth, useUserInitial, useIsAdmin } from "@/lib/user";
+import { friendlyApiError } from "@/lib/apiErrors";
 import { BackLink } from "@/components/BackLink";
 import {
   type PlanDetail,
@@ -36,19 +37,20 @@ import {
   fmtDateRange,
 } from "@/lib/plans";
 import { PROCESS_OPTIONS, canonProcess, stageFromProcess } from "@/lib/processCatalog";
+import { normaliseWarehouseCode } from "@/lib/warehouseScope";
 
 // Warehouse → allowed floor list. Same source-of-truth as the Planning
-// page's FLOORS_BY_FACTORY mapping, keyed by the warehouse identifier the
-// plan header stores (W-202 / A-185) so we can look up valid floors with
-// no further translation.
+// page's FLOORS_BY_FACTORY mapping.  Keys are pre-normalised ("W202",
+// "A185") so the lookup tolerates the hyphenated / lowercased /
+// padded admin-typed variants we see in the wild.
 const WAREHOUSE_TO_FLOORS: Record<string, readonly string[]> = {
-  "W-202": [
+  W202: [
     "Lower Basement", "Upper Basement",
     "First Floor", "First Floor Mezz",
     "Second Floor", "Second Floor Mezz",
     "Terrace",
   ],
-  "A-185": [
+  A185: [
     "Roasting Area", "Mezzanine", "Sorting Area", "Printing Area",
     "Dmart Production Area", "Dmart Packing Area",
     "Cheese Floor", "FG store", "FFS Packing Area",
@@ -57,7 +59,7 @@ const WAREHOUSE_TO_FLOORS: Record<string, readonly string[]> = {
 
 function floorsForWarehouse(wh: string | null | undefined): readonly string[] {
   if (!wh) return [];
-  return WAREHOUSE_TO_FLOORS[wh] ?? [];
+  return WAREHOUSE_TO_FLOORS[normaliseWarehouseCode(wh)] ?? [];
 }
 
 export default function PlanDetailPage() {
@@ -98,7 +100,7 @@ export default function PlanDetailPage() {
         const d = await getPlan(planId, c.signal);
         if (!c.signal.aborted) setDetail(d);
       } catch (e) {
-        if (!c.signal.aborted) setError(e instanceof Error ? e.message : "Failed to load plan");
+        if (!c.signal.aborted) setError(friendlyApiError(e));
       } finally {
         if (!c.signal.aborted) setLoading(false);
       }
@@ -139,7 +141,7 @@ export default function PlanDetailPage() {
       setConfirm(null);
       setReload((k) => k + 1);
     } catch (e) {
-      setToast(`Approve failed: ${e instanceof Error ? e.message : "unknown"}`);
+      setToast(`Approve failed: ${friendlyApiError(e)}`);
     } finally {
       setBusy(false);
     }
@@ -156,7 +158,7 @@ export default function PlanDetailPage() {
       setReason("");
       setReload((k) => k + 1);
     } catch (e) {
-      setToast(`Cancel failed: ${e instanceof Error ? e.message : "unknown"}`);
+      setToast(`Cancel failed: ${friendlyApiError(e)}`);
     } finally {
       setBusy(false);
     }
@@ -189,7 +191,7 @@ export default function PlanDetailPage() {
       // this page in any meaningful way once deleted.
       router.replace("/modules/production/plan-list");
     } catch (e) {
-      setToast(`Delete failed: ${e instanceof Error ? e.message : "unknown"}`);
+      setToast(`Delete failed: ${friendlyApiError(e)}`);
     } finally {
       setBusy(false);
     }
@@ -240,7 +242,7 @@ export default function PlanDetailPage() {
       setEditing(false);
       setReload((k) => k + 1);
     } catch (e) {
-      setToast(`Update failed: ${e instanceof Error ? e.message : "unknown"}`);
+      setToast(`Update failed: ${friendlyApiError(e)}`);
     } finally {
       setBusy(false);
     }
@@ -326,13 +328,15 @@ export default function PlanDetailPage() {
           </button>
           {isDraft ? (
             <>
-              <button
-                onClick={() => setConfirm("cancel")}
-                disabled={busy}
-                className="h-9 px-3 text-[12px] rounded-[2px] border border-[var(--aws-border)] bg-white text-[var(--aws-error)] hover:border-[var(--aws-error)] disabled:opacity-50"
-              >
-                Cancel
-              </button>
+              {isAdmin ? (
+                <button
+                  onClick={() => setConfirm("cancel")}
+                  disabled={busy}
+                  className="h-9 px-3 text-[12px] rounded-[2px] border border-[var(--aws-border)] bg-white text-[var(--aws-error)] hover:border-[var(--aws-error)] disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              ) : null}
               <button
                 onClick={() => setConfirm("approve")}
                 disabled={busy}
@@ -342,7 +346,7 @@ export default function PlanDetailPage() {
               </button>
             </>
           ) : null}
-          {isApproved ? (
+          {isApproved && isAdmin ? (
             <button
               onClick={() => setConfirm("delete")}
               disabled={busy}
@@ -407,6 +411,12 @@ function PlanHeader({
   const status = (detail.status ?? "").toLowerCase();
   const isDraft = status === "draft";
   const isApproved = status === "approved";
+  // R10 — Cancel Plan + Delete Plan are admin-only on the server (router
+  // gates wrap both POST /plans-v2/{id}/cancel and /delete). Mirror that
+  // here so non-admin operators don't see the buttons at all; the
+  // alternative (showing them + letting them 403) is bad UX. Approve
+  // remains visible to non-admins since multiple roles may approve plans.
+  const isAdmin = useIsAdmin();
   // Header fields (plan_date, date_from, date_to, plan_type) are editable
   // while the plan hasn't been executed / cancelled — drafts AND approved
   // plans both qualify. Once a plan is approved, downstream JCs are tied
@@ -481,12 +491,14 @@ function PlanHeader({
           ) : null}
           {isDraft ? (
             <>
-              <button
-                onClick={onOpenCancel}
-                className="h-8 px-3 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[var(--aws-error)] hover:border-[var(--aws-error)]"
-              >
-                Cancel plan
-              </button>
+              {isAdmin ? (
+                <button
+                  onClick={onOpenCancel}
+                  className="h-8 px-3 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[var(--aws-error)] hover:border-[var(--aws-error)]"
+                >
+                  Cancel plan
+                </button>
+              ) : null}
               <button
                 onClick={onOpenApprove}
                 className="h-8 px-4 text-[12px] rounded-[2px] font-semibold border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white"
@@ -495,7 +507,7 @@ function PlanHeader({
               </button>
             </>
           ) : null}
-          {isApproved ? (
+          {isApproved && isAdmin ? (
             <button
               onClick={onOpenDelete}
               title="Delete an approved plan — admins are notified by email"
@@ -1031,7 +1043,7 @@ function LineCardEdit({
         onMessage("Line edit submitted for admin approval.");
         onSaved();
       } catch (e) {
-        onMessage(`Submit failed: ${e instanceof Error ? e.message : "unknown"}`);
+        onMessage(`Submit failed: ${friendlyApiError(e)}`);
       } finally {
         setBusy(false);
       }
@@ -1081,7 +1093,7 @@ function LineCardEdit({
       onMessage("Line saved.");
       onSaved();
     } catch (e) {
-      onMessage(`Save failed: ${e instanceof Error ? e.message : "unknown"}`);
+      onMessage(`Save failed: ${friendlyApiError(e)}`);
     } finally {
       setBusy(false);
     }

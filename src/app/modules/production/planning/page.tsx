@@ -19,6 +19,9 @@ import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
 import { useRequireAuth, useUserInitial, useUserScope, type UserScope } from "@/lib/user";
 import { PROCESS_OPTIONS, canonProcess, stageFromProcess } from "@/lib/processCatalog";
+import { userHasAnyWarehouse } from "@/lib/warehouseScope";
+import { lookupSku } from "@/lib/so";
+import { friendlyApiError } from "@/lib/apiErrors";
 import { BackLink } from "@/components/BackLink";
 import {
   type FulfillmentRow,
@@ -67,12 +70,19 @@ const FLOORS_BY_FACTORY: Record<FactoryCode, readonly string[]> = {
 };
 
 // Intersect the master with the user's scope. Admin or empty scope ⇒ no
-// restriction. Mirrors fulfillment.js:1264 / 1271.
+// restriction. Mirrors fulfillment.js:1264 / 1271.  Uses the shared
+// warehouseScope matcher so admin-typed variants ("W-202" vs "W202"
+// vs "w-202") all resolve cleanly.
 function allowedFactoryCodes(scope: UserScope): FactoryCode[] {
   const all = Object.keys(FACTORY_TO_WAREHOUSE) as FactoryCode[];
   if (scope.isAdmin) return all;
   if (!scope.warehouses.length) return all;
-  return all.filter((code) => scope.warehouses.includes(FACTORY_TO_WAREHOUSE[code]));
+  return all.filter((code) =>
+    userHasAnyWarehouse(scope.warehouses, [
+      FACTORY_TO_WAREHOUSE[code],  // "W-202"
+      code,                        // "W202"
+    ]),
+  );
 }
 
 function allowedFloorsFor(scope: UserScope, factory: FactoryCode | undefined): string[] {
@@ -93,6 +103,20 @@ interface PlanStep {
   loss_pct: number | null;
 }
 
+// Subset of fulfillment_v2's BOM line shape (services/fulfillment_v2.py
+// _build_line) — we display material / qty-per-unit / uom / loss% / item-type
+// on the planning card. Other fields (gross_requirement_kg, inventory_status,
+// shortage_kg, etc.) come back too but planning leaves shortage/inventory
+// rendering to the Plan-Detail page where the operator can act on it.
+interface BomLineRow {
+  material_sku_name: string | null;
+  item_type: string | null;
+  quantity_per_unit: number | null;
+  loss_pct: number | null;
+  uom: string | null;
+  is_removed?: boolean | null;
+}
+
 // Operator overrides that flow into the plan body on Create Plan.
 // `steps` are seeded from the BOM's process_routes on first expand and can
 // be reordered + assigned a floor by the operator.
@@ -106,6 +130,9 @@ interface CardOverride {
   stepsLoading?: boolean;
   bomNote?: string | null;
   bomId?: number | null;
+  /** BOM materials list (read-only on the planning card). Loaded alongside
+   *  process steps in ensureStepsLoaded. Empty array when no BOM exists. */
+  bomLines?: BomLineRow[];
 }
 
 // ── Page ──────────────────────────────────────────────────────────────────
@@ -204,7 +231,7 @@ export default function PlanningPage() {
         setPagination(resp.pagination ?? {});
       } catch (e) {
         if (c.signal.aborted) return;
-        setError(e instanceof Error ? e.message : "Failed to load");
+        setError(friendlyApiError(e));
       } finally {
         if (!c.signal.aborted) setLoading(false);
       }
@@ -269,7 +296,7 @@ export default function PlanningPage() {
       // is the same; React bails out. Instead, invalidate by clearing rows.
       setRows([]);
     } catch (e) {
-      setToast(`Sync failed: ${e instanceof Error ? e.message : "unknown"}`);
+      setToast(`Sync failed: ${friendlyApiError(e)}`);
     } finally {
       setSyncing(false);
     }
@@ -289,7 +316,7 @@ export default function PlanningPage() {
         r.fulfillment_id === id ? { ...r, delivery_deadline: newDate } : r,
       ));
     } catch (e) {
-      setToast(`Revise failed: ${e instanceof Error ? e.message : "unknown"}`);
+      setToast(`Revise failed: ${friendlyApiError(e)}`);
     }
   }
 
@@ -561,7 +588,7 @@ export default function PlanningPage() {
       nm.set(id, {
         ...prev,
         stepsLoading: true,
-        ...(force ? { steps: undefined, stepsLoaded: false, bomNote: null } : {}),
+        ...(force ? { steps: undefined, stepsLoaded: false, bomNote: null, bomLines: undefined } : {}),
       });
       return nm;
     });
@@ -578,6 +605,27 @@ export default function PlanningPage() {
         std_time_min: r.std_time_min ?? null,
         loss_pct: r.loss_pct ?? null,
       }));
+      const rawLines = (data.bom?.lines ?? []) as Array<Record<string, unknown>>;
+      const bomLines: BomLineRow[] = rawLines
+        .filter((l) => !(l.is_removed === true))
+        .map((l) => ({
+          material_sku_name: (l.material_sku_name as string | null) ?? null,
+          item_type: (l.item_type as string | null) ?? null,
+          quantity_per_unit:
+            typeof l.quantity_per_unit === "number"
+              ? l.quantity_per_unit
+              : l.quantity_per_unit != null
+                ? Number(l.quantity_per_unit) || null
+                : null,
+          loss_pct:
+            typeof l.loss_pct === "number"
+              ? l.loss_pct
+              : l.loss_pct != null
+                ? Number(l.loss_pct) || null
+                : null,
+          uom: (l.uom as string | null) ?? null,
+          is_removed: (l.is_removed as boolean | null) ?? false,
+        }));
       setCardCfg((m) => {
         const nm = new Map(m);
         const prev = m.get(id) ?? {};
@@ -588,6 +636,7 @@ export default function PlanningPage() {
           stepsLoading: false,
           bomNote: data.bom?.bom_note ?? null,
           bomId: data.bom?.bom_id ?? null,
+          bomLines,
         });
         return nm;
       });
@@ -600,7 +649,8 @@ export default function PlanningPage() {
           steps: [],
           stepsLoaded: true,
           stepsLoading: false,
-          bomNote: `Failed to load BOM: ${e instanceof Error ? e.message : "unknown"}`,
+          bomNote: `Failed to load BOM: ${friendlyApiError(e)}`,
+          bomLines: [],
         });
         return nm;
       });
@@ -747,7 +797,7 @@ export default function PlanningPage() {
       setToast(resp.plan_id ? `Plan ${resp.plan_id} created.` : "Plan created.");
       clearAllSelection();
     } catch (e) {
-      setToast(`Create plan failed: ${e instanceof Error ? e.message : "unknown"}`);
+      setToast(`Create plan failed: ${friendlyApiError(e)}`);
     } finally {
       setCreatingPlan(false);
     }
@@ -1504,10 +1554,50 @@ function SelectedCard({
   // auto-computes. Either field still accepts a direct manual value
   // (operator can override the link by editing the other field
   // immediately after).
-  const skuUomKg: number | null =
+  const skuUomFromSoLine: number | null =
     defaultUnits > 0 && defaultKg > 0
       ? defaultKg / defaultUnits
       : null;
+
+  // R10 — all_sku fallback. When the SO line is fully fulfilled
+  // (pending_qty_kg = pending_qty_units = 0) the per-line ratio can't
+  // be derived, leaving Pack count ↔ Quantity unlinked. Fetching the
+  // SKU's canonical `uom` (= kg per pack) from the all_sku master
+  // gives a stable conversion factor regardless of fulfillment state.
+  // Only fires when the SO-line ratio is unavailable AND the card is
+  // expanded (avoids one HTTP round-trip per row on initial render).
+  const [skuUomFromMaster, setSkuUomFromMaster] = useState<number | null>(null);
+  useEffect(() => {
+    if (skuUomFromSoLine != null) {
+      // SO-line ratio works; no fetch needed.
+      return;
+    }
+    if (!isExpanded || !row.fg_sku_name) return;
+    const ctrl = new AbortController();
+    void (async () => {
+      try {
+        const data = await lookupSku(
+          { particulars: row.fg_sku_name as string },
+          ctrl.signal,
+        );
+        const uom = data.selected_item?.uom;
+        if (ctrl.signal.aborted) return;
+        if (uom == null) {
+          setSkuUomFromMaster(null);
+          return;
+        }
+        const n = typeof uom === "number" ? uom : parseFloat(String(uom));
+        if (Number.isFinite(n) && n > 0) setSkuUomFromMaster(n);
+      } catch {
+        // Silent — the operator can still type both fields manually.
+      }
+    })();
+    return () => ctrl.abort();
+  }, [isExpanded, row.fg_sku_name, skuUomFromSoLine]);
+
+  // Effective ratio: prefer SO-line-derived (instant, no fetch), fall
+  // back to the all_sku master value (async, populated after fetch).
+  const skuUomKg: number | null = skuUomFromSoLine ?? skuUomFromMaster;
 
   function patchQtyUnits(n: number | undefined) {
     if (n == null || !Number.isFinite(n)) {
@@ -1645,12 +1735,24 @@ function SelectedCard({
               value={cfg.qty_units ?? ""}
               placeholder={defaultUnits > 0 ? String(Math.round(defaultUnits)) : "—"}
               onChange={patchQtyUnits}
+              max={defaultUnits > 0 ? defaultUnits : null}
+              hint={
+                defaultUnits > 0
+                  ? `Available: ${Math.round(defaultUnits)} pcs`
+                  : undefined
+              }
             />
             <NumberField
               label="Quantity (kg)"
               value={cfg.qty_kg ?? ""}
               placeholder={defaultKg > 0 ? String(defaultKg) : "—"}
               onChange={patchQtyKg}
+              max={defaultKg > 0 ? defaultKg : null}
+              hint={
+                defaultKg > 0
+                  ? `Available: ${defaultKg.toFixed(3)} kg`
+                  : undefined
+              }
             />
             <label className="block">
               <span className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">Deadline</span>
@@ -1687,7 +1789,21 @@ function SelectedCard({
             </label>
             {factoryOpts.length === 0 ? (
               <p className="mt-1 text-[11px] text-[var(--aws-error)]">
-                No factories are assigned to your account. Ask an admin to grant warehouse access.
+                No factories are assigned to your account.{" "}
+                {scope.warehouses.length > 0 ? (
+                  <>
+                    Your account has <span className="font-mono">{scope.warehouses.join(", ")}</span>
+                    , but planning expects one of{" "}
+                    <span className="font-mono">
+                      {(Object.keys(FACTORY_TO_WAREHOUSE) as FactoryCode[])
+                        .map((c) => `${c} / ${FACTORY_TO_WAREHOUSE[c]}`)
+                        .join(", ")}
+                    </span>
+                    . Ask an admin to align your <span className="font-mono">allowed_warehouses</span> with one of those exact values.
+                  </>
+                ) : (
+                  <>Ask an admin to grant warehouse access.</>
+                )}
               </p>
             ) : null}
           </div>
@@ -1709,6 +1825,16 @@ function SelectedCard({
             onAddStep={onAddStep}
             onRemoveStep={onRemoveStep}
             onRefreshSteps={onRefreshSteps}
+          />
+
+          {/* Row 3b: BOM materials (read-only). Mirrors StepsSection's load
+              gating so the operator sees a single source of truth for both
+              process route AND material list while configuring the plan. */}
+          <BomMaterialsSection
+            loaded={!!cfg.stepsLoaded}
+            loading={!!cfg.stepsLoading}
+            lines={cfg.bomLines ?? []}
+            bomNote={cfg.bomNote}
           />
 
           {/* Row 4: actions */}
@@ -1896,7 +2022,13 @@ function StepsSection({
         <p
           className={
             "mb-1.5 px-2 py-1.5 text-[11px] italic rounded border " + (
-              bomNote
+              // Only the catch-block path ("Failed to load BOM: …") is a real
+              // error and gets red styling. Informational notes from the
+              // backend ("RM SO — no BOM expected" for RM SOs, "No BOM found"
+              // when nothing's configured yet) are expected states — render
+              // them as a calm info hint so operators don't read them as a
+              // failure.
+              bomNote?.startsWith("Failed to load BOM")
                 ? "text-[var(--aws-error)] border-[var(--aws-border)] bg-[#fdf0f1]"
                 : "text-[var(--text-muted)] border-dashed border-[var(--aws-border)] bg-[var(--surface-subtle)]"
             )
@@ -2103,23 +2235,117 @@ function StepsSection({
   );
 }
 
+// ── BOM materials (read-only) ────────────────────────────────────────────
+// Loaded alongside the process route on first expand (same fetch). For RM
+// SOs / SKUs without a BOM the list is empty and the bomNote drives the
+// empty-state copy. Read-only here — overrides happen on the Plan-Detail
+// page once the plan is created.
+function BomMaterialsSection({
+  loaded, loading, lines, bomNote,
+}: {
+  loaded: boolean;
+  loading: boolean;
+  lines: BomLineRow[];
+  bomNote: string | null | undefined;
+}) {
+  if (loading) {
+    return (
+      <div className="mt-3 text-[12px] text-[var(--text-secondary)] flex items-center gap-2 py-2">
+        <span className="inline-block w-3 h-3 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" />
+        Loading BOM materials…
+      </div>
+    );
+  }
+  if (!loaded) return null;
+
+  return (
+    <div className="mt-3">
+      <div className="flex items-center justify-between gap-2 mb-1.5 px-0.5">
+        <span className="text-[10px] uppercase tracking-wide font-bold text-[var(--text-muted)]">
+          BOM materials · {lines.length}
+        </span>
+      </div>
+      {lines.length === 0 ? (
+        <p
+          className={
+            "mb-1.5 px-2 py-1.5 text-[11px] italic rounded border " + (
+              bomNote?.startsWith("Failed to load BOM")
+                ? "text-[var(--aws-error)] border-[var(--aws-border)] bg-[#fdf0f1]"
+                : "text-[var(--text-muted)] border-dashed border-[var(--aws-border)] bg-[var(--surface-subtle)]"
+            )
+          }
+        >
+          {bomNote ?? "No BOM materials configured for this SKU."}
+        </p>
+      ) : (
+        <div className="overflow-hidden border border-[var(--aws-border)] rounded">
+          <table className="w-full text-[11px]">
+            <thead>
+              <tr className="bg-[var(--surface-subtle)] text-left text-[var(--text-secondary)]">
+                <th className="px-2 py-1 font-semibold">Material</th>
+                <th className="px-2 py-1 font-semibold w-[60px]">Type</th>
+                <th className="px-2 py-1 font-semibold w-[90px] text-right">Qty / unit</th>
+                <th className="px-2 py-1 font-semibold w-[50px]">UoM</th>
+                <th className="px-2 py-1 font-semibold w-[60px] text-right">Loss %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lines.map((l, i) => (
+                <tr
+                  key={`${l.material_sku_name ?? "x"}-${i}`}
+                  className="border-t border-[var(--surface-divider)]"
+                >
+                  <td className="px-2 py-1 text-[var(--text-primary)]">{l.material_sku_name ?? "—"}</td>
+                  <td className="px-2 py-1 uppercase text-[var(--text-secondary)]">{l.item_type ?? "—"}</td>
+                  <td className="px-2 py-1 text-right font-mono">
+                    {l.quantity_per_unit != null ? l.quantity_per_unit : "—"}
+                  </td>
+                  <td className="px-2 py-1 text-[var(--text-secondary)]">{l.uom ?? "—"}</td>
+                  <td className="px-2 py-1 text-right font-mono text-[var(--text-secondary)]">
+                    {l.loss_pct != null ? l.loss_pct : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Small numeric input that flips undefined ↔ number through a string field.
 // Empty string clears the override (returns undefined to parent).
 function NumberField({
-  label, value, placeholder, onChange,
+  label, value, placeholder, onChange, max, hint,
 }: {
   label: string;
   value: number | string;
   placeholder?: string;
   onChange: (n: number | undefined) => void;
+  /** Optional upper bound — values above max are clamped on input.
+   *  Useful for binding "available qty" limits on the planning card. */
+  max?: number | null;
+  /** Optional helper text rendered below the field; goes red when value
+   *  exceeds max (only meaningful when max is set). */
+  hint?: string;
 }) {
   const display = value === undefined || value === null ? "" : String(value);
+  const numericValue =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value !== ""
+        ? parseFloat(value)
+        : NaN;
+  const overMax =
+    max != null && max > 0 && Number.isFinite(numericValue) && numericValue > max;
   return (
     <label className="block">
       <span className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">{label}</span>
       <input
         type="number"
         min={0}
+        max={max != null && max > 0 ? max : undefined}
         step="any"
         inputMode="decimal"
         value={display}
@@ -2128,10 +2354,29 @@ function NumberField({
           const raw = e.target.value;
           if (raw === "") { onChange(undefined); return; }
           const n = parseFloat(raw);
-          onChange(Number.isFinite(n) ? n : undefined);
+          if (!Number.isFinite(n)) { onChange(undefined); return; }
+          // Clamp to max when supplied — the planning page binds this to
+          // the SO line's pending qty so operators can't over-plan.
+          const clamped = max != null && max > 0 && n > max ? max : n;
+          onChange(clamped);
         }}
-        className="w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
+        className={[
+          "w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border outline-none focus:shadow-[0_0_0_1px_#9a393e]",
+          overMax
+            ? "border-[var(--aws-error)] focus:border-[var(--aws-error)]"
+            : "border-[var(--aws-border-strong)] focus:border-[#9a393e]",
+        ].join(" ")}
       />
+      {hint ? (
+        <span
+          className={[
+            "block mt-1 text-[10px]",
+            overMax ? "text-[var(--aws-error)] font-semibold" : "text-[var(--text-muted)]",
+          ].join(" ")}
+        >
+          {hint}
+        </span>
+      ) : null}
     </label>
   );
 }
@@ -2612,7 +2857,7 @@ function DetailPanel({ fulfillmentId }: { fulfillmentId: number }) {
         const d = await fetchFulfillmentDetail(fulfillmentId, c.signal);
         if (!c.signal.aborted) setDetail(d);
       } catch (e) {
-        if (!c.signal.aborted) setError(e instanceof Error ? e.message : "Detail load failed");
+        if (!c.signal.aborted) setError(friendlyApiError(e));
       } finally {
         if (!c.signal.aborted) setLoading(false);
       }

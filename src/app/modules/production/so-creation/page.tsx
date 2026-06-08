@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useRequireAuth } from "@/lib/user";
 import { useSeesCost } from "@/lib/cost-gate";
+import { friendlyApiError } from "@/lib/apiErrors";
 import {
   type GstStatus,
   type GstRecon,
@@ -361,7 +362,7 @@ export default function SoCreationPage() {
         setData(resp);
       } catch (e) {
         if (controller.signal.aborted) return;
-        setListError(e instanceof Error ? e.message : "Failed to load Sales Orders");
+        setListError(friendlyApiError(e));
         setData(null);
       } finally {
         if (!controller.signal.aborted) setListLoading(false);
@@ -428,7 +429,7 @@ export default function SoCreationPage() {
       // to see new rows anyway).
       setStatus("all");
     } catch (e) {
-      setUploadMsg({ kind: "err", text: e instanceof Error ? e.message : "Upload failed." });
+      setUploadMsg({ kind: "err", text: friendlyApiError(e) });
     } finally {
       setUploading(false);
     }
@@ -471,7 +472,7 @@ export default function SoCreationPage() {
       );
       setUploadMsg({ kind: "ok", text: `Exported ${sos.length} Sales Order${sos.length === 1 ? "" : "s"}.` });
     } catch (e) {
-      setUploadMsg({ kind: "err", text: `Export failed: ${e instanceof Error ? e.message : "unknown"}` });
+      setUploadMsg({ kind: "err", text: `Export failed: ${friendlyApiError(e)}` });
     }
   }
 
