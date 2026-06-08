@@ -4150,18 +4150,10 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
               >
                 {batchActionBusy ? "…" : "Open Batch"}
               </button>
-              <button
-                type="button"
-                onClick={() => setCloseBatchModal(selectedBatch)}
-                disabled={
-                  batchActionBusy || submitting || lock.isLocked || lifecycleLocked ||
-                  !selectedBatch || !batchIsOpen
-                }
-                title={lifecycleLocked ? "Start the job card first" : undefined}
-                className="h-7 px-3 text-[11px] font-semibold rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[var(--text-primary)] hover:border-[var(--aws-orange)] disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Close Batch
-              </button>
+              {/* Close Batch moved to sit next to the Save/Edit Batch
+                  submit at the bottom of the form (FormFooter extraActions)
+                  so the "save then close" flow lives in one row instead of
+                  scrolling up to the Batch Context panel. */}
             </div>
           ) : null}
         </div>
@@ -4709,8 +4701,30 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
         // `submitting` internally too but passing the merged flag keeps
         // the aria-describedby story consistent with the inputs above.
         disabled={inputsDisabled}
+        // Close Batch sits beside the Save/Edit Batch submit so the
+        // operator's "save then close" flow lives in one row. Gating
+        // mirrors the original Batch Context panel button: visible when
+        // the JC is editable for this role, enabled only when a batch
+        // is open. Modal pre-fill + post-close refresh are unchanged
+        // — only the trigger's location moved.
+        extraActions={
+          (detail.status !== "completed" || isAdmin) && selectedBatch ? (
+            <button
+              type="button"
+              onClick={() => setCloseBatchModal(selectedBatch)}
+              disabled={
+                batchActionBusy || submitting || lock.isLocked || lifecycleLocked ||
+                !batchIsOpen
+              }
+              title={lifecycleLocked ? "Start the job card first" : undefined}
+              className="h-9 px-4 text-[13px] font-bold tracking-wide rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[var(--text-primary)] hover:border-[var(--aws-orange)] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Close Batch
+            </button>
+          ) : null
+        }
       />
-      {/* Close Batch modal driven by the Batch Context panel button.
+      {/* Close Batch modal driven by the bottom-row Close Batch button.
           Same component BatchBand uses inside AccountingSummaryCard;
           rendered here so the close flow lives next to its trigger. */}
       {closeBatchModal ? (
@@ -5954,7 +5968,7 @@ function FormCheckbox({ label, value, onChange, disabled }: { label: string; val
 }
 
 function FormFooter({
-  feedback, submitting, submitLabel, disabled,
+  feedback, submitting, submitLabel, disabled, extraActions,
 }: {
   feedback: { kind: "ok" | "err"; msg: string } | null;
   submitting: boolean;
@@ -5963,6 +5977,10 @@ function FormFooter({
    *  button is disabled with an aria-disabled hint even outside the
    *  submitting state. */
   disabled?: boolean;
+  /** Optional siblings rendered immediately after the submit button so
+   *  callers can colocate related actions (e.g. Close Batch next to
+   *  Save/Edit Batch) without rebuilding the layout. */
+  extraActions?: React.ReactNode;
 }) {
   // C10 (Wave 4) — submit button delegated to ActionButton. type="submit"
   // keeps the native form-submit pathway intact so the existing onSubmit
@@ -5983,6 +6001,7 @@ function FormFooter({
       >
         {submitLabel}
       </ActionButton>
+      {extraActions}
       {feedback ? (
         <span className={["text-[12px]", feedback.kind === "ok" ? "text-[var(--text-success)]" : "text-[var(--aws-error)]"].join(" ")}>
           {feedback.msg}
