@@ -65,7 +65,22 @@ export function friendlyApiError(raw: unknown): string {
   }
   const code = detail.error || "";
   const msg = detail.message;
-  const fromBackend = msg && msg.trim() ? msg : null;
+  // The middleware (server_replica/app/core/middleware/request_context.py)
+  // fills `message` with the generic HTTP status name ("Bad request",
+  // "Not found", "Forbidden", "Conflict", "Validation failed", etc.)
+  // when the raised HTTPException's detail dict has no explicit message
+  // field. These are useless to operators — they don't tell you WHICH
+  // 400 you hit. Treat them as no-message-from-backend so the default
+  // branch falls through to `Server error: <code>` which at least
+  // surfaces the actual error code.
+  const GENERIC_STATUS_MESSAGES = new Set([
+    "Bad request", "Authentication required", "Forbidden", "Not found",
+    "Method not allowed", "Conflict", "Unsupported media type",
+    "Validation failed", "Account locked", "Too many requests",
+    "Internal server error",
+  ]);
+  const isGenericStatus = msg ? GENERIC_STATUS_MESSAGES.has(msg.trim()) : false;
+  const fromBackend = msg && msg.trim() && !isGenericStatus ? msg : null;
   // Helper: action-verb prefix wrapping the backend's own message.
   const compose = (verb: string, fallback: string) =>
     fromBackend ? `Cannot ${verb} — ${fromBackend}` : `Cannot ${verb} — ${fallback}`;
@@ -149,6 +164,27 @@ export function friendlyApiError(raw: unknown): string {
       return compose("dispatch", "the next job card is missing from the chain. Contact admin.");
     case "invalid_qty":
       return fromBackend || "Invalid qty.";
+    case "invalid_bom_line":
+      return fromBackend || "Invalid BOM line — one or more articles aren't on this job card's BOM. Refresh the page so the BOM cache rebuilds.";
+    case "invalid_uom":
+      return fromBackend || "Invalid UoM. Valid values: KGS / GMS / PCS / NOS / ROLL / EACH.";
+    case "invalid_category":
+      return fromBackend || "Invalid byproduct category. Valid: wastage / rejection / control_sample / pm_torn / pm_damaged / pm_misprint / pm_rejection / pm_wasted.";
+    case "invalid_input_kind":
+      return fromBackend || "Invalid input kind. Expected RM or PM.";
+    case "negative_pause":
+      return fromBackend || "Pause minutes must be ≥ 0.";
+    case "log_not_found":
+      return fromBackend || "Shift segment not found.";
+    case "already_closed":
+      return fromBackend || "Shift segment is already closed.";
+    case "invalid_shift":
+      return fromBackend || "Invalid shift code.";
+    case "bad_request":
+      // Middleware default code when the raised HTTPException had no error
+      // field in its detail dict. Surface the rest of the response (or the
+      // raw text) rather than the equally-useless "Bad request" label.
+      return fromBackend || rawText || "Bad request — server didn't tell us why.";
     case "override_request_not_found":
     case "override_request_wrong_type":
     case "override_request_not_approved":
