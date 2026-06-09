@@ -3798,11 +3798,21 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
     if (batchHasData) {
       const dirty = dirtyMaskRef.current;
       if (!dirty.has("output_qty")) {
-        delete body.fg_actual_kg;
-        delete body.fg_actual_units;
+        // Only strip the SERVER-DERIVED fields. fg_expected_* come from the
+        // JC plan, not from operator input, so omitting them is safe (the
+        // backend already has the planned values).
         delete body.fg_expected_kg;
         delete body.fg_expected_units;
-        delete body.process_loss_kg;
+        // fg_actual_kg, fg_actual_units, process_loss_kg are OPERATOR-VISIBLE
+        // scalars rendered in the form. Previously stripped here when
+        // output_qty wasn't dirty — but the displayed value can drift from
+        // what the server stored (e.g. operator opened the batch, didn't
+        // re-type process_loss, edited only consumption). The backend's
+        // `is not None` gate then leaves the stale row alone, so the
+        // refreshed UI shows the still-old persisted value and the
+        // operator's intent is silently lost. Always sending these three
+        // scalars costs ~3 floats per save and removes the silent-drop
+        // class entirely.
       }
       if (!dirty.has("consumption")) {
         delete body.rm_consumed;
