@@ -2753,15 +2753,30 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
     if (!selectedBatch) {
       return { fgKg: sec5Kg, fgUnits: sec5Units, loss: sec5Loss };
     }
-    // Closed batch: BatchRow snapshot is canonical.
+    // Primary source: the BatchRow (job_card_batch_v2 view). For closed
+    // batches this is the canonical snapshot; for open batches it's
+    // typically null until close.
     let fgKg = selectedBatch.fg_actual_kg != null ? String(selectedBatch.fg_actual_kg) : "";
     let fgUnits = selectedBatch.fg_actual_units != null ? String(selectedBatch.fg_actual_units) : "";
     let loss = selectedBatch.process_loss_kg != null ? String(selectedBatch.process_loss_kg) : "";
-    // Open batch with saved output rows: fall through to the latest
-    // job_card_output_v2 row for THIS batch so the operator sees their
-    // typed values after a reload (BatchRow's fg_actual_kg stays null
-    // until close).
-    if (selectedBatch.status === "open" && Array.isArray(detail.outputs)) {
+    // Fallback: latest job_card_output_v2 row for THIS batch. Was
+    // previously gated on `status === "open"` so closed batches with a
+    // null BatchRow.process_loss_kg never recovered the value the output
+    // detail row already had — symptom: form re-opens with an empty
+    // Process Loss field even though the value persisted to DB. Two
+    // scenarios make this necessary:
+    //   (a) job_card_batch_v2 is a view over job_card_phase_v2 (migration
+    //       036), and migration 038 (which extends the view with
+    //       process_loss_kg / fg_actual_kg / fg_actual_units / etc.) may
+    //       not be applied on every environment yet. The view then
+    //       returns those columns as undefined.
+    //   (b) close_batch was previously buggy on the sibling output INSERT
+    //       (server_replica 9f14e47): output_v2.process_loss_kg defaulted
+    //       to 0 even though batch_v2.process_loss_kg had the real value.
+    //       Old closed rows still carry that divergence — the fallback
+    //       now repairs the displayed value at read time without
+    //       requiring a DB backfill.
+    if (Array.isArray(detail.outputs)) {
       let latest: Record<string, unknown> | null = null;
       let latestId = -Infinity;
       for (const o of detail.outputs) {
