@@ -3662,9 +3662,17 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
       fg_actual_units:   fgActualUnits.trim() === "" ? null : parseInt(fgActualUnits, 10),
       fg_expected_kg:    expectedKg,
       fg_expected_units: expectedUnits,
-      // Backend's _coerce_float treats empty string and 0 the same, so it
-      // is safe to default a blank process loss to 0 here.
-      process_loss_kg:   processLoss.trim()   === "" ? 0    : num(processLoss),
+      // Match the null-on-blank convention used by fg_actual_kg above.
+      // Previously this defaulted to 0 when the field was blank, but the
+      // backend's has_output_payload guard treats `process_loss_kg is not
+      // None` as a signal that the operator wants to insert an output
+      // row — so sending 0 forced record_output() to fire even when the
+      // operator was only saving consumption / off-grade rows. With FG
+      // Actual Kg also blank, record_output then returned missing_qty
+      // and the whole save 400'd. Sending null lets has_output_payload
+      // skip the output row and persist just the consumption / byproducts
+      // the operator actually typed.
+      process_loss_kg:   processLoss.trim()   === "" ? null : num(processLoss),
     };
 
     // Per-line consumption — split RM vs PM by article.item_type.
