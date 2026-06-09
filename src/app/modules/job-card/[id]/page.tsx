@@ -4000,6 +4000,14 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
       // and the Edit Batch button correctly reflects "no pending changes"
       // until the operator types again.
       dirtyMaskRef.current.clear();
+      // Refresh the batches array BEFORE onReload so the BatchRow snapshot
+      // (fg_actual_kg, fg_actual_units, process_loss_kg, batchHasData
+      // derivation, the "EDIT BATCH" submit label) reflects the values
+      // we just saved. Mirrors doOpenBatch (~line 2902) and the
+      // BatchCloseModal save (~line 4791); the omission here let the
+      // selector stay stale and made subsequent edits look like fresh
+      // saves on a batch that already had data.
+      await refetchBatches();
       onReload();
     } catch (err) {
       setFeedback({ kind: "err", msg: friendlyJobCardError(err) });

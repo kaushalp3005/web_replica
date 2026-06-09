@@ -64,7 +64,22 @@ function matchesBatch<T extends { batch_id?: number | null }>(
 ): boolean {
   if (filter === undefined) return true;
   if (filter === null) return row.batch_id == null;
-  return row.batch_id === filter;
+  // Defense in depth — rows with batch_id=NULL should always surface under
+  // the currently selected batch instead of vanishing. Three real sources
+  // of null batch_id we want to tolerate gracefully:
+  //   1. Legacy rows written before migration 036 added the column (rare
+  //      now, but still on prod for old JCs).
+  //   2. record_output rows written before the recent service fix that
+  //      added batch_id to the INSERT (server_replica 7482956). The
+  //      backfill migration 046 catches most of these, but JCs whose
+  //      batches were all closed before the output's recorded_at can't
+  //      be resolved by the started_at/closed_at heuristic.
+  //   3. Any future write path that forgets to thread batch_id through
+  //      (caught here instead of silently blanking the operator's form).
+  // The save path always tags NEW writes with the selected batch_id, so
+  // including null-batch rows here only surfaces legacy data we want
+  // surfaced anyway.
+  return row.batch_id == null || row.batch_id === filter;
 }
 
 function lineKey(bomLineId: number | null | undefined, name: string | null | undefined): string {
