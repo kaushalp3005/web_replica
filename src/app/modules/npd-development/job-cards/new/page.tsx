@@ -7,14 +7,14 @@
 // Saving creates a DRAFT; development is started and closed (which promotes the
 // recipe into a live BOM) from the detail page.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
-import { Breadcrumbs, SAMPLE_ROOT } from "@/components/Breadcrumbs";
+import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial } from "@/lib/user";
-import { WAREHOUSES, type Warehouse } from "@/lib/sample";
+import { WAREHOUSES, getRequisition, type Warehouse } from "@/lib/sample";
 import { createDevJobCard, getBomLines, type DevLine, type BomOption } from "@/lib/npd-dev";
-import { FormSection, ReviewRow, ArticlePicker, UomSelect, BomPicker } from "../../../_form";
+import { FormSection, ReviewRow, ArticlePicker, UomSelect, BomPicker } from "../../../sample/_form";
 
 interface DraftLine {
   sku_id: number | null;
@@ -50,6 +50,30 @@ export default function NewDevJobCardPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedId, setSavedId] = useState<number | null>(null);
+  const [linkedReq, setLinkedReq] = useState<string | null>(null);   // request label this card was started from
+  const [linkedReqId, setLinkedReqId] = useState<number | null>(null);   // request id (back-links the card)
+
+  // When opened from an approved request's "Develop" button (?req=<id>), prefill
+  // the header from that requisition (target product → title, warehouse, qty).
+  // The base BOM + recipe are still authored here.
+  useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      const reqId = new URLSearchParams(window.location.search).get("req");
+      if (!reqId) return;
+      setLinkedReqId(Number(reqId));
+      getRequisition(Number(reqId)).then((req) => {
+        if (cancelled) return;
+        if (req.npd_target_name) setTitle(req.npd_target_name);
+        if (req.warehouse) setWarehouse(req.warehouse as Warehouse);
+        if (req.quantity != null) setTargetQty(String(req.quantity));
+        if (req.purpose_note) setDescription(req.purpose_note);
+        setLinkedReq(String(req.request_id ?? req.requisition_number));
+      }).catch(() => { /* leave the form blank on lookup failure */ });
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   // What the Target product field shows / sends: the manual value once touched,
   // otherwise the live Title.
@@ -125,6 +149,7 @@ export default function NewDevJobCardPage() {
           fg_sku_name: effectiveFgName || undefined,
           target_qty: targetQty ? Number(targetQty) : undefined,
           uom: uom || undefined,
+          source_requisition_id: linkedReqId ?? undefined,
           // The trial recipe (base lines + additions) is sent explicitly — no
           // server-side clone, so the operator's edits to the base lines stick.
           clone_from_base: false,
@@ -133,7 +158,7 @@ export default function NewDevJobCardPage() {
         id = jc.id;
         setSavedId(id);
       }
-      router.push(`/modules/sample/npd/job-cards/${id}`);
+      router.push(`/modules/npd-development/job-cards/${id}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create job card");
       setSaving(false);
@@ -147,9 +172,9 @@ export default function NewDevJobCardPage() {
       <header className="bg-[var(--aws-navy)] h-[45px] flex items-center px-4 sm:px-6 gap-4">
         <BrandMark />
         <nav className="text-[12px] text-[#d5dbdb] hidden sm:flex items-center gap-2 ml-2">
-          <button onClick={() => router.push("/modules/sample/npd")} className="hover:underline">NPD</button>
+          <button onClick={() => router.push("/modules/npd-development")} className="hover:underline">NPD Development</button>
           <span>/</span>
-          <button onClick={() => router.push("/modules/sample/npd/job-cards")} className="hover:underline">Job cards</button>
+          <button onClick={() => router.push("/modules/npd-development/job-cards")} className="hover:underline">Job cards</button>
           <span>/</span><span className="text-white">New</span>
         </nav>
         <div className="flex-1" />
@@ -158,8 +183,11 @@ export default function NewDevJobCardPage() {
       </header>
 
       <main className="flex-1 max-w-[820px] w-full mx-auto px-4 sm:px-6 py-6">
-        <Breadcrumbs items={[...SAMPLE_ROOT, { label: "NPD", href: "/modules/sample/npd" }, { label: "Job cards", href: "/modules/sample/npd/job-cards" }, { label: "New" }]} className="mb-3" />
-        <h1 className="text-[20px] font-semibold text-[var(--text-primary)] mb-4">New development job card</h1>
+        <Breadcrumbs items={[...NPD_DEV_ROOT, { label: "Job cards", href: "/modules/npd-development/job-cards" }, { label: "New" }]} className="mb-3" />
+        <h1 className="text-[20px] font-semibold text-[var(--text-primary)] mb-1">New development job card</h1>
+        {linkedReq
+          ? <p className="mb-4 text-[12px] text-[var(--text-secondary)]">Prefilled from approved request <span className="font-medium text-[var(--text-primary)]">{linkedReq}</span> — pick a base BOM and build the trial recipe.</p>
+          : <div className="mb-4" />}
 
         {error && <div className="mb-4 rounded-md border border-[#f0c7be] bg-[#fdf3f1] px-3 py-2 text-[13px] text-[#b1361e]">{error}</div>}
 
@@ -283,7 +311,7 @@ export default function NewDevJobCardPage() {
 
         {/* Actions */}
         <div className="flex items-center gap-2 mt-5">
-          <button onClick={() => router.push("/modules/sample/npd/job-cards")}
+          <button onClick={() => router.push("/modules/npd-development/job-cards")}
             className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] text-[13px] bg-white hover:bg-[var(--surface-subtle)]">Cancel</button>
           <div className="flex-1" />
           <button disabled={saving || !canCreate} onClick={save}

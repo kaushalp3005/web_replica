@@ -43,3 +43,9 @@ export const SAMPLE_ROOT: Crumb[] = [
   { label: "Modules", href: "/modules" },
   { label: "Sample", href: "/modules/sample" },
 ];
+
+// Root crumbs for the standalone NPD Development module.
+export const NPD_DEV_ROOT: Crumb[] = [
+  { label: "Modules", href: "/modules" },
+  { label: "NPD Development", href: "/modules/npd-development" },
+];

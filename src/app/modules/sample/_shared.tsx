@@ -7,6 +7,7 @@ export const STATUS_STYLES: Record<string, { bg: string; fg: string; ring: strin
   SUBMITTED:             { bg: "#eaf3ff", fg: "#1d4ed8", ring: "#bbd9f3" },
   BH_APPROVED:           { bg: "#eef2ff", fg: "#4338ca", ring: "#c7d2fe" },
   BH_REJECTED:           { bg: "#fdf3f1", fg: "#b1361e", ring: "#f0c7be" },
+  ON_HOLD:               { bg: "#fef9c3", fg: "#854d0e", ring: "#fde68a" },
   IN_PRODUCTION:         { bg: "#fef3c7", fg: "#92400e", ring: "#fde68a" },
   PACKING:               { bg: "#f5f3ff", fg: "#6d28d9", ring: "#ddd6fe" },
   READY_FOR_DISPATCH:    { bg: "#ecfeff", fg: "#0e7490", ring: "#a5f0fc" },

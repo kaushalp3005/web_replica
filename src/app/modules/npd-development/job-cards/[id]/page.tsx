@@ -7,15 +7,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
-import { Breadcrumbs, SAMPLE_ROOT } from "@/components/Breadcrumbs";
+import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
 import { sampleCaps } from "@/lib/sample-roles";
 import {
   getDevJobCard, replaceDevLines, startDevJobCard, closeDevJobCard, cancelDevJobCard, dispatchDevJobCard,
   type DevJobCard, type DevLine,
 } from "@/lib/npd-dev";
-import { DevJcStatusPill } from "../../../_shared";
-import { ArticlePicker, UomSelect } from "../../../_form";
+import { DevJcStatusPill } from "../../../sample/_shared";
+import { ArticlePicker, UomSelect } from "../../../sample/_form";
 
 interface EditLine {
   id?: number;
@@ -176,9 +176,9 @@ export default function DevJobCardDetailPage() {
       <header className="bg-[var(--aws-navy)] h-[45px] flex items-center px-4 sm:px-6 gap-4">
         <BrandMark />
         <nav className="text-[12px] text-[#d5dbdb] hidden sm:flex items-center gap-2 ml-2">
-          <button onClick={() => router.push("/modules/sample/npd")} className="hover:underline">NPD</button>
+          <button onClick={() => router.push("/modules/npd-development")} className="hover:underline">NPD Development</button>
           <span>/</span>
-          <button onClick={() => router.push("/modules/sample/npd/job-cards")} className="hover:underline">Job cards</button>
+          <button onClick={() => router.push("/modules/npd-development/job-cards")} className="hover:underline">Job cards</button>
           <span>/</span><span className="text-white">{jc?.dev_jc_number ?? id}</span>
         </nav>
         <div className="flex-1" />
@@ -187,7 +187,7 @@ export default function DevJobCardDetailPage() {
       </header>
 
       <main className="flex-1 max-w-[820px] w-full mx-auto px-4 sm:px-6 py-6">
-        <Breadcrumbs items={[...SAMPLE_ROOT, { label: "NPD", href: "/modules/sample/npd" }, { label: "Job cards", href: "/modules/sample/npd/job-cards" }, { label: jc?.dev_jc_number ?? String(id) }]} className="mb-3" />
+        <Breadcrumbs items={[...NPD_DEV_ROOT, { label: "Job cards", href: "/modules/npd-development/job-cards" }, { label: jc?.dev_jc_number ?? String(id) }]} className="mb-3" />
 
         {error && <div className="mb-4 rounded-md border border-[#f0c7be] bg-[#fdf3f1] px-3 py-2 text-[13px] text-[#b1361e]">{error}</div>}
 

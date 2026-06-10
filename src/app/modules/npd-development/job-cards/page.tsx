@@ -8,11 +8,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
-import { Breadcrumbs, SAMPLE_ROOT } from "@/components/Breadcrumbs";
+import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
 import { sampleCaps } from "@/lib/sample-roles";
 import { listDevJobCards, type DevJobCard } from "@/lib/npd-dev";
-import { DEV_JC_STATUS_STYLES, DevJcStatusPill } from "../../_shared";
+import { DEV_JC_STATUS_STYLES, DevJcStatusPill } from "../../sample/_shared";
 
 const STATUS_OPTIONS = Object.keys(DEV_JC_STATUS_STYLES);
 
@@ -27,9 +27,7 @@ function Shell({ initial, router, children }: {
         <BrandMark />
         <span className="text-[#d5dbdb] text-[13px] hidden sm:inline">Console</span>
         <nav className="text-[12px] text-[#d5dbdb] hidden md:flex items-center gap-2 ml-2">
-          <button onClick={() => router.push("/modules/sample")} className="hover:underline">Sample</button>
-          <span>/</span>
-          <button onClick={() => router.push("/modules/sample/npd")} className="hover:underline">NPD</button>
+          <button onClick={() => router.push("/modules/npd-development")} className="hover:underline">NPD Development</button>
           <span>/</span>
           <span className="text-white">Job cards</span>
         </nav>
@@ -79,7 +77,7 @@ export default function NpdDevJobCardsPage() {
   }, [authed, status]);
 
   function openRow(id: number) {
-    router.push(`/modules/sample/npd/job-cards/${id}`);
+    router.push(`/modules/npd-development/job-cards/${id}`);
   }
 
   if (!mounted) {
@@ -97,7 +95,7 @@ export default function NpdDevJobCardsPage() {
 
   return (
     <Shell initial={initial} router={router}>
-      <Breadcrumbs items={[...SAMPLE_ROOT, { label: "NPD", href: "/modules/sample/npd" }, { label: "Job cards" }]} className="mb-3" />
+      <Breadcrumbs items={[...NPD_DEV_ROOT, { label: "Job cards", href: "/modules/npd-development/job-cards" }]} className="mb-3" />
       <div className="flex flex-wrap items-center gap-3 mb-5">
         <div className="min-w-0">
           <h1 className="text-[22px] leading-7 font-semibold text-[var(--text-primary)]">NPD development job cards</h1>
@@ -106,7 +104,7 @@ export default function NpdDevJobCardsPage() {
         <div className="flex-1" />
         {caps.canNpd && (
           <button
-            onClick={() => router.push("/modules/sample/npd/job-cards/new")}
+            onClick={() => router.push("/modules/npd-development/job-cards/new")}
             className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium hover:bg-[var(--aws-orange-hover)]"
           >+ New job card</button>
         )}

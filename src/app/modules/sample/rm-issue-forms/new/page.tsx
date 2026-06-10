@@ -130,7 +130,7 @@ export default function RaiseRmFormPage() {
         <Breadcrumbs items={[...SAMPLE_ROOT, { label: "RM forms", href: "/modules/sample/rm-issue-forms" }, { label: "Raise" }]} className="mb-3" />
         <h1 className="text-[20px] font-semibold text-[var(--text-primary)] mb-1">Raise RM indent (Document 015)</h1>
         {sourceType === "NPD_DEV_JC" && sourceId != null && (
-          <p className="mb-4 text-[12px] text-[var(--text-secondary)]">Linked to development job card <button className="text-[var(--aws-orange)] hover:underline" onClick={() => router.push(`/modules/sample/npd/job-cards/${sourceId}`)}>#{sourceId}</button> — RM lines seeded from its trial recipe.</p>
+          <p className="mb-4 text-[12px] text-[var(--text-secondary)]">Linked to development job card <button className="text-[var(--aws-orange)] hover:underline" onClick={() => router.push(`/modules/npd-development/job-cards/${sourceId}`)}>#{sourceId}</button> — RM lines seeded from its trial recipe.</p>
         )}
         {sourceType !== "NPD_DEV_JC" && <div className="mb-4" />}
 

@@ -70,6 +70,18 @@ function SampleIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function NpdDevIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M9 3h6" />
+      <path d="M10 3v6L4.5 18a2 2 0 0 0 1.8 3h11.4a2 2 0 0 0 1.8-3L14 9V3" />
+      <path d="M7 14h10" />
+      <circle cx="10" cy="16.5" r="0.8" fill="currentColor" stroke="none" />
+      <circle cx="13.5" cy="18" r="0.8" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 function TransferIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
@@ -145,6 +157,17 @@ export const MODULES: ModuleItem[] = [
     implemented: true,
     adminOnly: true,
     Icon: SampleIcon,
+  },
+  {
+    title: "NPD Development",
+    description:
+      "New product development — raise NPD / customer-trial requests, run NPD review (approve / reject / hold), and build trial recipes into live BOMs via development job cards.",
+    badge: "R&D",
+    stat: "Requests · Review · Dev job cards",
+    route: "npd-development",
+    implemented: true,
+    adminOnly: true,
+    Icon: NpdDevIcon,
   },
   {
     title: "Inter-Unit Transfer",

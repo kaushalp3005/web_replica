@@ -10,14 +10,14 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
-import { Breadcrumbs, SAMPLE_ROOT } from "@/components/Breadcrumbs";
+import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe, useIsAdmin } from "@/lib/user";
 import {
   createRequisition, submitRequisition, WAREHOUSES,
   type PurposeTag, type SampleType, type Warehouse,
 } from "@/lib/sample";
 import { listUsers } from "@/lib/admin-api";
-import { FormSection } from "../_form";
+import { FormSection } from "../sample/_form";
 
 const PURPOSE_OPTIONS: { value: PurposeTag; label: string }[] = [
   { value: "CUSTOMER_DISPLAY", label: "Customer display" },
@@ -111,9 +111,7 @@ export function NpdSampleForm({ defaultType, heading }: {
       <header className="bg-[var(--aws-navy)] h-[45px] flex items-center px-4 sm:px-6 gap-4">
         <BrandMark />
         <nav className="text-[12px] text-[#d5dbdb] hidden sm:flex items-center gap-2 ml-2">
-          <button onClick={() => router.push("/modules/sample")} className="hover:underline">Sample</button>
-          <span>/</span>
-          <button onClick={() => router.push("/modules/sample/npd")} className="hover:underline">NPD</button>
+          <button onClick={() => router.push("/modules/npd-development")} className="hover:underline">NPD Development</button>
           <span>/</span><span className="text-white">New</span>
         </nav>
         <div className="flex-1" />
@@ -122,7 +120,7 @@ export function NpdSampleForm({ defaultType, heading }: {
       </header>
 
       <main className="flex-1 max-w-[820px] w-full mx-auto px-4 sm:px-6 py-6">
-        <Breadcrumbs items={[...SAMPLE_ROOT, { label: "NPD", href: "/modules/sample/npd" }, { label: heading }]} className="mb-3" />
+        <Breadcrumbs items={[...NPD_DEV_ROOT, { label: heading }]} className="mb-3" />
         <h1 className="text-[20px] font-semibold text-[var(--text-primary)] mb-4">{heading}</h1>
 
         {error && <div className="mb-4 rounded-md border border-[#f0c7be] bg-[#fdf3f1] px-3 py-2 text-[13px] text-[#b1361e]">{error}</div>}
@@ -200,7 +198,7 @@ export function NpdSampleForm({ defaultType, heading }: {
 
         {/* Actions */}
         <div className="flex items-center gap-2 mt-5">
-          <button onClick={() => router.push("/modules/sample/npd")}
+          <button onClick={() => router.push("/modules/npd-development")}
             className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] text-[13px] bg-white hover:bg-[var(--surface-subtle)]">Cancel</button>
           <div className="flex-1" />
           <button disabled={saving || !canSave} onClick={() => save(false)}

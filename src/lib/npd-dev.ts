@@ -65,6 +65,7 @@ export interface DevJobCardCreate {
   fg_sku_name?: string;
   target_qty?: number;
   uom?: string;
+  source_requisition_id?: number;   // set when started from a request's "Develop"
   clone_from_base?: boolean;
   lines?: DevLine[];
 }

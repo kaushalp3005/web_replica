@@ -8,7 +8,7 @@ import { apiFetch, readApiErrorMessage } from "./auth";
 export type SampleType = "BASIS_RM" | "BASIS_FG" | "NPD" | "INTERNAL" | "TRIAL";
 
 export type SampleStatus =
-  | "DRAFT" | "SUBMITTED" | "BH_APPROVED" | "BH_REJECTED"
+  | "DRAFT" | "SUBMITTED" | "BH_APPROVED" | "BH_REJECTED" | "ON_HOLD"
   | "IN_PRODUCTION" | "PACKING" | "READY_FOR_DISPATCH"
   | "INTERNALLY_DISPATCHED" | "PARTIALLY_CONVERTED"
   | "GATE_PASS_ISSUED" | "CLOSED" | "CANCELLED";
@@ -71,6 +71,7 @@ export interface Requisition {
   base_bom_id?: number | null;
   npd_target_name?: string | null;   // requested new NPD article name
   quantity?: number | null;          // requested quantity (free float)
+  linked_dev_jc_id?: number | null;  // dev job card created from this request's Develop
   npd_draft_bom_id?: number | null;
   linked_job_card_id?: number | null;
   linked_gate_pass_id?: number | null;
@@ -218,6 +219,8 @@ export const cancelRequisition = (id: number, reason: string) => action(id, "can
 export const closeRequisition = (id: number) => action(id, "close", undefined, "Close failed");
 export const approveRequisition = (id: number, act: "APPROVED" | "REJECTED", remarks?: string) =>
   action(id, "approve", { action: act, remarks }, "Approval failed");
+export const npdReview = (id: number, act: "APPROVE" | "REJECT" | "HOLD", reason?: string) =>
+  action(id, "npd-review", { action: act, reason }, "NPD review failed");
 export const issueOutward = (id: number, from_location?: string) => action(id, "outward", { from_location }, "Outward failed");
 export const dispatchInternal = (id: number) => action(id, "dispatch-internal", undefined, "Dispatch failed");
 export const startProduction = (id: number) => action(id, "start-production", undefined, "Start production failed");
