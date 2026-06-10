@@ -21,6 +21,11 @@ export const PROCESS_OPTIONS: readonly string[] = [
   "Enrobing",
   "Flow Wrap",
   "Master Carton",
+  "Weighing",
+  "Mixing",
+  "Krugger",
+  "X-ray",
+  "Monocarton",
 ] as const;
 
 // Normalise legacy spellings (e.g. "De-Seeding" → "De-seeding") so the
