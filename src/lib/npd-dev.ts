@@ -21,8 +21,32 @@ export interface DevLine {
   notes?: string | null;
 }
 
+export type DevPhaseStatus = "PENDING" | "IN_PROGRESS" | "COMPLETED";
+
+export interface DevPhase {
+  phase_id: number;
+  dev_jc_id: number;
+  phase_number: number;
+  name: string;
+  status: DevPhaseStatus;
+  started_at?: string | null;
+  started_by?: number | null;
+  completed_at?: string | null;
+  completed_by?: number | null;
+  notes?: string | null;
+  // This phase's own trial recipe (independent per phase).
+  lines?: DevLine[];
+  // Per-phase output + material accounting (recorded at completion).
+  output_qty?: number | string | null;
+  output_uom?: string | null;
+  rm_consumed_qty?: number | string | null;
+  wastage_qty?: number | string | null;
+  extra_give_away_qty?: number | string | null;
+  yield_pct?: number | string | null;
+}
+
 export interface DevJobCard {
-  id: number;
+  id: number;                       // 8-digit time-based BIGINT (new_short_time_id)
   dev_jc_number: string;
   title: string;
   description?: string | null;
@@ -32,7 +56,17 @@ export interface DevJobCard {
   fg_sku_id?: number | null;
   fg_sku_name?: string | null;
   target_qty?: number | string | null;
+  pcs?: number | string | null;
+  weight_per_piece?: number | string | null;
   uom?: string | null;
+  // Customer + dispatch planning — inherited from the source requisition.
+  company_name?: string | null;
+  customer_name?: string | null;
+  customer_contact?: string | null;
+  customer_ship_to_address?: string | null;
+  mode_of_transport?: string | null;
+  expected_dispatch_date?: string | null;   // by BD team
+  confirmed_dispatch_date?: string | null;  // by NPD
   status: DevJcStatus;
   output_qty?: number | string | null;
   output_uom?: string | null;
@@ -54,6 +88,8 @@ export interface DevJobCard {
   // List rows carry a line_count; the detail GET carries the full lines.
   line_count?: number;
   lines?: DevLine[];
+  // Trial phases (multi-day) — present on the detail GET.
+  phases?: DevPhase[];
 }
 
 export interface DevJobCardCreate {
@@ -64,6 +100,8 @@ export interface DevJobCardCreate {
   fg_sku_id?: number;
   fg_sku_name?: string;
   target_qty?: number;
+  pcs?: number;
+  weight_per_piece?: number;
   uom?: string;
   source_requisition_id?: number;   // set when started from a request's "Develop"
   clone_from_base?: boolean;
@@ -71,6 +109,7 @@ export interface DevJobCardCreate {
 }
 
 export interface DevJobCardCloseBody {
+  promote_phase_id?: number;   // which phase's recipe becomes the live BOM
   output_qty?: number;
   output_uom?: string;
   yield_pct?: number;
@@ -78,6 +117,16 @@ export interface DevJobCardCloseBody {
   wastage_qty?: number;
   extra_give_away_qty?: number;
   output_notes?: string;
+}
+
+// Per-phase completion body — the phase's output + material accounting.
+export interface DevPhaseCompleteBody {
+  output_qty?: number;
+  output_uom?: string;
+  rm_consumed_qty?: number;
+  wastage_qty?: number;
+  extra_give_away_qty?: number;
+  notes?: string;
 }
 
 // Compact BOM row for the 'Base BOM' typeahead (there are ~1300 active BOMs,
@@ -187,5 +236,21 @@ export const closeDevJobCard = (id: number, body: DevJobCardCloseBody) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/close`, body), "Close failed");
 export const cancelDevJobCard = (id: number, reason: string) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/cancel`, { reason }), "Cancel failed");
+
+// Trial phases (multi-day) — each owns its recipe; start / complete independently.
+export const addDevPhase = (id: number, name: string, cloneFromPhaseId?: number) =>
+  jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/phases`,
+    { name, clone_from_phase_id: cloneFromPhaseId }), "Failed to add phase");
+export const replacePhaseLines = (id: number, phaseId: number, lines: DevLine[]) =>
+  jsonOrThrow<DevJobCard>(
+    apiFetch(`${BASE}/${id}/phases/${phaseId}/lines`, { method: "PUT", body: JSON.stringify({ lines }) }),
+    "Failed to save phase recipe");
+export const deleteDevPhase = (id: number, phaseId: number) =>
+  jsonOrThrow<DevJobCard>(
+    apiFetch(`${BASE}/${id}/phases/${phaseId}`, { method: "DELETE" }), "Failed to delete phase");
+export const startDevPhase = (id: number, phaseId: number) =>
+  jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/phases/${phaseId}/start`), "Failed to start phase");
+export const completeDevPhase = (id: number, phaseId: number, body?: DevPhaseCompleteBody) =>
+  jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/phases/${phaseId}/complete`, body ?? {}), "Failed to complete phase");
 export const dispatchDevJobCard = (id: number, body: { recipient?: string; qty?: number }) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/dispatch`, body), "Dispatch failed");

@@ -43,7 +43,8 @@ export default function NewDevJobCardPage() {
   const [baseBomId, setBaseBomId] = useState<number | null>(null);
   const [baseBomLabel, setBaseBomLabel] = useState<string>("");
   const [seeding, setSeeding] = useState(false);
-  const [targetQty, setTargetQty] = useState("");
+  const [pcs, setPcs] = useState("");
+  const [weightPerPiece, setWeightPerPiece] = useState("");
   const [uom, setUom] = useState("kg");
   const [extName, setExtName] = useState("");   // free-typed external test ingredient
   const [lines, setLines] = useState<DraftLine[]>([]);
@@ -54,8 +55,8 @@ export default function NewDevJobCardPage() {
   const [linkedReqId, setLinkedReqId] = useState<number | null>(null);   // request id (back-links the card)
 
   // When opened from an approved request's "Develop" button (?req=<id>), prefill
-  // the header from that requisition (target product → title, warehouse, qty).
-  // The base BOM + recipe are still authored here.
+  // the header from that requisition (target product → title, warehouse, qty,
+  // description). The base BOM + recipe are still authored here.
   useEffect(() => {
     let cancelled = false;
     queueMicrotask(() => {
@@ -67,8 +68,11 @@ export default function NewDevJobCardPage() {
         if (cancelled) return;
         if (req.npd_target_name) setTitle(req.npd_target_name);
         if (req.warehouse) setWarehouse(req.warehouse as Warehouse);
-        if (req.quantity != null) setTargetQty(String(req.quantity));
-        if (req.purpose_note) setDescription(req.purpose_note);
+        if (req.pcs != null) setPcs(String(req.pcs));
+        if (req.weight_per_piece != null) setWeightPerPiece(String(req.weight_per_piece));
+        // Description moved off purpose_note → description; fall back for legacy rows.
+        const desc = req.description ?? req.purpose_note;
+        if (desc) setDescription(desc);
         setLinkedReq(String(req.request_id ?? req.requisition_number));
       }).catch(() => { /* leave the form blank on lookup failure */ });
     });
@@ -80,6 +84,10 @@ export default function NewDevJobCardPage() {
   const effectiveFgName = (fgTouched ? fgSkuName : title).trim();
   const baseCount = lines.filter((l) => l.fromBase).length;
   const addedCount = lines.length - baseCount;
+  // Target qty is derived = pcs × weight per piece (kg) — same as the requisition.
+  const pcsNum = Number(pcs), wppNum = Number(weightPerPiece);
+  const targetQtyNum = (pcs.trim() !== "" && weightPerPiece.trim() !== "" && Number.isFinite(pcsNum) && Number.isFinite(wppNum))
+    ? Number((pcsNum * wppNum).toFixed(3)) : 0;
   // Base BOM is mandatory — the trial recipe is built on top of it.
   const canCreate = !!title.trim() && baseBomId != null && !seeding;
 
@@ -147,7 +155,9 @@ export default function NewDevJobCardPage() {
           warehouse: warehouse || undefined,
           base_bom_id: baseBomId ?? undefined,
           fg_sku_name: effectiveFgName || undefined,
-          target_qty: targetQty ? Number(targetQty) : undefined,
+          pcs: pcsNum || undefined,
+          weight_per_piece: wppNum || undefined,
+          target_qty: targetQtyNum || undefined,
           uom: uom || undefined,
           source_requisition_id: linkedReqId ?? undefined,
           // The trial recipe (base lines + additions) is sent explicitly — no
@@ -214,8 +224,18 @@ export default function NewDevJobCardPage() {
               </select>
             </div>
             <div>
-              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Target qty (optional)</label>
-              <input className="form-input" type="number" min="0" step="0.001" value={targetQty} onChange={(e) => setTargetQty(e.target.value)} />
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Pcs</label>
+              <input className="form-input" type="number" min="0" step="1" value={pcs}
+                onChange={(e) => setPcs(e.target.value)} placeholder="e.g. 25" />
+            </div>
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Weight per piece (kg)</label>
+              <input className="form-input" type="number" min="0" step="0.001" value={weightPerPiece}
+                onChange={(e) => setWeightPerPiece(e.target.value)} placeholder="e.g. 0.5" />
+            </div>
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Quantity (kg)</label>
+              <input className="form-input bg-[var(--surface-subtle)] cursor-not-allowed" value={targetQtyNum > 0 ? targetQtyNum.toLocaleString("en-IN") : "—"} readOnly tabIndex={-1} />
             </div>
             <div>
               <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">UOM</label>
@@ -303,7 +323,9 @@ export default function NewDevJobCardPage() {
             <ReviewRow label="Title" value={title || "—"} />
             <ReviewRow label="Target product" value={effectiveFgName ? `${effectiveFgName}${fgTouched ? "" : " (from title)"}` : "—"} />
             <ReviewRow label="Warehouse" value={warehouse || "—"} />
-            <ReviewRow label="Target qty" value={targetQty ? `${targetQty} ${uom}` : "—"} />
+            <ReviewRow label="Pcs" value={pcs || "—"} />
+            <ReviewRow label="Weight per piece" value={weightPerPiece ? `${weightPerPiece} kg` : "—"} />
+            <ReviewRow label="Target qty" value={targetQtyNum > 0 ? `${targetQtyNum} ${uom}` : "—"} />
             <ReviewRow label="Base BOM" value={baseBomId != null ? `${baseBomLabel ? `${baseBomLabel} ` : ""}#${baseBomId}` : "— (required)"} />
             <ReviewRow label="Recipe lines" value={lines.length === 0 ? "—" : `${lines.length} (${baseCount} base + ${addedCount} added)`} />
           </dl>

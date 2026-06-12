@@ -34,6 +34,64 @@ export function StatusPill({ status }: { status?: string | null }) {
   );
 }
 
+// NPD review status — the NPD queue/detail surface only 3 review states:
+//   Pending  ← DRAFT, SUBMITTED (the default on create / awaiting review)
+//   Hold     ← ON_HOLD (the Hold pill's tooltip shows the reason)
+//   Accepted ← BH_APPROVED and everything downstream (in production … closed)
+// CANCELLED / BH_REJECTED are terminal negatives, shown as "Cancelled".
+export type NpdReviewStatus = "PENDING" | "HOLD" | "ACCEPTED" | "CANCELLED";
+
+// Filter buckets (the 3 active states) → the underlying statuses they cover.
+export const NPD_STATUS_FILTERS: { value: NpdReviewStatus; label: string; statuses: string[] }[] = [
+  { value: "PENDING", label: "Pending", statuses: ["DRAFT", "SUBMITTED"] },
+  { value: "HOLD", label: "Hold", statuses: ["ON_HOLD"] },
+  {
+    value: "ACCEPTED", label: "Accepted",
+    statuses: ["BH_APPROVED", "IN_PRODUCTION", "PACKING", "READY_FOR_DISPATCH",
+      "INTERNALLY_DISPATCHED", "PARTIALLY_CONVERTED", "GATE_PASS_ISSUED", "CLOSED"],
+  },
+];
+
+export function npdReviewStatus(raw?: string | null): NpdReviewStatus {
+  switch (raw) {
+    case "ON_HOLD": return "HOLD";
+    case "CANCELLED":
+    case "BH_REJECTED": return "CANCELLED";
+    case "BH_APPROVED":
+    case "IN_PRODUCTION":
+    case "PACKING":
+    case "READY_FOR_DISPATCH":
+    case "INTERNALLY_DISPATCHED":
+    case "PARTIALLY_CONVERTED":
+    case "GATE_PASS_ISSUED":
+    case "CLOSED": return "ACCEPTED";
+    default: return "PENDING";   // DRAFT, SUBMITTED, anything else
+  }
+}
+
+const NPD_STATUS_STYLES: Record<NpdReviewStatus, { bg: string; fg: string; ring: string; label: string }> = {
+  PENDING:   { bg: "#eaf3ff", fg: "#1d4ed8", ring: "#bbd9f3", label: "Pending" },
+  HOLD:      { bg: "#fef9c3", fg: "#854d0e", ring: "#fde68a", label: "Hold" },
+  ACCEPTED:  { bg: "#eaf6ed", fg: "#1d8102", ring: "#b6dbb1", label: "Accepted" },
+  CANCELLED: { bg: "#f4f4f4", fg: "#687078", ring: "#d5dbdb", label: "Cancelled" },
+};
+
+// Simplified NPD status pill. For a HOLD, hovering shows the reason.
+export function NpdStatusPill({ status, holdReason }: { status?: string | null; holdReason?: string | null }) {
+  const key = npdReviewStatus(status);
+  const s = NPD_STATUS_STYLES[key];
+  const title = key === "HOLD" && holdReason ? `On hold — ${holdReason}` : undefined;
+  return (
+    <span
+      className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap"
+      style={{ background: s.bg, color: s.fg, boxShadow: `inset 0 0 0 1px ${s.ring}` }}
+      title={title}
+    >
+      {s.label}{key === "HOLD" && holdReason ? " ⓘ" : ""}
+    </span>
+  );
+}
+
 // Standalone NPD development job-card statuses (own vocabulary, own palette).
 export const DEV_JC_STATUS_STYLES: Record<string, { bg: string; fg: string; ring: string }> = {
   DRAFT:          { bg: "#f4f4f4", fg: "#414d5c", ring: "#d5dbdb" },

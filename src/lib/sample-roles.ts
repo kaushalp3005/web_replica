@@ -38,6 +38,10 @@ export interface SampleCaps {
   isAdmin: boolean;
   /** create / edit / submit / cancel a requisition */
   canRequest: boolean;
+  /** edit a request body from the queue — the Sales / business requesting side
+   *  (business_head + planner), NOT the NPD reviewer. No dedicated "sales" role
+   *  exists yet; this is the closest analog. */
+  canEdit: boolean;
   /** business-head approve / reject + conversion */
   canApprove: boolean;
   canConvert: boolean;
@@ -56,6 +60,7 @@ export function sampleCaps(me: MeResponse | null): SampleCaps {
   return {
     isAdmin,
     canRequest: is("planner", "business_head", "npd_team"),
+    canEdit: is("business_head", "planner"),
     canApprove: is("business_head"),
     canConvert: is("business_head"),
     canProduction: is("floor_manager"),

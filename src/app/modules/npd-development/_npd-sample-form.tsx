@@ -1,11 +1,13 @@
 "use client";
 
 // NPD sample REQUEST form. A business/NPD requester raises a requisition naming
-// the new product (Target NPD article name) — the recipe (base BOM, ingredients,
+// the new product (Target NPD article name); the recipe (base BOM, ingredients,
 // promotion to a live BOM) is authored entirely by the NPD team later on the
-// requisition detail page. So this form is deliberately minimal: type, warehouse,
-// the target article name, and optional purpose/notes.
-//   • type = NPD (internal) | TRIAL (customer) → sample_requisitions.sample_type
+// requisition detail page. Fields, in order:
+//   type → warehouse → target NPD article → quantity (kg) → purpose → requestor → description
+// Mandatory: target article, quantity (> 0). Warehouse is also required by the
+// backend (NpdRequisitionCreate). Posts to the dedicated NPD endpoint, which
+// re-validates the NPD-mandatory fields server-side.
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -13,8 +15,8 @@ import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe, useIsAdmin } from "@/lib/user";
 import {
-  createRequisition, submitRequisition, WAREHOUSES,
-  type PurposeTag, type SampleType, type Warehouse,
+  createNpdRequisition, submitRequisition, NPD_SAMPLE_TYPES, NPD_WAREHOUSES,
+  type NpdSampleType, type PurposeTag,
 } from "@/lib/sample";
 import { listUsers } from "@/lib/admin-api";
 import { FormSection } from "../sample/_form";
@@ -28,7 +30,7 @@ const PURPOSE_OPTIONS: { value: PurposeTag; label: string }[] = [
 ];
 
 export function NpdSampleForm({ defaultType, heading }: {
-  defaultType: "NPD" | "TRIAL";
+  defaultType: NpdSampleType;
   heading: string;
 }) {
   const router = useRouter();
@@ -38,16 +40,23 @@ export function NpdSampleForm({ defaultType, heading }: {
   const isAdmin = useIsAdmin();
   const profileName = (me?.full_name ?? "").trim();
 
-  const [type, setType] = useState<"NPD" | "TRIAL">(defaultType);
-  const [warehouse, setWarehouse] = useState<Warehouse | "">("");
-  const [customerName, setCustomerName] = useState("");
-  const [fgSkuName, setFgSkuName] = useState("");          // new article name
-  const [quantity, setQuantity] = useState("");            // requested quantity (free float)
+  const [type, setType] = useState<NpdSampleType>(defaultType);
+  const [warehouse, setWarehouse] = useState<(typeof NPD_WAREHOUSES)[number] | "">("");
+  const [fgSkuName, setFgSkuName] = useState("");          // target NPD article name
+  const [pcs, setPcs] = useState("");                      // number of pieces
+  const [weightPerPiece, setWeightPerPiece] = useState(""); // kg per piece
   const [purposeTag, setPurposeTag] = useState<PurposeTag | "">("");
-  const [purposeNote, setPurposeNote] = useState("");
   const [requestorTeam, setRequestorTeam] = useState("");
   const [requestorTouched, setRequestorTouched] = useState(false);
   const [reqOptions, setReqOptions] = useState<string[]>([]);   // admin / business-head names (admins only)
+  const [description, setDescription] = useState("");
+  // Customer + dispatch planning (Company / Customer mandatory).
+  const [companyName, setCompanyName] = useState("");
+  const [customerName, setCustomerName] = useState("");
+  const [customerContact, setCustomerContact] = useState("");
+  const [shipTo, setShipTo] = useState("");
+  const [modeOfTransport, setModeOfTransport] = useState("");
+  const [expectedDispatch, setExpectedDispatch] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedId, setSavedId] = useState<number | null>(null);
@@ -75,23 +84,39 @@ export function NpdSampleForm({ defaultType, heading }: {
   const requestorChoices = (profileName && !reqOptions.includes(profileName))
     ? [profileName, ...reqOptions] : reqOptions;
 
-  // Only the request essentials are required: a warehouse and the target name.
-  const canSave = !!warehouse && !!fgSkuName.trim();
+  // Mandatory: target article, pcs (>0), weight per piece (>0), warehouse,
+  // company, customer. Quantity is derived = pcs × weight per piece (kg).
+  const pcsNum = Number(pcs);
+  const wppNum = Number(weightPerPiece);
+  const qtyNum = (pcs.trim() !== "" && weightPerPiece.trim() !== ""
+    && Number.isFinite(pcsNum) && Number.isFinite(wppNum))
+    ? Number((pcsNum * wppNum).toFixed(3)) : 0;
+  const canSave =
+    !!warehouse && !!fgSkuName.trim() && pcsNum > 0 && wppNum > 0 &&
+    companyName.trim() !== "" && customerName.trim() !== "";
 
   async function save(submit: boolean) {
+    if (!canSave || !warehouse) return;
     setSaving(true); setError(null);
     try {
       let reqId = savedId;
       if (reqId == null) {
-        const req = await createRequisition({
-          sample_type: type as SampleType,
-          warehouse: warehouse as Warehouse,
-          requestor_team: type === "TRIAL" && customerName.trim()
-            ? `Customer: ${customerName.trim()}` : (effectiveRequestor || undefined),
+        const req = await createNpdRequisition({
+          sample_type: type,
+          warehouse,
+          npd_target_name: fgSkuName.trim(),
+          pcs: pcsNum,
+          weight_per_piece: wppNum,
+          quantity: qtyNum,
+          company_name: companyName.trim(),
+          customer_name: customerName.trim(),
+          customer_contact: customerContact.trim() || undefined,
+          customer_ship_to_address: shipTo.trim() || undefined,
+          mode_of_transport: modeOfTransport.trim() || undefined,
+          expected_dispatch_date: expectedDispatch || undefined,
           purpose_tag: purposeTag || undefined,
-          purpose_note: purposeNote || undefined,
-          npd_target_name: fgSkuName.trim() || undefined,
-          quantity: quantity.trim() ? Number(quantity) : undefined,
+          requestor_team: effectiveRequestor.trim() || undefined,
+          description: description.trim() || undefined,
         });
         reqId = req.id;
         setSavedId(reqId);
@@ -125,46 +150,55 @@ export function NpdSampleForm({ defaultType, heading }: {
 
         {error && <div className="mb-4 rounded-md border border-[#f0c7be] bg-[#fdf3f1] px-3 py-2 text-[13px] text-[#b1361e]">{error}</div>}
 
-        {/* 1 · Details */}
+        {/* 1 · Details — order: type → warehouse → target → quantity → purpose → requestor → description */}
         <FormSection n={1} title="Details">
           <div className="space-y-3">
+            {/* type */}
             <div>
               <span className="block text-[11px] font-medium text-[var(--text-secondary)] mb-1">Type</span>
-              <Segmented value={type} onChange={(v) => setType(v as "NPD" | "TRIAL")}
-                options={[{ v: "NPD", label: "NPD (internal)" }, { v: "TRIAL", label: "Customer trial" }]} />
+              <Segmented value={type} onChange={(v) => setType(v as NpdSampleType)}
+                options={NPD_SAMPLE_TYPES.map((t) => ({ v: t.value, label: t.label }))} />
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* warehouse */}
+            <div className="sm:max-w-[50%]">
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Warehouse <span className="text-[var(--aws-error)]">*</span></label>
+              <select className="form-input" value={warehouse} onChange={(e) => setWarehouse(e.target.value as (typeof NPD_WAREHOUSES)[number])}>
+                <option value="">Select…</option>
+                {NPD_WAREHOUSES.map((w) => <option key={w} value={w}>{w}</option>)}
+              </select>
+            </div>
+
+            {/* target NPD article */}
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Target NPD article name <span className="text-[var(--aws-error)]">*</span></label>
+              <input className="form-input" value={fgSkuName} onChange={(e) => setFgSkuName(e.target.value)} placeholder="name of the new product being requested / developed" />
+              <p className="mt-1 text-[11px] text-[var(--text-muted)]">Carried on the requisition; the NPD team uses it as the new BOM&apos;s FG name when they open it into development.</p>
+            </div>
+
+            {/* pcs / weight per piece / quantity (computed = pcs × weight) */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
-                <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Warehouse <span className="text-[var(--aws-error)]">*</span></label>
-                <select className="form-input" value={warehouse} onChange={(e) => setWarehouse(e.target.value as Warehouse)}>
-                  <option value="">Select…</option>
-                  {WAREHOUSES.map((w) => <option key={w} value={w}>{w}</option>)}
-                </select>
-              </div>
-              {type === "TRIAL" && (
-                <div>
-                  <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Customer name</label>
-                  <input className="form-input" value={customerName} onChange={(e) => setCustomerName(e.target.value)} />
-                </div>
-              )}
-              <div className="sm:col-span-2">
-                <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Target NPD article name <span className="text-[var(--aws-error)]">*</span></label>
-                <input className="form-input" value={fgSkuName} onChange={(e) => setFgSkuName(e.target.value)} placeholder="name of the new product being requested / developed" />
-                <p className="mt-1 text-[11px] text-[var(--text-muted)]">Carried on the requisition; the NPD team uses it as the new BOM&apos;s FG name when they open it into development.</p>
+                <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Pcs <span className="text-[var(--aws-error)]">*</span></label>
+                <input className="form-input" type="number" min="0" step="1" value={pcs}
+                  onChange={(e) => setPcs(e.target.value)} onWheel={(e) => e.currentTarget.blur()} placeholder="e.g. 25" />
               </div>
               <div>
-                <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Quantity</label>
-                {/* blur on wheel so scrolling over the field doesn't nudge the number */}
-                <input className="form-input" type="number" min="0" step="0.001" value={quantity}
-                  onChange={(e) => setQuantity(e.target.value)} onWheel={(e) => e.currentTarget.blur()} placeholder="e.g. 5" />
+                <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Weight per piece (kg) <span className="text-[var(--aws-error)]">*</span></label>
+                <input className="form-input" type="number" min="0" step="0.001" value={weightPerPiece}
+                  onChange={(e) => setWeightPerPiece(e.target.value)} onWheel={(e) => e.currentTarget.blur()} placeholder="e.g. 0.5" />
+              </div>
+              <div>
+                <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Quantity (kg)</label>
+                <input className="form-input bg-[var(--surface-subtle)] cursor-not-allowed" value={qtyNum > 0 ? qtyNum.toLocaleString("en-IN") : "—"} readOnly tabIndex={-1} />
               </div>
             </div>
 
-            {/* Purpose & notes (optional) — always visible */}
+            {/* purpose / requestor / description (optional) */}
             <div className="rounded-md border border-[var(--aws-border)] p-3">
-              <span className="block text-[12px] font-medium text-[var(--text-secondary)] mb-3">Purpose &amp; notes (optional)</span>
+              <span className="block text-[12px] font-medium text-[var(--text-secondary)] mb-3">Purpose, requestor &amp; description (optional)</span>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {/* purpose */}
                 <div>
                   <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Purpose</label>
                   <select className="form-input" value={purposeTag} onChange={(e) => setPurposeTag(e.target.value as PurposeTag)}>
@@ -172,26 +206,57 @@ export function NpdSampleForm({ defaultType, heading }: {
                     {PURPOSE_OPTIONS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
                   </select>
                 </div>
-                {type === "NPD" && (
-                  <div>
-                    <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Requestor team</label>
-                    {isAdmin ? (
-                      <select className="form-input" value={effectiveRequestor}
-                        onChange={(e) => { setRequestorTouched(true); setRequestorTeam(e.target.value); }}>
-                        {requestorChoices.length === 0 && <option value="">Select…</option>}
-                        {requestorChoices.map((n) => <option key={n} value={n}>{n}</option>)}
-                      </select>
-                    ) : (
-                      <input className="form-input" value={effectiveRequestor}
-                        onChange={(e) => { setRequestorTouched(true); setRequestorTeam(e.target.value); }} />
-                    )}
-                  </div>
-                )}
+                {/* requestor */}
+                <div>
+                  <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Requestor</label>
+                  {isAdmin ? (
+                    <select className="form-input" value={effectiveRequestor}
+                      onChange={(e) => { setRequestorTouched(true); setRequestorTeam(e.target.value); }}>
+                      {requestorChoices.length === 0 && <option value="">Select…</option>}
+                      {requestorChoices.map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  ) : (
+                    <input className="form-input" value={effectiveRequestor}
+                      onChange={(e) => { setRequestorTouched(true); setRequestorTeam(e.target.value); }} />
+                  )}
+                </div>
+                {/* description */}
                 <div className="sm:col-span-2">
-                  <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Purpose note</label>
-                  <input className="form-input" value={purposeNote} onChange={(e) => setPurposeNote(e.target.value)} />
+                  <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Description</label>
+                  <textarea className="form-input min-h-[64px] resize-y" value={description}
+                    onChange={(e) => setDescription(e.target.value)} placeholder="What&apos;s being requested and why (optional)…" />
                 </div>
               </div>
+            </div>
+          </div>
+        </FormSection>
+
+        {/* 2 · Customer & dispatch */}
+        <FormSection n={2} title="Customer & dispatch">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Company name <span className="text-[var(--aws-error)]">*</span></label>
+              <input className="form-input" value={companyName} onChange={(e) => setCompanyName(e.target.value)} placeholder="e.g. Candor Foods Pvt Ltd" />
+            </div>
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Customer name <span className="text-[var(--aws-error)]">*</span></label>
+              <input className="form-input" value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="e.g. BigBasket" />
+            </div>
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Customer contact</label>
+              <input className="form-input" value={customerContact} onChange={(e) => setCustomerContact(e.target.value)} placeholder="name / phone / email" />
+            </div>
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Mode of transport</label>
+              <input className="form-input" value={modeOfTransport} onChange={(e) => setModeOfTransport(e.target.value)} placeholder="e.g. Road / Air / Courier" />
+            </div>
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Expected dispatch date <span className="text-[11px] font-normal text-[var(--text-muted)]">(by BD team)</span></label>
+              <input className="form-input" type="date" value={expectedDispatch} onChange={(e) => setExpectedDispatch(e.target.value)} />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Customer ship-to address</label>
+              <textarea className="form-input min-h-[56px] resize-y" value={shipTo} onChange={(e) => setShipTo(e.target.value)} placeholder="Delivery address (optional)…" />
             </div>
           </div>
         </FormSection>

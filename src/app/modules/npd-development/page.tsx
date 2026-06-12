@@ -1,10 +1,13 @@
 "use client";
 
-// NPD samples queue — the standalone NPD Development module. Lists
-// only NPD requisitions (sample_type=NPD); creation goes through the
-// purpose-built NPD form at /modules/npd-development/new. Hydration-safe via a
-// `mounted` gate; no sessionStorage seed (this is a secondary list, so a clean
-// empty-first render avoids any SSR/client mismatch).
+// NPD samples queue — the standalone NPD Development module. Lists the NPD
+// requisitions (sample_type ∈ NPD, TRIAL); creation goes through the purpose-built
+// NPD form at /modules/npd-development/new. Columns: Request ID (hover → warehouse
+// + type), Date, Target article, Quantity, Description, Requestor, Status, Actions.
+// Filters: universal search, date range, requestor, status, type, warehouse.
+// Paginated 50/page. Actions: View (all), Accept/Hold (NPD reviewer),
+// Cancel/Edit (Sales = business requesting side), plus Develop/Open workflow steps.
+// Hydration-safe via a `mounted` gate; no sessionStorage seed.
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -12,13 +15,43 @@ import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
 import { sampleCaps } from "@/lib/sample-roles";
-import { listRequisitions, npdReview, WAREHOUSES, type Requisition } from "@/lib/sample";
-import { STATUS_STYLES, StatusPill } from "../sample/_shared";
+import {
+  listRequisitions, listRequestors, npdReview, cancelRequisition, updateRequisition,
+  WAREHOUSES, NPD_WAREHOUSES, NPD_SAMPLE_TYPES,
+  type Requisition, type PurposeTag, type Warehouse,
+} from "@/lib/sample";
+import { NpdStatusPill, NPD_STATUS_FILTERS } from "../sample/_shared";
 
-const STATUS_OPTIONS = Object.keys(STATUS_STYLES);
+const PAGE_SIZE = 50;
+const NPD_TYPES_CSV = "NPD,TRIAL";
 
-// Module-level so the component isn't re-created each render (React 19
-// react-hooks/static-components). Header chrome shared by shell + main view.
+const TYPE_LABELS: Record<string, string> = { NPD: "NPD Internal", TRIAL: "Pilot Customer trial" };
+function typeLabel(t?: string | null): string {
+  return (t && TYPE_LABELS[t]) || t || "—";
+}
+
+const PURPOSE_OPTIONS: { value: PurposeTag; label: string }[] = [
+  { value: "CUSTOMER_DISPLAY", label: "Customer display" },
+  { value: "CUSTOMER_ISSUE", label: "Customer issue" },
+  { value: "TASTING_SENSORY", label: "Tasting / sensory" },
+  { value: "PHYSICAL_PARAMETERS", label: "Physical parameters" },
+  { value: "INTERNAL_OTHER", label: "Internal / other" },
+];
+
+// Which row actions are available given status + caps. The NPD reviewer's verbs
+// are Accept + Hold; Cancel/Edit are the Sales (business requestor) actions.
+// Develop/Open live on the request's detail page (reached via View).
+function rowActionFlags(r: Requisition, canNpd: boolean, canEdit: boolean) {
+  const s = r.status;
+  const terminal = s === "CLOSED" || s === "CANCELLED";
+  return {
+    accept: canNpd && (s === "SUBMITTED" || s === "ON_HOLD"),
+    hold: canNpd && s === "SUBMITTED",
+    cancel: canEdit && !terminal,
+    edit: canEdit && (s === "DRAFT" || s === "SUBMITTED" || s === "BH_REJECTED"),
+  };
+}
+
 function Shell({ initial, router, children }: {
   initial: string;
   router: ReturnType<typeof useRouter>;
@@ -44,46 +77,6 @@ function Shell({ initial, router, children }: {
   );
 }
 
-// Per-row NPD actions — approve / reject / hold (SUBMITTED · ON_HOLD) or
-// develop (BH_APPROVED). NPD team only; clicks stop row navigation.
-function RowActions({ r, canNpd, busy, onApprove, onReject, onHold, onDevelop, onOpen }: {
-  r: Requisition; canNpd: boolean; busy: boolean;
-  onApprove: () => void; onReject: () => void; onHold: () => void; onDevelop: () => void; onOpen: () => void;
-}) {
-  if (!canNpd) return <span className="text-[var(--text-muted)]">—</span>;
-  const s = r.status;
-  const btn = "h-7 px-2.5 rounded-[2px] text-[12px] font-medium disabled:opacity-50";
-  if (s === "SUBMITTED" || s === "ON_HOLD") {
-    return (
-      <div className="flex flex-wrap gap-1.5">
-        <button disabled={busy} onClick={(e) => { e.stopPropagation(); onApprove(); }}
-          className={`${btn} bg-[var(--aws-orange)] text-white hover:bg-[var(--aws-orange-hover)]`}>Approve</button>
-        <button disabled={busy} onClick={(e) => { e.stopPropagation(); onReject(); }}
-          className={`${btn} border border-[#f0c7be] bg-[#fdf3f1] text-[#b1361e] hover:bg-[#fbe9e4]`}>Reject</button>
-        {s === "SUBMITTED" && (
-          <button disabled={busy} onClick={(e) => { e.stopPropagation(); onHold(); }}
-            className={`${btn} border border-[#fde68a] bg-[#fef9c3] text-[#854d0e] hover:bg-[#fdf08a]`}>Hold</button>
-        )}
-      </div>
-    );
-  }
-  // Once a dev job card was started from this request, show Open (to that card).
-  if (r.linked_dev_jc_id != null) {
-    return (
-      <button onClick={(e) => { e.stopPropagation(); onOpen(); }}
-        className={`${btn} border border-[var(--aws-border-strong)] bg-white hover:bg-[var(--surface-subtle)]`}>Open</button>
-    );
-  }
-  if (s === "BH_APPROVED") {
-    return (
-      <button disabled={busy} onClick={(e) => { e.stopPropagation(); onDevelop(); }}
-        className={`${btn} border border-[var(--aws-border-strong)] bg-white hover:bg-[var(--surface-subtle)]`}>Develop</button>
-    );
-  }
-  return <span className="text-[var(--text-muted)]">—</span>;
-}
-
-// One row of the merged "New NPD sample" menu.
 function MenuItem({ title, desc, onClick }: { title: string; desc: string; onClick: () => void }) {
   return (
     <button onClick={onClick} className="block w-full text-left px-3 py-2 hover:bg-[var(--surface-subtle)]">
@@ -93,6 +86,43 @@ function MenuItem({ title, desc, onClick }: { title: string; desc: string; onCli
   );
 }
 
+function RowActions({ flags, busy, onView, onAccept, onHold, onCancel, onEdit }: {
+  flags: ReturnType<typeof rowActionFlags>; busy: boolean;
+  onView: () => void; onAccept: () => void; onHold: () => void; onCancel: () => void;
+  onEdit: () => void;
+}) {
+  const btn = "h-7 px-2.5 rounded-[2px] text-[12px] font-medium disabled:opacity-50";
+  const neutral = `${btn} border border-[var(--aws-border-strong)] bg-white hover:bg-[var(--surface-subtle)]`;
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      <button onClick={(e) => { e.stopPropagation(); onView(); }} className={neutral}>View</button>
+      {flags.accept && (
+        <button disabled={busy} onClick={(e) => { e.stopPropagation(); onAccept(); }}
+          className={`${btn} bg-[var(--aws-orange)] text-white hover:bg-[var(--aws-orange-hover)]`}>Accept</button>
+      )}
+      {flags.hold && (
+        <button disabled={busy} onClick={(e) => { e.stopPropagation(); onHold(); }}
+          className={`${btn} border border-[#fde68a] bg-[#fef9c3] text-[#854d0e] hover:bg-[#fdf08a]`}>Hold</button>
+      )}
+      {flags.edit && (
+        <button disabled={busy} onClick={(e) => { e.stopPropagation(); onEdit(); }} className={neutral}>Edit</button>
+      )}
+      {flags.cancel && (
+        <button disabled={busy} onClick={(e) => { e.stopPropagation(); onCancel(); }}
+          className={`${btn} border border-[#f0c7be] bg-[#fdf3f1] text-[#b1361e] hover:bg-[#fbe9e4]`}>Cancel</button>
+      )}
+    </div>
+  );
+}
+
+type EditForm = {
+  npd_target_name: string; quantity: string; warehouse: string;
+  description: string; purpose_tag: string; requestor_team: string;
+};
+type Modal =
+  | { kind: "HOLD" | "CANCEL"; row: Requisition }
+  | { kind: "EDIT"; row: Requisition };
+
 export default function NpdQueuePage() {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
@@ -100,19 +130,49 @@ export default function NpdQueuePage() {
   const me = useMe();
   const caps = useMemo(() => sampleCaps(me), [me]);
 
+  // filters
+  const [searchInput, setSearchInput] = useState("");
+  const [q, setQ] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [requestor, setRequestor] = useState("");
   const [status, setStatus] = useState("");
+  const [type, setType] = useState("");
   const [warehouse, setWarehouse] = useState("");
+  const [offset, setOffset] = useState(0);
+
+  const [requestorOptions, setRequestorOptions] = useState<string[]>([]);
   const [rows, setRows] = useState<Requisition[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);   // "New NPD sample" merged menu
-  const [reloadKey, setReloadKey] = useState(0);     // bump to re-fetch after an action
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [busyId, setBusyId] = useState<number | null>(null);
-  const [reviewModal, setReviewModal] = useState<{ id: number; action: "REJECT" | "HOLD"; label: string } | null>(null);
+
+  // action modals
+  const [modal, setModal] = useState<Modal | null>(null);
   const [reason, setReason] = useState("");
+  const [holdStart, setHoldStart] = useState("");
+  const [editForm, setEditForm] = useState<EditForm>({
+    npd_target_name: "", quantity: "", warehouse: "", description: "", purpose_tag: "", requestor_team: "",
+  });
 
   const [mounted, setMounted] = useState(false);
   useEffect(() => { queueMicrotask(() => setMounted(true)); }, []);
+
+  // debounce the universal search (reset to first page on change)
+  useEffect(() => {
+    const t = setTimeout(() => { setQ(searchInput.trim()); setOffset(0); }, 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  // requestor dropdown options (NPD + TRIAL across the whole queue)
+  useEffect(() => {
+    if (!authed) return;
+    let cancelled = false;
+    listRequestors(NPD_TYPES_CSV).then((opts) => { if (!cancelled) setRequestorOptions(opts); });
+    return () => { cancelled = true; };
+  }, [authed, reloadKey]);
 
   useEffect(() => {
     if (!authed) return;
@@ -121,7 +181,15 @@ export default function NpdQueuePage() {
       setLoading(true);
       setError(null);
       try {
-        const data = await listRequisitions({ status, sample_type: "NPD", warehouse, limit: 200 });
+        const statusesCsv = status
+          ? NPD_STATUS_FILTERS.find((f) => f.value === status)?.statuses.join(",")
+          : undefined;
+        const data = await listRequisitions({
+          sample_types: type || NPD_TYPES_CSV,
+          statuses: statusesCsv, warehouse, requestor, q,
+          date_from: dateFrom || undefined, date_to: dateTo || undefined,
+          limit: PAGE_SIZE, offset,
+        });
         if (!cancelled) setRows(data);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load NPD samples");
@@ -130,19 +198,31 @@ export default function NpdQueuePage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [authed, status, warehouse, reloadKey]);
+  }, [authed, q, dateFrom, dateTo, requestor, status, type, warehouse, offset, reloadKey]);
 
-  function openRow(id: number) {
-    router.push(`/modules/sample/${id}`);
+  function openRow(id: number) { router.push(`/modules/sample/${id}`); }
+
+  function openHold(row: Requisition) {
+    setReason(""); setHoldStart(new Date().toISOString().slice(0, 10)); setModal({ kind: "HOLD", row });
+  }
+  function openCancel(row: Requisition) { setReason(""); setModal({ kind: "CANCEL", row }); }
+  function openEdit(row: Requisition) {
+    setEditForm({
+      npd_target_name: row.npd_target_name ?? "",
+      quantity: row.quantity != null ? String(row.quantity) : "",
+      warehouse: row.warehouse ?? "",
+      description: row.description ?? "",
+      purpose_tag: row.purpose_tag ?? "",
+      requestor_team: row.requestor_team ?? "",
+    });
+    setModal({ kind: "EDIT", row });
   }
 
-  // NPD review from the list — approve directly; reject/hold go through the
-  // reason modal (the backend requires a reason for those).
-  async function runReview(id: number, action: "APPROVE" | "REJECT" | "HOLD", reasonText?: string) {
+  async function run(id: number, fn: () => Promise<unknown>) {
     setBusyId(id); setError(null);
     try {
-      await npdReview(id, action, reasonText);
-      setReviewModal(null); setReason("");
+      await fn();
+      setModal(null);
       setReloadKey((k) => k + 1);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Action failed");
@@ -150,6 +230,20 @@ export default function NpdQueuePage() {
       setBusyId(null);
     }
   }
+
+  function saveEdit(row: Requisition) {
+    const qty = editForm.quantity.trim() ? Number(editForm.quantity) : undefined;
+    return run(row.id, () => updateRequisition(row.id, {
+      npd_target_name: editForm.npd_target_name.trim() || undefined,
+      quantity: qty != null && Number.isFinite(qty) ? qty : undefined,
+      warehouse: (editForm.warehouse || undefined) as Warehouse | undefined,
+      description: editForm.description.trim() || undefined,
+      purpose_tag: (editForm.purpose_tag || undefined) as PurposeTag | undefined,
+      requestor_team: editForm.requestor_team.trim() || undefined,
+    }));
+  }
+
+  const anyFilter = !!(q || dateFrom || dateTo || requestor || status || type || warehouse);
 
   if (!mounted) {
     return (
@@ -203,16 +297,57 @@ export default function NpdQueuePage() {
       </div>
 
       {/* Filters */}
-      <div className="flex flex-wrap gap-2 mb-4">
-        <select className="form-input !w-auto" value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Status">
-          <option value="">All statuses</option>
-          {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
-        </select>
-        <select className="form-input !w-auto" value={warehouse} onChange={(e) => setWarehouse(e.target.value)} aria-label="Warehouse">
-          <option value="">All warehouses</option>
-          {WAREHOUSES.map((w) => <option key={w} value={w}>{w}</option>)}
-        </select>
-        {loading && <span className="self-center text-[12px] text-[var(--text-muted)]">Refreshing…</span>}
+      <div className="flex flex-wrap items-end gap-2 mb-4">
+        <div className="flex flex-col">
+          <label className="text-[11px] text-[var(--text-muted)] mb-0.5">Search</label>
+          <input
+            className="form-input !w-56" placeholder="ID, number, article, requestor…"
+            value={searchInput} onChange={(e) => setSearchInput(e.target.value)} aria-label="Search"
+          />
+        </div>
+        <div className="flex flex-col">
+          <label className="text-[11px] text-[var(--text-muted)] mb-0.5">From</label>
+          <input type="date" className="form-input !w-auto" value={dateFrom}
+            onChange={(e) => { setDateFrom(e.target.value); setOffset(0); }} aria-label="Date from" />
+        </div>
+        <div className="flex flex-col">
+          <label className="text-[11px] text-[var(--text-muted)] mb-0.5">To</label>
+          <input type="date" className="form-input !w-auto" value={dateTo}
+            onChange={(e) => { setDateTo(e.target.value); setOffset(0); }} aria-label="Date to" />
+        </div>
+        <div className="flex flex-col">
+          <label className="text-[11px] text-[var(--text-muted)] mb-0.5">Requestor</label>
+          <select className="form-input !w-auto" value={requestor}
+            onChange={(e) => { setRequestor(e.target.value); setOffset(0); }} aria-label="Requestor">
+            <option value="">All requestors</option>
+            {requestorOptions.map((r) => <option key={r} value={r}>{r}</option>)}
+          </select>
+        </div>
+        <div className="flex flex-col">
+          <label className="text-[11px] text-[var(--text-muted)] mb-0.5">Status</label>
+          <select className="form-input !w-auto" value={status}
+            onChange={(e) => { setStatus(e.target.value); setOffset(0); }} aria-label="Status">
+            <option value="">All statuses</option>
+            {NPD_STATUS_FILTERS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+          </select>
+        </div>
+        <div className="flex flex-col">
+          <label className="text-[11px] text-[var(--text-muted)] mb-0.5">Type</label>
+          <select className="form-input !w-auto" value={type}
+            onChange={(e) => { setType(e.target.value); setOffset(0); }} aria-label="Type">
+            <option value="">All types</option>
+            {NPD_SAMPLE_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+          </select>
+        </div>
+        <div className="flex flex-col">
+          <label className="text-[11px] text-[var(--text-muted)] mb-0.5">Warehouse</label>
+          <select className="form-input !w-auto" value={warehouse}
+            onChange={(e) => { setWarehouse(e.target.value); setOffset(0); }} aria-label="Warehouse">
+            <option value="">All warehouses</option>
+            {WAREHOUSES.map((w) => <option key={w} value={w}>{w}</option>)}
+          </select>
+        </div>
+        {loading && <span className="self-center text-[12px] text-[var(--text-muted)] pb-2">Refreshing…</span>}
       </div>
 
       {error && (
@@ -221,42 +356,45 @@ export default function NpdQueuePage() {
 
       {rows.length === 0 && !loading ? (
         <div className="bg-white border border-[var(--aws-border)] rounded-md p-10 text-center text-[13px] text-[var(--text-secondary)]">
-          No NPD samples match these filters.
+          {anyFilter ? "No NPD samples match these filters." : "No NPD samples yet."}
         </div>
       ) : (
         <>
-          {/* Mobile: cards. md+: full-field table. Long values truncate with a
-              hover tooltip (title) showing the full text. */}
+          {/* Mobile: cards. md+: full table. */}
           <div className="grid grid-cols-1 gap-2 md:hidden">
-            {rows.map((r) => (
-              <div key={r.id} className="bg-white border border-[var(--aws-border)] rounded-md p-3 hover:border-[var(--aws-orange)]">
-                <button type="button" onClick={() => openRow(r.id)} className="block w-full text-left">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold text-[13px] text-[var(--text-primary)] truncate" title={r.requisition_number}>{r.requisition_number}</span>
-                    <StatusPill status={r.status} />
-                  </div>
-                  <div className="mt-1 text-[12px] text-[var(--text-secondary)] flex flex-wrap gap-x-3 gap-y-0.5">
-                    <span title={`Request ID ${r.request_id ?? ""}`}>#{r.request_id ?? "—"}</span>
-                    <span>{r.warehouse}</span>
-                    {r.quantity != null && <span>Qty {r.quantity}</span>}
-                    <span>{(r.created_at ?? "").slice(0, 10)}</span>
-                  </div>
-                  {r.npd_target_name && (
-                    <div className="mt-1 text-[12px] text-[var(--text-secondary)] truncate" title={r.npd_target_name}>Target: {r.npd_target_name}</div>
-                  )}
-                </button>
-                {caps.canNpd && (r.status === "SUBMITTED" || r.status === "ON_HOLD" || r.status === "BH_APPROVED" || r.linked_dev_jc_id != null) && (
+            {rows.map((r) => {
+              const flags = rowActionFlags(r, caps.canNpd, caps.canEdit);
+              return (
+                <div key={r.id} className="bg-white border border-[var(--aws-border)] rounded-md p-3 hover:border-[var(--aws-orange)]">
+                  <button type="button" onClick={() => openRow(r.id)} className="block w-full text-left">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-[13px] text-[var(--text-primary)] tabular-nums"
+                        title={`Warehouse: ${r.warehouse ?? "—"} · Type: ${typeLabel(r.sample_type)}`}>
+                        {r.request_id ?? "—"}
+                      </span>
+                      <NpdStatusPill status={r.status} holdReason={r.hold_reason} />
+                    </div>
+                    <div className="mt-1 text-[12px] text-[var(--text-secondary)] flex flex-wrap gap-x-3 gap-y-0.5">
+                      <span>{(r.created_at ?? "").slice(0, 10)}</span>
+                      {r.quantity != null && <span>Qty {r.quantity}</span>}
+                      {r.requestor_team && <span>{r.requestor_team}</span>}
+                    </div>
+                    {r.npd_target_name && (
+                      <div className="mt-1 text-[12px] text-[var(--text-secondary)] truncate" title={r.npd_target_name}>Target: {r.npd_target_name}</div>
+                    )}
+                    {r.description && (
+                      <div className="mt-0.5 text-[12px] text-[var(--text-muted)] truncate" title={r.description}>{r.description}</div>
+                    )}
+                  </button>
                   <div className="mt-2 pt-2 border-t border-[var(--surface-divider)]">
-                    <RowActions r={r} canNpd={caps.canNpd} busy={busyId === r.id}
-                      onApprove={() => runReview(r.id, "APPROVE")}
-                      onReject={() => setReviewModal({ id: r.id, action: "REJECT", label: String(r.request_id ?? r.requisition_number) })}
-                      onHold={() => setReviewModal({ id: r.id, action: "HOLD", label: String(r.request_id ?? r.requisition_number) })}
-                      onDevelop={() => router.push(`/modules/npd-development/job-cards/new?req=${r.id}`)}
-                      onOpen={() => router.push(`/modules/npd-development/job-cards/${r.linked_dev_jc_id}`)} />
+                    <RowActions flags={flags} busy={busyId === r.id}
+                      onView={() => openRow(r.id)}
+                      onAccept={() => run(r.id, () => npdReview(r.id, "APPROVE"))}
+                      onHold={() => openHold(r)} onCancel={() => openCancel(r)} onEdit={() => openEdit(r)} />
                   </div>
-                )}
-              </div>
-            ))}
+                </div>
+              );
+            })}
           </div>
 
           <div className="hidden md:block bg-white border border-[var(--aws-border)] rounded-md overflow-x-auto">
@@ -264,61 +402,160 @@ export default function NpdQueuePage() {
               <thead>
                 <tr className="bg-[var(--surface-subtle)] text-left text-[12px] text-[var(--text-secondary)]">
                   <th className="px-3 py-2 font-semibold">Request ID</th>
-                  <th className="px-3 py-2 font-semibold">Requisition</th>
-                  <th className="px-3 py-2 font-semibold">Status</th>
-                  <th className="px-3 py-2 font-semibold">Warehouse</th>
+                  <th className="px-3 py-2 font-semibold">Created</th>
                   <th className="px-3 py-2 font-semibold">Target article</th>
                   <th className="px-3 py-2 font-semibold text-right">Qty</th>
-                  <th className="px-3 py-2 font-semibold">Purpose</th>
-                  <th className="px-3 py-2 font-semibold">Team</th>
-                  <th className="px-3 py-2 font-semibold">Created</th>
+                  <th className="px-3 py-2 font-semibold">Description</th>
+                  <th className="px-3 py-2 font-semibold">Requestor</th>
+                  <th className="px-3 py-2 font-semibold">Status</th>
                   <th className="px-3 py-2 font-semibold">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
-                  <tr key={r.id} onClick={() => openRow(r.id)}
-                    className="border-t border-[var(--surface-divider)] hover:bg-[var(--surface-subtle)] cursor-pointer">
-                    <td className="px-3 py-2 text-[var(--text-secondary)] tabular-nums">{r.request_id ?? "—"}</td>
-                    <td className="px-3 py-2 font-medium text-[var(--text-primary)] max-w-[180px] truncate" title={r.requisition_number}>{r.requisition_number}</td>
-                    <td className="px-3 py-2"><StatusPill status={r.status} /></td>
-                    <td className="px-3 py-2">{r.warehouse}</td>
-                    <td className="px-3 py-2 max-w-[200px] truncate" title={r.npd_target_name ?? ""}>{r.npd_target_name ?? "—"}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{r.quantity ?? "—"}</td>
-                    <td className="px-3 py-2 max-w-[160px] truncate" title={r.purpose_tag ?? ""}>{r.purpose_tag ?? "—"}</td>
-                    <td className="px-3 py-2 max-w-[160px] truncate" title={r.requestor_team ?? ""}>{r.requestor_team ?? "—"}</td>
-                    <td className="px-3 py-2 text-[var(--text-secondary)] whitespace-nowrap">{(r.created_at ?? "").slice(0, 10)}</td>
-                    <td className="px-3 py-2">
-                      <RowActions r={r} canNpd={caps.canNpd} busy={busyId === r.id}
-                        onApprove={() => runReview(r.id, "APPROVE")}
-                        onReject={() => setReviewModal({ id: r.id, action: "REJECT", label: String(r.request_id ?? r.requisition_number) })}
-                        onHold={() => setReviewModal({ id: r.id, action: "HOLD", label: String(r.request_id ?? r.requisition_number) })}
-                        onDevelop={() => router.push(`/modules/npd-development/job-cards/new?req=${r.id}`)}
-                        onOpen={() => router.push(`/modules/npd-development/job-cards/${r.linked_dev_jc_id}`)} />
-                    </td>
-                  </tr>
-                ))}
+                {rows.map((r) => {
+                  const flags = rowActionFlags(r, caps.canNpd, caps.canEdit);
+                  const desc = r.description ?? "";
+                  return (
+                    <tr key={r.id} onClick={() => openRow(r.id)}
+                      className="border-t border-[var(--surface-divider)] hover:bg-[var(--surface-subtle)] cursor-pointer">
+                      <td className="px-3 py-2 text-[var(--text-secondary)] tabular-nums whitespace-nowrap underline decoration-dotted underline-offset-2"
+                        title={`Warehouse: ${r.warehouse ?? "—"} · Type: ${typeLabel(r.sample_type)}`}>
+                        {r.request_id ?? "—"}
+                      </td>
+                      <td className="px-3 py-2 text-[var(--text-secondary)] whitespace-nowrap">{(r.created_at ?? "").slice(0, 10)}</td>
+                      <td className="px-3 py-2 max-w-[200px] truncate" title={r.npd_target_name ?? ""}>{r.npd_target_name ?? "—"}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{r.quantity ?? "—"}</td>
+                      <td className="px-3 py-2 max-w-[220px] truncate" title={desc}>{desc || "—"}</td>
+                      <td className="px-3 py-2 max-w-[140px] truncate" title={r.requestor_team ?? ""}>{r.requestor_team ?? "—"}</td>
+                      <td className="px-3 py-2"><NpdStatusPill status={r.status} holdReason={r.hold_reason} /></td>
+                      <td className="px-3 py-2">
+                        <RowActions flags={flags} busy={busyId === r.id}
+                          onView={() => openRow(r.id)}
+                          onAccept={() => run(r.id, () => npdReview(r.id, "APPROVE"))}
+                          onHold={() => openHold(r)} onCancel={() => openCancel(r)} onEdit={() => openEdit(r)} />
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         </>
       )}
 
-      {/* Reason prompt for reject / hold (approve is direct). */}
-      {reviewModal && (
-        <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-3" onClick={() => setReviewModal(null)}>
+      {/* Pagination — 50/page (kept available even on an emptied later page). */}
+      {(rows.length > 0 || offset > 0) && (
+        <div className="flex items-center justify-between gap-2 mt-3">
+          <span className="text-[12px] text-[var(--text-muted)]">
+            Showing {rows.length === 0 ? 0 : offset + 1}–{offset + rows.length}
+          </span>
+          <div className="flex items-center gap-2">
+            <button disabled={offset === 0 || loading} onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+              className="h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[12px] disabled:opacity-50 hover:bg-[var(--surface-subtle)]">Prev</button>
+            <button disabled={rows.length < PAGE_SIZE || loading} onClick={() => setOffset((o) => o + PAGE_SIZE)}
+              className="h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[12px] disabled:opacity-50 hover:bg-[var(--surface-subtle)]">Next</button>
+          </div>
+        </div>
+      )}
+
+      {/* Hold modal — reason + start date */}
+      {modal?.kind === "HOLD" && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-3" onClick={() => setModal(null)}>
           <div className="bg-white rounded-md w-full max-w-md p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-[15px] font-semibold mb-1">{reviewModal.action === "REJECT" ? "Reject" : "Hold"} request {reviewModal.label}</h3>
+            <h3 className="text-[15px] font-semibold mb-1">Hold request {modal.row.request_id ?? modal.row.requisition_number}</h3>
+            <label className="block text-[11px] text-[var(--text-secondary)] mt-2">Start date
+              <input type="date" className="form-input mt-0.5" value={holdStart} onChange={(e) => setHoldStart(e.target.value)} />
+            </label>
+            <label className="block text-[11px] text-[var(--text-secondary)] mt-3">Reason (required)
+              <textarea className="form-input mt-0.5 !h-20 py-1.5" value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />
+            </label>
+            <div className="flex gap-2 mt-4">
+              <button onClick={() => setModal(null)}
+                className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:bg-[var(--surface-subtle)]">Cancel</button>
+              <div className="flex-1" />
+              <button disabled={busyId === modal.row.id || !reason.trim()}
+                onClick={() => run(modal.row.id, () => npdReview(modal.row.id, "HOLD", reason, holdStart || undefined))}
+                className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">{busyId === modal.row.id ? "Working…" : "Confirm hold"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cancel modal — reason */}
+      {modal?.kind === "CANCEL" && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-3" onClick={() => setModal(null)}>
+          <div className="bg-white rounded-md w-full max-w-md p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-[15px] font-semibold mb-1">Cancel request {modal.row.request_id ?? modal.row.requisition_number}</h3>
             <label className="block text-[11px] text-[var(--text-secondary)] mt-2">Reason (required)
               <textarea className="form-input mt-0.5 !h-20 py-1.5" value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />
             </label>
             <div className="flex gap-2 mt-4">
-              <button onClick={() => setReviewModal(null)}
+              <button onClick={() => setModal(null)}
+                className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:bg-[var(--surface-subtle)]">Back</button>
+              <div className="flex-1" />
+              <button disabled={busyId === modal.row.id || !reason.trim()}
+                onClick={() => run(modal.row.id, () => cancelRequisition(modal.row.id, reason))}
+                className="h-9 px-5 rounded-[2px] bg-[#b1361e] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[#9a2f1a]">{busyId === modal.row.id ? "Working…" : "Confirm cancel"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit modal — request body */}
+      {modal?.kind === "EDIT" && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-3" onClick={() => setModal(null)}>
+          <div className="bg-white rounded-md w-full max-w-lg p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-[15px] font-semibold mb-2">Edit request {modal.row.request_id ?? modal.row.requisition_number}</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="sm:col-span-2">
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Target NPD article name</label>
+                <input className="form-input" value={editForm.npd_target_name}
+                  onChange={(e) => setEditForm((f) => ({ ...f, npd_target_name: e.target.value }))} />
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Quantity (kg)</label>
+                <input type="number" min="0" step="0.001" className="form-input" value={editForm.quantity}
+                  onWheel={(e) => e.currentTarget.blur()}
+                  onChange={(e) => setEditForm((f) => ({ ...f, quantity: e.target.value }))} />
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Warehouse</label>
+                <select className="form-input" value={editForm.warehouse}
+                  onChange={(e) => setEditForm((f) => ({ ...f, warehouse: e.target.value }))}>
+                  <option value="">Select…</option>
+                  {/* offer the NPD 5-set, plus the row's current value if it's a legacy code */}
+                  {(editForm.warehouse && !(NPD_WAREHOUSES as readonly string[]).includes(editForm.warehouse)
+                    ? [editForm.warehouse, ...NPD_WAREHOUSES]
+                    : NPD_WAREHOUSES
+                  ).map((w) => <option key={w} value={w}>{w}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Purpose</label>
+                <select className="form-input" value={editForm.purpose_tag}
+                  onChange={(e) => setEditForm((f) => ({ ...f, purpose_tag: e.target.value }))}>
+                  <option value="">Select…</option>
+                  {PURPOSE_OPTIONS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Requestor</label>
+                <input className="form-input" value={editForm.requestor_team}
+                  onChange={(e) => setEditForm((f) => ({ ...f, requestor_team: e.target.value }))} />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Description</label>
+                <textarea className="form-input min-h-[56px] resize-y" value={editForm.description}
+                  onChange={(e) => setEditForm((f) => ({ ...f, description: e.target.value }))} />
+              </div>
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button onClick={() => setModal(null)}
                 className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:bg-[var(--surface-subtle)]">Cancel</button>
               <div className="flex-1" />
-              <button disabled={busyId === reviewModal.id || !reason.trim()}
-                onClick={() => runReview(reviewModal.id, reviewModal.action, reason)}
-                className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">{busyId === reviewModal.id ? "Working…" : "Confirm"}</button>
+              <button disabled={busyId === modal.row.id || !editForm.npd_target_name.trim()}
+                onClick={() => saveEdit(modal.row)}
+                className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">{busyId === modal.row.id ? "Saving…" : "Save changes"}</button>
             </div>
           </div>
         </div>

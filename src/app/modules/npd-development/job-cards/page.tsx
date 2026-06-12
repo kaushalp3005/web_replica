@@ -135,9 +135,10 @@ export default function NpdDevJobCardsPage() {
               <button key={r.id} onClick={() => openRow(r.id)}
                 className="text-left bg-white border border-[var(--aws-border)] rounded-md p-3 hover:border-[var(--aws-orange)]">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-semibold text-[13px] text-[var(--text-primary)]">{r.dev_jc_number}</span>
+                  <span className="font-semibold text-[13px] text-[var(--text-primary)] font-mono tabular-nums">{r.id}</span>
                   <DevJcStatusPill status={r.status} />
                 </div>
+                <div className="text-[11px] text-[var(--text-muted)] font-mono">{r.dev_jc_number}</div>
                 <div className="mt-0.5 text-[13px] text-[var(--text-primary)] truncate">{r.title}</div>
                 <div className="mt-1 text-[12px] text-[var(--text-secondary)] flex flex-wrap gap-x-3">
                   <span>{r.line_count ?? 0} line(s)</span>
@@ -165,7 +166,7 @@ export default function NpdDevJobCardsPage() {
                 {rows.map((r) => (
                   <tr key={r.id} onClick={() => openRow(r.id)}
                     className="border-t border-[var(--surface-divider)] hover:bg-[var(--surface-subtle)] cursor-pointer">
-                    <td className="px-3 py-2 font-medium text-[var(--text-primary)]">{r.dev_jc_number}</td>
+                    <td className="px-3 py-2 font-medium text-[var(--text-primary)] font-mono tabular-nums">{r.id}<div className="text-[11px] font-normal text-[var(--text-muted)]">{r.dev_jc_number}</div></td>
                     <td className="px-3 py-2 max-w-[280px] truncate" title={r.title}>{r.title}</td>
                     <td className="px-3 py-2"><DevJcStatusPill status={r.status} /></td>
                     <td className="px-3 py-2 text-right">{r.line_count ?? 0}</td>

@@ -40,7 +40,7 @@ export interface Approval {
   approval_stage: string;
   approver_user_id: number;
   role_at_action: string;
-  action: "PENDING" | "APPROVED" | "REJECTED";
+  action: "PENDING" | "APPROVED" | "REJECTED" | "HOLD";
   remarks?: string | null;
   sequence_no: number;
   actioned_at?: string | null;
@@ -70,7 +70,10 @@ export interface Requisition {
   purpose_note?: string | null;
   base_bom_id?: number | null;
   npd_target_name?: string | null;   // requested new NPD article name
-  quantity?: number | null;          // requested quantity (free float)
+  pcs?: number | null;               // number of pieces
+  weight_per_piece?: number | null;  // weight per piece (kg)
+  quantity?: number | null;          // total = pcs × weight_per_piece (kg)
+  description?: string | null;       // free-text request description
   linked_dev_jc_id?: number | null;  // dev job card created from this request's Develop
   npd_draft_bom_id?: number | null;
   linked_job_card_id?: number | null;
@@ -80,7 +83,17 @@ export interface Requisition {
   warehouse?: string;
   transporter_name?: string | null;
   vehicle_number?: string | null;
+  // Customer + dispatch planning (carried onto the dev job card).
+  company_name?: string | null;
+  customer_name?: string | null;
+  customer_contact?: string | null;
+  customer_ship_to_address?: string | null;
+  mode_of_transport?: string | null;
+  expected_dispatch_date?: string | null;   // by BD team
+  confirmed_dispatch_date?: string | null;  // by NPD
   cancellation_reason?: string | null;
+  hold_start_date?: string | null;  // date a HOLD takes effect (set on hold)
+  hold_reason?: string | null;      // latest HOLD remark (list rows; for the Hold pill tooltip)
   created_at?: string | null;
   updated_at?: string | null;
   // Enriched on detail GET:
@@ -162,7 +175,13 @@ function post(path: string, body?: unknown): Promise<Response> {
 export interface ListFilters {
   status?: string;
   sample_type?: string;
+  sample_types?: string;   // CSV — narrows to a set (NPD queue passes "NPD,TRIAL")
+  statuses?: string;       // CSV — status bucket (NPD queue maps Pending/Hold/Accepted)
   warehouse?: string;
+  requestor?: string;      // exact requestor_team match (filter dropdown)
+  q?: string;              // free-text: number / request_id / target / desc / requestor
+  date_from?: string;      // ISO date (created_at >=)
+  date_to?: string;        // ISO date (created_at <=)
   limit?: number;
   offset?: number;
 }
@@ -171,10 +190,29 @@ export async function listRequisitions(f: ListFilters = {}): Promise<Requisition
   const q = new URLSearchParams();
   if (f.status) q.set("status", f.status);
   if (f.sample_type) q.set("sample_type", f.sample_type);
+  if (f.sample_types) q.set("sample_types", f.sample_types);
+  if (f.statuses) q.set("statuses", f.statuses);
   if (f.warehouse) q.set("warehouse", f.warehouse);
+  if (f.requestor) q.set("requestor", f.requestor);
+  if (f.q) q.set("q", f.q);
+  if (f.date_from) q.set("date_from", f.date_from);
+  if (f.date_to) q.set("date_to", f.date_to);
   q.set("limit", String(f.limit ?? 50));
   q.set("offset", String(f.offset ?? 0));
   return jsonOrThrow(await apiFetch(`/api/v1/sample/requisitions?${q}`), "Failed to load requisitions");
+}
+
+// Distinct requestor labels for the queue's Requestor filter dropdown.
+export async function listRequestors(sampleTypes?: string): Promise<string[]> {
+  const q = new URLSearchParams();
+  if (sampleTypes) q.set("sample_types", sampleTypes);
+  try {
+    const res = await apiFetch(`/api/v1/sample/requisitions/requestors?${q}`);
+    if (!res.ok) return [];
+    return (await res.json()) as string[];
+  } catch {
+    return [];
+  }
 }
 
 export async function getRequisition(id: number): Promise<Requisition> {
@@ -187,12 +225,22 @@ export interface RequisitionCreate {
   requestor_team?: string;
   purpose_tag?: PurposeTag;
   purpose_note?: string;
+  description?: string;
   base_bom_id?: number;
   npd_target_name?: string;
+  pcs?: number;
+  weight_per_piece?: number;
   quantity?: number;
   internal_override?: boolean;
   transporter_name?: string;
   vehicle_number?: string;
+  company_name?: string;
+  customer_name?: string;
+  customer_contact?: string;
+  customer_ship_to_address?: string;
+  mode_of_transport?: string;
+  expected_dispatch_date?: string;
+  confirmed_dispatch_date?: string;
   // Optional — issuance flows (Basis RM/FG, Internal) send article lines; NPD /
   // TRIAL requests omit them (the backend defaults to an empty list).
   articles?: Array<Omit<Article, "id" | "issued_qty">>;
@@ -200,6 +248,38 @@ export interface RequisitionCreate {
 
 export async function createRequisition(body: RequisitionCreate): Promise<Requisition> {
   return jsonOrThrow(await post(`/api/v1/sample/requisitions`, body), "Failed to create requisition");
+}
+
+// ── NPD sample requisition (the NPD-first create form) ─────────────────────
+// A pure request; NPD-mandatory fields are required here AND re-validated by the
+// backend (NpdRequisitionCreate). Warehouse offered = the 5-code subset.
+export type NpdSampleType = "NPD" | "TRIAL";
+export const NPD_SAMPLE_TYPES: { value: NpdSampleType; label: string }[] = [
+  { value: "NPD", label: "NPD Internal" },
+  { value: "TRIAL", label: "Pilot Customer trial" },
+];
+export const NPD_WAREHOUSES = ["W202", "A185", "A68", "F53", "A101"] as const;
+
+export interface NpdRequisitionCreate {
+  sample_type: NpdSampleType;     // required
+  npd_target_name: string;        // required: target NPD article
+  pcs: number;                    // required: number of pieces
+  weight_per_piece: number;       // required: kg per piece
+  quantity?: number;              // computed = pcs × weight_per_piece (kg)
+  warehouse: (typeof NPD_WAREHOUSES)[number];  // required
+  company_name: string;           // required
+  customer_name: string;          // required
+  customer_contact?: string;      // nullable
+  customer_ship_to_address?: string;   // nullable
+  mode_of_transport?: string;     // nullable
+  expected_dispatch_date?: string;     // by BD team (ISO date, nullable)
+  description?: string;           // nullable
+  purpose_tag?: PurposeTag;       // nullable
+  requestor_team?: string;        // nullable
+}
+
+export async function createNpdRequisition(body: NpdRequisitionCreate): Promise<Requisition> {
+  return jsonOrThrow(await post(`/api/v1/sample/npd-requisitions`, body), "Failed to create NPD requisition");
 }
 
 export async function updateRequisition(id: number, body: Partial<RequisitionCreate>): Promise<Requisition> {
@@ -219,8 +299,9 @@ export const cancelRequisition = (id: number, reason: string) => action(id, "can
 export const closeRequisition = (id: number) => action(id, "close", undefined, "Close failed");
 export const approveRequisition = (id: number, act: "APPROVED" | "REJECTED", remarks?: string) =>
   action(id, "approve", { action: act, remarks }, "Approval failed");
-export const npdReview = (id: number, act: "APPROVE" | "REJECT" | "HOLD", reason?: string) =>
-  action(id, "npd-review", { action: act, reason }, "NPD review failed");
+export const npdReview = (
+  id: number, act: "APPROVE" | "REJECT" | "HOLD", reason?: string, start_date?: string,
+) => action(id, "npd-review", { action: act, reason, start_date }, "NPD review failed");
 export const issueOutward = (id: number, from_location?: string) => action(id, "outward", { from_location }, "Outward failed");
 export const dispatchInternal = (id: number) => action(id, "dispatch-internal", undefined, "Dispatch failed");
 export const startProduction = (id: number) => action(id, "start-production", undefined, "Start production failed");

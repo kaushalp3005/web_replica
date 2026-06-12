@@ -143,6 +143,12 @@ export default function SampleQueuePage() {
         >NPD Development</button>
         {caps.canRequest && (
           <button
+            onClick={() => router.push("/modules/sample/npd/new")}
+            className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:bg-[var(--surface-subtle)]"
+          >+ New NPD request</button>
+        )}
+        {caps.canRequest && (
+          <button
             onClick={() => router.push("/modules/sample/new")}
             className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium hover:bg-[var(--aws-orange-hover)]"
           >+ New requisition</button>

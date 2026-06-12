@@ -20,7 +20,7 @@ import {
   type Requisition, type RecipientBody, type RequisitionCreate,
   type PurposeTag, type Warehouse,
 } from "@/lib/sample";
-import { StatusPill, TYPE_LABEL } from "../_shared";
+import { StatusPill, NpdStatusPill, TYPE_LABEL } from "../_shared";
 
 type ModalMode =
   | null | "reject" | "cancel" | "gatePass" | "convertFull" | "convertPartial"
@@ -115,6 +115,10 @@ export default function SampleDetailPage() {
   // request states before it's been actioned downstream.
   const canEdit = req != null && caps.canApprove
     && (req.status === "DRAFT" || req.status === "SUBMITTED" || req.status === "BH_REJECTED");
+  // Most recent HOLD remark (approvals are ordered by sequence_no asc).
+  const holdReason = req?.status === "ON_HOLD"
+    ? ((req.approvals ?? []).filter((a) => a.action === "HOLD").at(-1)?.remarks ?? null)
+    : null;
 
   return (
     <div className="min-h-screen flex flex-col bg-[var(--background)]">
@@ -151,7 +155,9 @@ export default function SampleDetailPage() {
                     <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--text-muted)] mb-1">Request</div>
                     <div className="flex flex-wrap items-center gap-2.5">
                       <h1 className="text-[28px] leading-none font-semibold text-[var(--text-primary)] tabular-nums">{req.request_id ?? req.requisition_number}</h1>
-                      <StatusPill status={req.status} />
+                      {isNpdTrial
+                        ? <NpdStatusPill status={req.status} holdReason={holdReason} />
+                        : <StatusPill status={req.status} />}
                       <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-[var(--surface-divider)] text-[var(--text-secondary)]">{TYPE_LABEL[req.sample_type] ?? req.sample_type}</span>
                     </div>
                     <div className="mt-1.5 text-[12px] text-[var(--text-muted)]">Document no. <span className="text-[var(--text-secondary)]">{req.requisition_number}</span></div>
@@ -179,6 +185,14 @@ export default function SampleDetailPage() {
                         Edit
                       </button>
                     )}
+                    {/* Cancel — Sales / BH only, while the request is still live. */}
+                    {isNpdTrial && caps.canEdit && !editing && req.status !== "CANCELLED" && req.status !== "CLOSED" && (
+                      <button onClick={() => setModal("cancel")}
+                        className="h-9 px-3.5 rounded-[2px] border border-[#f0c7be] bg-[#fdf3f1] text-[#b1361e] text-[13px] font-medium hover:bg-[#fbe9e4] inline-flex items-center gap-1.5">
+                        <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
+                        Cancel
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -191,16 +205,40 @@ export default function SampleDetailPage() {
                 <>
                   <dl className="border-t border-[var(--surface-divider)] px-5 py-4 grid grid-cols-2 sm:grid-cols-4 gap-y-4 gap-x-4">
                     <Field label="Warehouse" value={req.warehouse ?? "—"} />
-                    <Field label="Target NPD article" value={req.npd_target_name ?? "—"} />
-                    <Field label="Quantity" value={req.quantity != null ? String(req.quantity) : "—"} />
-                    <Field label="Requestor team" value={req.requestor_team ?? "—"} />
+                    <Field label="Target NPD article name" value={req.npd_target_name ?? "—"} />
+                    <Field label="Pcs" value={req.pcs != null ? String(req.pcs) : "—"} />
+                    <Field label="Weight per piece (kg)" value={req.weight_per_piece != null ? String(req.weight_per_piece) : "—"} />
+                    <Field label="Quantity (kg)" value={req.quantity != null ? String(req.quantity) : "—"} />
+                    <Field label="Requestor" value={req.requestor_team ?? "—"} />
                     <Field label="Purpose" value={req.purpose_tag ? req.purpose_tag.replace(/_/g, " ") : "—"} />
                     <Field label="Created" value={(req.created_at ?? "").slice(0, 10)} />
                   </dl>
-                  {req.purpose_note && (
+                  {isNpdTrial && (
+                    <dl className="border-t border-[var(--surface-divider)] px-5 py-4 grid grid-cols-2 sm:grid-cols-4 gap-y-4 gap-x-4">
+                      <Field label="Company" value={req.company_name ?? "—"} />
+                      <Field label="Customer" value={req.customer_name ?? "—"} />
+                      <Field label="Customer contact" value={req.customer_contact ?? "—"} />
+                      <Field label="Mode of transport" value={req.mode_of_transport ?? "—"} />
+                      <Field label="Expected dispatch (BD)" value={req.expected_dispatch_date ? String(req.expected_dispatch_date).slice(0, 10) : "—"} />
+                      <Field label="Confirmed dispatch (NPD)" value={req.confirmed_dispatch_date ? String(req.confirmed_dispatch_date).slice(0, 10) : "—"} />
+                      <div className="col-span-2 sm:col-span-4 min-w-0">
+                        <dt className="text-[10px] uppercase tracking-[0.1em] text-[var(--text-muted)] mb-0.5">Ship-to address</dt>
+                        <dd className="text-[13px] font-medium text-[var(--text-primary)]">{req.customer_ship_to_address ?? "—"}</dd>
+                      </div>
+                    </dl>
+                  )}
+                  {req.description && (
                     <div className="border-t border-[var(--surface-divider)] px-5 py-3 bg-[var(--surface-subtle)]">
-                      <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--text-muted)] mb-0.5">Purpose note</div>
-                      <p className="text-[13px] text-[var(--text-secondary)]">{req.purpose_note}</p>
+                      <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--text-muted)] mb-0.5">Description</div>
+                      <p className="text-[13px] text-[var(--text-secondary)]">{req.description}</p>
+                    </div>
+                  )}
+                  {req.status === "ON_HOLD" && (
+                    <div className="border-t border-[#fde68a] px-5 py-3 bg-[#fef9c3]">
+                      <div className="text-[10px] uppercase tracking-[0.14em] text-[#854d0e] mb-0.5">
+                        On hold{req.hold_start_date ? ` · from ${String(req.hold_start_date).slice(0, 10)}` : ""}
+                      </div>
+                      <p className="text-[13px] text-[#854d0e]">{holdReason || "No reason recorded."}</p>
                     </div>
                   )}
                 </>
@@ -217,17 +255,12 @@ export default function SampleDetailPage() {
             {/* NPD review of a BH-sent request — the NPD team's verdict. */}
             {isNpdTrial && caps.canNpd && (req.status === "SUBMITTED" || req.status === "ON_HOLD") && (
               <Card title="NPD review">
-                <p className="-mt-1 mb-3 text-[12px] text-[var(--text-muted)]">Record the NPD team&apos;s decision on this request — a reason is required to reject or hold.</p>
+                <p className="-mt-1 mb-3 text-[12px] text-[var(--text-muted)]">Record the NPD team&apos;s decision on this request — a reason is required to hold.</p>
                 <div className="flex flex-wrap gap-2">
                   <button disabled={busy} onClick={() => run(() => npdReview(req.id, "APPROVE"))}
                     className="h-9 px-4 rounded-[2px] text-[13px] font-medium inline-flex items-center gap-1.5 bg-[var(--aws-orange)] text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-50">
                     <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M5 13l4 4L19 7" /></svg>
                     Approve
-                  </button>
-                  <button disabled={busy} onClick={() => setModal("npdReject")}
-                    className="h-9 px-4 rounded-[2px] text-[13px] font-medium inline-flex items-center gap-1.5 border border-[#f0c7be] bg-[#fdf3f1] text-[#b1361e] hover:bg-[#fbe9e4] disabled:opacity-50">
-                    <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
-                    Reject
                   </button>
                   {req.status === "SUBMITTED" && (
                     <button disabled={busy} onClick={() => setModal("npdHold")}
@@ -305,19 +338,38 @@ function EditCard({ req, busy, onSave, onCancel }: {
 }) {
   const [warehouse, setWarehouse] = useState<string>(req.warehouse ?? "");
   const [target, setTarget] = useState(req.npd_target_name ?? "");
-  const [quantity, setQuantity] = useState(req.quantity != null ? String(req.quantity) : "");
+  const [pcs, setPcs] = useState(req.pcs != null ? String(req.pcs) : "");
+  const [weightPerPiece, setWeightPerPiece] = useState(req.weight_per_piece != null ? String(req.weight_per_piece) : "");
   const [purposeTag, setPurposeTag] = useState<string>(req.purpose_tag ?? "");
   const [requestorTeam, setRequestorTeam] = useState(req.requestor_team ?? "");
-  const [purposeNote, setPurposeNote] = useState(req.purpose_note ?? "");
+  const [description, setDescription] = useState(req.description ?? "");
+  const [companyName, setCompanyName] = useState(req.company_name ?? "");
+  const [customerName, setCustomerName] = useState(req.customer_name ?? "");
+  const [customerContact, setCustomerContact] = useState(req.customer_contact ?? "");
+  const [shipTo, setShipTo] = useState(req.customer_ship_to_address ?? "");
+  const [modeOfTransport, setModeOfTransport] = useState(req.mode_of_transport ?? "");
+  const [expectedDispatch, setExpectedDispatch] = useState((req.expected_dispatch_date ?? "").slice(0, 10));
+  // Quantity is derived = pcs × weight per piece (kg).
+  const pcsNum = Number(pcs), wppNum = Number(weightPerPiece);
+  const qtyNum = (pcs.trim() !== "" && weightPerPiece.trim() !== "" && Number.isFinite(pcsNum) && Number.isFinite(wppNum))
+    ? Number((pcsNum * wppNum).toFixed(3)) : 0;
 
   function save() {
     onSave({
       warehouse: (warehouse || undefined) as Warehouse | undefined,
       npd_target_name: target.trim() || undefined,
-      quantity: quantity.trim() ? Number(quantity) : undefined,
+      pcs: pcs.trim() ? pcsNum : undefined,
+      weight_per_piece: weightPerPiece.trim() ? wppNum : undefined,
+      quantity: qtyNum > 0 ? qtyNum : undefined,
       purpose_tag: (purposeTag || undefined) as PurposeTag | undefined,
       requestor_team: requestorTeam.trim() || undefined,
-      purpose_note: purposeNote.trim() || undefined,
+      description: description.trim() || undefined,
+      company_name: companyName.trim() || undefined,
+      customer_name: customerName.trim() || undefined,
+      customer_contact: customerContact.trim() || undefined,
+      customer_ship_to_address: shipTo.trim() || undefined,
+      mode_of_transport: modeOfTransport.trim() || undefined,
+      expected_dispatch_date: expectedDispatch || undefined,
     });
   }
 
@@ -329,12 +381,19 @@ function EditCard({ req, busy, onSave, onCancel }: {
           {WAREHOUSES.map((w) => <option key={w} value={w}>{w}</option>)}
         </select>
       </label>
-      <label className="text-[12px] text-[var(--text-secondary)]">Target NPD article
+      <label className="text-[12px] text-[var(--text-secondary)]">Target NPD article name
         <input className="form-input mt-0.5" value={target} onChange={(e) => setTarget(e.target.value)} />
       </label>
-      <label className="text-[12px] text-[var(--text-secondary)]">Quantity
-        <input className="form-input mt-0.5" type="number" min="0" step="0.001" value={quantity}
-          onChange={(e) => setQuantity(e.target.value)} onWheel={(e) => e.currentTarget.blur()} />
+      <label className="text-[12px] text-[var(--text-secondary)]">Pcs
+        <input className="form-input mt-0.5" type="number" min="0" step="1" value={pcs}
+          onChange={(e) => setPcs(e.target.value)} onWheel={(e) => e.currentTarget.blur()} />
+      </label>
+      <label className="text-[12px] text-[var(--text-secondary)]">Weight per piece (kg)
+        <input className="form-input mt-0.5" type="number" min="0" step="0.001" value={weightPerPiece}
+          onChange={(e) => setWeightPerPiece(e.target.value)} onWheel={(e) => e.currentTarget.blur()} />
+      </label>
+      <label className="text-[12px] text-[var(--text-secondary)]">Quantity (kg)
+        <input className="form-input mt-0.5 bg-[var(--surface-subtle)] cursor-not-allowed" value={qtyNum > 0 ? qtyNum.toLocaleString("en-IN") : "—"} readOnly tabIndex={-1} />
       </label>
       <label className="text-[12px] text-[var(--text-secondary)]">Purpose
         <select className="form-input mt-0.5" value={purposeTag} onChange={(e) => setPurposeTag(e.target.value)}>
@@ -342,11 +401,29 @@ function EditCard({ req, busy, onSave, onCancel }: {
           {PURPOSE_OPTIONS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
         </select>
       </label>
-      <label className="text-[12px] text-[var(--text-secondary)]">Requestor team
+      <label className="text-[12px] text-[var(--text-secondary)]">Requestor
         <input className="form-input mt-0.5" value={requestorTeam} onChange={(e) => setRequestorTeam(e.target.value)} />
       </label>
-      <label className="text-[12px] text-[var(--text-secondary)] sm:col-span-2">Purpose note
-        <input className="form-input mt-0.5" value={purposeNote} onChange={(e) => setPurposeNote(e.target.value)} />
+      <label className="text-[12px] text-[var(--text-secondary)]">Company name
+        <input className="form-input mt-0.5" value={companyName} onChange={(e) => setCompanyName(e.target.value)} />
+      </label>
+      <label className="text-[12px] text-[var(--text-secondary)]">Customer name
+        <input className="form-input mt-0.5" value={customerName} onChange={(e) => setCustomerName(e.target.value)} />
+      </label>
+      <label className="text-[12px] text-[var(--text-secondary)]">Customer contact
+        <input className="form-input mt-0.5" value={customerContact} onChange={(e) => setCustomerContact(e.target.value)} />
+      </label>
+      <label className="text-[12px] text-[var(--text-secondary)]">Mode of transport
+        <input className="form-input mt-0.5" value={modeOfTransport} onChange={(e) => setModeOfTransport(e.target.value)} />
+      </label>
+      <label className="text-[12px] text-[var(--text-secondary)]">Expected dispatch date <span className="text-[var(--text-muted)]">(BD)</span>
+        <input className="form-input mt-0.5" type="date" value={expectedDispatch} onChange={(e) => setExpectedDispatch(e.target.value)} />
+      </label>
+      <label className="text-[12px] text-[var(--text-secondary)] sm:col-span-2">Customer ship-to address
+        <textarea className="form-input mt-0.5 min-h-[56px] resize-y" value={shipTo} onChange={(e) => setShipTo(e.target.value)} />
+      </label>
+      <label className="text-[12px] text-[var(--text-secondary)] sm:col-span-2">Description
+        <textarea className="form-input mt-0.5 min-h-[56px] resize-y" value={description} onChange={(e) => setDescription(e.target.value)} />
       </label>
       <div className="sm:col-span-2 flex items-center gap-2">
         <button disabled={busy} onClick={onCancel}
