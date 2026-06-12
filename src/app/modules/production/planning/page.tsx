@@ -526,9 +526,24 @@ export default function PlanningPage() {
           )
         : null;
 
+      // Stage selection: if ANY of the picked steps is a packing stage,
+      // promote the merged step to that packing stage — otherwise keep
+      // the first one as the comment above describes. Without this, a
+      // {Sorting, Packaging} merge took picked[0].stage='sorting' and
+      // EGA / PM Variance / wastage attribution silently disappeared
+      // because both the frontend (isPackingStageJc) and the backend
+      // (is_packing_stage in job_card_v2.py) classify stages by the
+      // "packing" / "packaging" tokens in the stage string. The merged
+      // process_name keeps "+ Packaging" so the operator sees the right
+      // label even when sorting comes first; only the canonical `stage`
+      // needed promotion.
+      const PACKING_TOKENS = ["packaging", "packing"];
+      const isPackingStage = (st: string | null | undefined) =>
+        !!st && PACKING_TOKENS.some((t) => st.toLowerCase().includes(t));
+      const packingPick = picked.find((s) => isPackingStage(s.stage));
       const merged: PlanStep = {
         process_name: picked.map((s) => s.process_name || "—").join(" + "),
-        stage: picked[0].stage ?? null,
+        stage: packingPick?.stage ?? picked[0].stage ?? null,
         floor: mergedFloor,
         std_time_min: totalTime,
         loss_pct: maxLoss,
