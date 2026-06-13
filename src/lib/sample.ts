@@ -299,7 +299,7 @@ export const closeRequisition = (id: number) => action(id, "close", undefined, "
 export const approveRequisition = (id: number, act: "APPROVED" | "REJECTED", remarks?: string) =>
   action(id, "approve", { action: act, remarks }, "Approval failed");
 export const npdReview = (
-  id: number, act: "APPROVE" | "REJECT" | "HOLD", reason?: string, start_date?: string,
+  id: number, act: "ACCEPT" | "REJECT" | "HOLD", reason?: string, start_date?: string,
 ) => action(id, "npd-review", { action: act, reason, start_date }, "NPD review failed");
 export const issueOutward = (id: number, from_location?: string) => action(id, "outward", { from_location }, "Outward failed");
 export const dispatchInternal = (id: number) => action(id, "dispatch-internal", undefined, "Dispatch failed");

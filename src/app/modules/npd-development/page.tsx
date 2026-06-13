@@ -389,7 +389,7 @@ export default function NpdQueuePage() {
                   <div className="mt-2 pt-2 border-t border-[var(--surface-divider)]">
                     <RowActions flags={flags} busy={busyId === r.id}
                       onView={() => openRow(r.id)}
-                      onAccept={() => run(r.id, () => npdReview(r.id, "APPROVE"))}
+                      onAccept={() => run(r.id, () => npdReview(r.id, "ACCEPT"))}
                       onHold={() => openHold(r)} onCancel={() => openCancel(r)} onEdit={() => openEdit(r)} />
                   </div>
                 </div>
@@ -431,7 +431,7 @@ export default function NpdQueuePage() {
                       <td className="px-3 py-2">
                         <RowActions flags={flags} busy={busyId === r.id}
                           onView={() => openRow(r.id)}
-                          onAccept={() => run(r.id, () => npdReview(r.id, "APPROVE"))}
+                          onAccept={() => run(r.id, () => npdReview(r.id, "ACCEPT"))}
                           onHold={() => openHold(r)} onCancel={() => openCancel(r)} onEdit={() => openEdit(r)} />
                       </td>
                     </tr>
