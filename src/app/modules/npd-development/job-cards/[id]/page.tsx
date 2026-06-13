@@ -9,7 +9,7 @@ import { useParams, useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
-import { sampleCaps } from "@/lib/sample-roles";
+import { sampleCaps, roleNameOf, isAdminMe } from "@/lib/sample-roles";
 import type { MeResponse } from "@/lib/auth";
 import {
   getDevJobCard, replaceDevLines, startDevJobCard, closeDevJobCard, cancelDevJobCard, dispatchDevJobCard,
@@ -412,7 +412,7 @@ export default function DevJobCardDetailPage() {
             {/* Request promote (IN_DEVELOPMENT) — only once EVERY trial phase is completed.
                 Pick the final trial; its recipe is promoted and its recorded output
                 is inherited (no second accounting entry). */}
-            {caps.canNpd && jc.status === "IN_DEVELOPMENT" && allPhasesClosed && (
+            {caps.canNpd && jc.status === "IN_DEVELOPMENT" && allPhasesClosed && !jc.promote_gate && (
               <Card title="Request promote">
                 <p className="text-[12px] text-[var(--text-muted)] mb-3">Pick the final trial. Its recipe will be promoted into a live BOM once the inventory manager and original requestor both accept the promote request.</p>
                 {completedPhases.length === 0 ? (
@@ -450,7 +450,7 @@ export default function DevJobCardDetailPage() {
             )}
 
             {/* Record output & request promote — legacy no-phase card (manual accounting). */}
-            {caps.canNpd && jc.status === "IN_DEVELOPMENT" && !hasPhases && (
+            {caps.canNpd && jc.status === "IN_DEVELOPMENT" && !hasPhases && !jc.promote_gate && (
               <Card title="Record output & request promote">
                 <p className="text-[12px] text-[var(--text-muted)] mb-3">Requesting promote locks the output and opens a dual-approval gate — both inventory manager and the original requestor must accept before the recipe is promoted to a live BOM.</p>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -904,6 +904,12 @@ function PromoteGatePanel({ gate, devJcId, me, busy, onAction }: {
   const allSettled = gate.approvals.every((a) => a.status !== "PENDING");
   const overallRejected = gate.approvals.some((a) => a.status === "REJECTED");
 
+  // `me.role_name` is always undefined in this app (the /me payload only carries
+  // roles[]), so resolve the role via the fallback-aware helper the rest of the UI
+  // uses. An admin can act on either gate (mirrors the backend admin bypass).
+  const isInvMgr = roleNameOf(me) === "inventory_manager";
+  const isAdmin = isAdminMe(me);
+
   return (
     <Card title="Promote approval gate">
       <p className="text-[12px] text-[var(--text-muted)] mb-3">
@@ -926,9 +932,10 @@ function PromoteGatePanel({ gate, devJcId, me, busy, onAction }: {
         {gate.approvals.map((appr) => {
           const canAct =
             appr.status === "PENDING" &&
-            ((appr.approver_kind === "INV_MGR" && me?.role_name === "inventory_manager") ||
-             (appr.approver_kind === "REQUESTOR_BH" && me?.user_id != null && appr.approver_user_id != null
-              && String(me.user_id) === String(appr.approver_user_id)));
+            ((appr.approver_kind === "INV_MGR" && (isInvMgr || isAdmin)) ||
+             (appr.approver_kind === "REQUESTOR_BH" && (isAdmin ||
+              (me?.user_id != null && appr.approver_user_id != null
+               && String(me.user_id) === String(appr.approver_user_id)))));
 
           return (
             <li key={appr.approver_kind}

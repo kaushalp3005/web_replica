@@ -250,8 +250,16 @@ export async function replaceDevLines(id: number, lines: DevLine[]): Promise<Dev
 
 export const startDevJobCard = (id: number) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/start`), "Start failed");
+
+// `/close` no longer closes the card directly — it opens a pending promote gate
+// and returns the request envelope (the actual close runs once both gates accept).
+export interface PromoteRequestResult {
+  ok: boolean;
+  promote_request_id?: number;
+  status: string;
+}
 export const closeDevJobCard = (id: number, body: DevJobCardCloseBody) =>
-  jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/close`, body), "Close failed");
+  jsonOrThrow<PromoteRequestResult>(post(`${BASE}/${id}/close`, body), "Close failed");
 export const cancelDevJobCard = (id: number, reason: string) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/cancel`, { reason }), "Cancel failed");
 
