@@ -189,11 +189,10 @@ export default function SampleQueuePage() {
               <button key={r.id} onClick={() => openRow(r.id)}
                 className="text-left bg-white border border-[var(--aws-border)] rounded-md p-3 hover:border-[var(--aws-orange)]">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-semibold text-[13px] text-[var(--text-primary)] truncate" title={r.requisition_number}>{r.requisition_number}</span>
+                  <span className="font-semibold text-[13px] text-[var(--text-primary)] tabular-nums truncate" title={String(r.request_id ?? "")}>{r.request_id ?? "—"}</span>
                   <StatusPill status={r.status} />
                 </div>
                 <div className="mt-1 text-[12px] text-[var(--text-secondary)] flex flex-wrap gap-x-3 gap-y-0.5">
-                  <span title={`Request ID ${r.request_id ?? ""}`}>#{r.request_id ?? "—"}</span>
                   <span>{TYPE_LABEL[r.sample_type] ?? r.sample_type}</span>
                   <span>{r.warehouse}</span>
                   {r.quantity != null && <span>Qty {r.quantity}</span>}
@@ -211,7 +210,6 @@ export default function SampleQueuePage() {
               <thead>
                 <tr className="bg-[var(--surface-subtle)] text-left text-[12px] text-[var(--text-secondary)]">
                   <th className="px-3 py-2 font-semibold">Request ID</th>
-                  <th className="px-3 py-2 font-semibold">Requisition</th>
                   <th className="px-3 py-2 font-semibold">Type</th>
                   <th className="px-3 py-2 font-semibold">Status</th>
                   <th className="px-3 py-2 font-semibold">Warehouse</th>
@@ -226,8 +224,7 @@ export default function SampleQueuePage() {
                 {rows.map((r) => (
                   <tr key={r.id} onClick={() => openRow(r.id)}
                     className="border-t border-[var(--surface-divider)] hover:bg-[var(--surface-subtle)] cursor-pointer">
-                    <td className="px-3 py-2 text-[var(--text-secondary)] tabular-nums">{r.request_id ?? "—"}</td>
-                    <td className="px-3 py-2 font-medium text-[var(--text-primary)] max-w-[180px] truncate" title={r.requisition_number}>{r.requisition_number}</td>
+                    <td className="px-3 py-2 font-medium text-[var(--text-primary)] tabular-nums">{r.request_id ?? "—"}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{TYPE_LABEL[r.sample_type] ?? r.sample_type}</td>
                     <td className="px-3 py-2"><StatusPill status={r.status} /></td>
                     <td className="px-3 py-2">{r.warehouse}</td>

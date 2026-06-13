@@ -73,7 +73,7 @@ export default function NewDevJobCardPage() {
         // Description moved off purpose_note → description; fall back for legacy rows.
         const desc = req.description ?? req.purpose_note;
         if (desc) setDescription(desc);
-        setLinkedReq(String(req.request_id ?? req.requisition_number));
+        setLinkedReq(String(req.request_id ?? req.id));
       }).catch(() => { /* leave the form blank on lookup failure */ });
     });
     return () => { cancelled = true; };

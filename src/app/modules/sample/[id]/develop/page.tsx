@@ -54,7 +54,7 @@ export default function DevelopRequisitionPage() {
         <nav className="text-[12px] text-[#d5dbdb] hidden sm:flex items-center gap-2 ml-2">
           <button onClick={() => router.push("/modules/sample")} className="hover:underline">Sample</button>
           <span>/</span>
-          <button onClick={() => router.push(`/modules/sample/${id}`)} className="hover:underline">{req?.request_id ?? req?.requisition_number ?? id}</button>
+          <button onClick={() => router.push(`/modules/sample/${id}`)} className="hover:underline">{req?.request_id ?? id}</button>
           <span>/</span><span className="text-white">Develop</span>
         </nav>
         <div className="flex-1" />
@@ -65,7 +65,7 @@ export default function DevelopRequisitionPage() {
       <main className="flex-1 max-w-[980px] w-full mx-auto px-4 sm:px-6 py-6">
         <Breadcrumbs items={[
           ...NPD_DEV_ROOT,
-          { label: req?.request_id != null ? String(req.request_id) : (req?.requisition_number ?? String(id)), href: `/modules/sample/${id}` },
+          { label: req?.request_id != null ? String(req.request_id) : String(id), href: `/modules/sample/${id}` },
           { label: "Develop" },
         ]} className="mb-3" />
 
@@ -88,8 +88,7 @@ export default function DevelopRequisitionPage() {
             {/* Request context */}
             <section className="bg-white border border-[var(--aws-border)] rounded-md p-4">
               <div className="flex flex-wrap items-center gap-3">
-                <h1 className="text-[18px] font-semibold text-[var(--text-primary)]">{req.request_id ?? req.requisition_number}</h1>
-                <span className="text-[12px] text-[var(--text-muted)]">{req.requisition_number}</span>
+                <h1 className="text-[18px] font-semibold text-[var(--text-primary)]">{req.request_id ?? id}</h1>
                 <StatusPill status={req.status} />
                 <span className="text-[12px] px-2 py-0.5 rounded bg-[var(--surface-divider)] text-[var(--text-secondary)]">{TYPE_LABEL[req.sample_type] ?? req.sample_type}</span>
                 {req.npd_target_name && <span className="text-[13px] text-[var(--text-secondary)]">Target: <span className="font-medium text-[var(--text-primary)]">{req.npd_target_name}</span></span>}

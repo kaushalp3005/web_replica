@@ -9,11 +9,12 @@ import { useParams, useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
-import { sampleCaps } from "@/lib/sample-roles";
+import { sampleCaps, roleNameOf, isAdminMe } from "@/lib/sample-roles";
+import type { MeResponse } from "@/lib/auth";
 import {
   getDevJobCard, replaceDevLines, startDevJobCard, closeDevJobCard, cancelDevJobCard, dispatchDevJobCard,
-  addDevPhase, replacePhaseLines, startDevPhase, completeDevPhase, deleteDevPhase,
-  type DevJobCard, type DevLine, type DevPhase, type DevPhaseCompleteBody,
+  addDevPhase, replacePhaseLines, startDevPhase, completeDevPhase, deleteDevPhase, promoteApproval,
+  type DevJobCard, type DevLine, type DevPhase, type DevPhaseCompleteBody, type PromoteGate,
 } from "@/lib/npd-dev";
 import { DevJcStatusPill } from "../../../sample/_shared";
 import { ArticlePicker, UomSelect } from "../../../sample/_form";
@@ -58,6 +59,9 @@ export default function DevJobCardDetailPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set to true after a successful "Record output & request promote" to show the
+  // pending-gate message until the next full reload clears it.
+  const [promoteRequested, setPromoteRequested] = useState(false);
 
   // Close form (accounting). Yield % is derived, not entered.
   const [outQty, setOutQty] = useState("");
@@ -155,16 +159,19 @@ export default function DevJobCardDetailPage() {
     run(() => replaceDevLines(id, wire));
   }
   function closeCard() {
-    run(() => closeDevJobCard(id, {
-      promote_phase_id: promotePhaseId ? Number(promotePhaseId) : undefined,
-      output_qty: outQty ? Number(outQty) : undefined,
-      output_uom: outUom || undefined,
-      rm_consumed_qty: outRm ? Number(outRm) : undefined,
-      wastage_qty: outWastage ? Number(outWastage) : undefined,
-      extra_give_away_qty: outEga ? Number(outEga) : undefined,
-      yield_pct: yieldPct != null ? Number(yieldPct.toFixed(2)) : undefined,
-      output_notes: outNotes || undefined,
-    }));
+    run(async () => {
+      await closeDevJobCard(id, {
+        promote_phase_id: promotePhaseId ? Number(promotePhaseId) : undefined,
+        output_qty: outQty ? Number(outQty) : undefined,
+        output_uom: outUom || undefined,
+        rm_consumed_qty: outRm ? Number(outRm) : undefined,
+        wastage_qty: outWastage ? Number(outWastage) : undefined,
+        extra_give_away_qty: outEga ? Number(outEga) : undefined,
+        yield_pct: yieldPct != null ? Number(yieldPct.toFixed(2)) : undefined,
+        output_notes: outNotes || undefined,
+      });
+      setPromoteRequested(true);
+    });
   }
   function cancelCard() {
     const reason = window.prompt("Reason for cancelling this development job card?");
@@ -402,12 +409,12 @@ export default function DevJobCardDetailPage() {
               )}
             </Card>
 
-            {/* Dispatch (IN_DEVELOPMENT) — only once EVERY trial phase is completed.
+            {/* Request promote (IN_DEVELOPMENT) — only once EVERY trial phase is completed.
                 Pick the final trial; its recipe is promoted and its recorded output
                 is inherited (no second accounting entry). */}
-            {caps.canNpd && jc.status === "IN_DEVELOPMENT" && allPhasesClosed && (
-              <Card title="Dispatch">
-                <p className="text-[12px] text-[var(--text-muted)] mb-3">Pick the final trial. Its recipe is promoted into a live BOM and its recorded output is finalised — then click Complete.</p>
+            {caps.canNpd && jc.status === "IN_DEVELOPMENT" && allPhasesClosed && !jc.promote_gate && (
+              <Card title="Request promote">
+                <p className="text-[12px] text-[var(--text-muted)] mb-3">Pick the final trial. Its recipe will be promoted into a live BOM once the inventory manager and original requestor both accept the promote request.</p>
                 {completedPhases.length === 0 ? (
                   <Empty>Complete a trial phase first — its recorded output becomes the final output on close.</Empty>
                 ) : (
@@ -429,17 +436,23 @@ export default function DevJobCardDetailPage() {
                     <label className="block text-[11px] text-[var(--text-secondary)] mb-3">Notes (optional)
                       <input className="form-input mt-0.5" value={outNotes} onChange={(e) => setOutNotes(e.target.value)} />
                     </label>
-                    <button disabled={busy || !promotePhaseId} onClick={closeCard}
-                      className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Complete</button>
+                    {promoteRequested ? (
+                      <div className="rounded-md border border-[#b6dbb1] bg-[#eaf6ed] px-3 py-2 text-[13px] text-[#1d8102]">
+                        Promote requested — awaiting inventory-manager + requestor acceptance.
+                      </div>
+                    ) : (
+                      <button disabled={busy || !promotePhaseId} onClick={closeCard}
+                        className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Record output & request promote</button>
+                    )}
                   </>
                 )}
               </Card>
             )}
 
-            {/* Record output & close — legacy no-phase card (manual accounting). */}
-            {caps.canNpd && jc.status === "IN_DEVELOPMENT" && !hasPhases && (
-              <Card title="Record output & close">
-                <p className="text-[12px] text-[var(--text-muted)] mb-3">Closing promotes the base recipe into a live BOM and records the final output.</p>
+            {/* Record output & request promote — legacy no-phase card (manual accounting). */}
+            {caps.canNpd && jc.status === "IN_DEVELOPMENT" && !hasPhases && !jc.promote_gate && (
+              <Card title="Record output & request promote">
+                <p className="text-[12px] text-[var(--text-muted)] mb-3">Requesting promote locks the output and opens a dual-approval gate — both inventory manager and the original requestor must accept before the recipe is promoted to a live BOM.</p>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   <label className="text-[11px] text-[var(--text-secondary)]">FG output ({acctUom})
                     <input className="form-input mt-0.5" type="number" min="0" step="0.001" value={outQty} onChange={(e) => setOutQty(e.target.value)} />
@@ -466,11 +479,36 @@ export default function DevJobCardDetailPage() {
 
                 <AcctSummary rm={qRm} out={qOut} waste={qWaste} ega={qEga} uom={acctUom} className="mt-3" />
 
-                <div className="mt-3">
-                  <button disabled={busy} onClick={closeCard}
-                    className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Record output & promote → close</button>
-                </div>
+                {promoteRequested && (
+                  <div className="mt-3 rounded-md border border-[#b6dbb1] bg-[#eaf6ed] px-3 py-2 text-[13px] text-[#1d8102]">
+                    Promote requested — awaiting inventory-manager + requestor acceptance.
+                  </div>
+                )}
+
+                {!promoteRequested && (
+                  <div className="mt-3">
+                    <button disabled={busy} onClick={closeCard}
+                      className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Record output & request promote</button>
+                  </div>
+                )}
               </Card>
+            )}
+
+            {/* Promote-approval gate — present whenever a PENDING promote request
+                exists (i.e. the operator hit "request promote" but both gates
+                haven't cleared yet). Shown to all viewers; ACCEPT/REJECT buttons
+                are gated per-role: INV_MGR gate → inventory_manager role;
+                REQUESTOR_BH gate → the specific approver_user_id. */}
+            {jc.promote_gate && (
+              <PromoteGatePanel
+                gate={jc.promote_gate}
+                devJcId={id}
+                me={me}
+                busy={busy}
+                onAction={(action, approverKind) =>
+                  run(() => promoteApproval(id, action, { approver_kind: approverKind }))
+                }
+              />
             )}
 
             {/* Output (CLOSED) */}
@@ -823,4 +861,109 @@ function AcctRow({ label, value, strong, valueClass }: { label: string; value: s
 }
 function Empty({ children }: { children: React.ReactNode }) {
   return <p className="text-[13px] text-[var(--text-muted)]">{children}</p>;
+}
+
+// ── Promote-approval gate panel ───────────────────────────────────────────────
+// Shown whenever jc.promote_gate is non-null (a PENDING promote request exists).
+// Each approval row shows the gate kind + status. The viewer sees ACCEPT/REJECT
+// buttons only for gates they can act on:
+//   INV_MGR gate   → viewer role_name === "inventory_manager"
+//   REQUESTOR_BH gate → viewer user_id === that gate's approver_user_id
+// approver_kind is always sent explicitly (safe when one user holds both gates).
+
+const GATE_KIND_LABELS: Record<string, string> = {
+  INV_MGR:      "Inventory manager",
+  REQUESTOR_BH: "Requestor (business head)",
+};
+const APPROVAL_STATUS_STYLES: Record<string, { bg: string; fg: string; ring: string; label: string }> = {
+  PENDING:  { bg: "#f4f4f4", fg: "#687078", ring: "#d5dbdb", label: "Pending" },
+  ACCEPTED: { bg: "#eaf6ed", fg: "#1d8102", ring: "#b6dbb1", label: "Accepted" },
+  REJECTED: { bg: "#fdf3f1", fg: "#b1361e", ring: "#f0c7be", label: "Rejected" },
+};
+
+function ApprovalStatusPill({ status }: { status: string }) {
+  const s = APPROVAL_STATUS_STYLES[status] ?? APPROVAL_STATUS_STYLES.PENDING;
+  return (
+    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap"
+      style={{ background: s.bg, color: s.fg, boxShadow: `inset 0 0 0 1px ${s.ring}` }}>
+      {s.label}
+    </span>
+  );
+}
+
+function PromoteGatePanel({ gate, devJcId, me, busy, onAction }: {
+  gate: PromoteGate;
+  devJcId: number;
+  me: MeResponse | null;
+  busy: boolean;
+  onAction: (action: "ACCEPT" | "REJECT", approverKind: "INV_MGR" | "REQUESTOR_BH") => void;
+}) {
+  // Suppress unused var warning — devJcId is available for future use if needed.
+  void devJcId;
+
+  const allSettled = gate.approvals.every((a) => a.status !== "PENDING");
+  const overallRejected = gate.approvals.some((a) => a.status === "REJECTED");
+
+  // `me.role_name` is always undefined in this app (the /me payload only carries
+  // roles[]), so resolve the role via the fallback-aware helper the rest of the UI
+  // uses. An admin can act on either gate (mirrors the backend admin bypass).
+  const isInvMgr = roleNameOf(me) === "inventory_manager";
+  const isAdmin = isAdminMe(me);
+
+  return (
+    <Card title="Promote approval gate">
+      <p className="text-[12px] text-[var(--text-muted)] mb-3">
+        Both gates must accept before the recipe is promoted into a live BOM.
+        Requested {(gate.created_at ?? "").slice(0, 10)}.
+      </p>
+
+      {overallRejected && (
+        <div className="mb-3 rounded-md border border-[#f0c7be] bg-[#fdf3f1] px-3 py-2 text-[13px] text-[#b1361e]">
+          Promote request rejected — the recipe was not promoted.
+        </div>
+      )}
+      {allSettled && !overallRejected && (
+        <div className="mb-3 rounded-md border border-[#b6dbb1] bg-[#eaf6ed] px-3 py-2 text-[13px] text-[#1d8102]">
+          Both gates accepted — recipe is being promoted.
+        </div>
+      )}
+
+      <ul className="space-y-3">
+        {gate.approvals.map((appr) => {
+          const canAct =
+            appr.status === "PENDING" &&
+            ((appr.approver_kind === "INV_MGR" && (isInvMgr || isAdmin)) ||
+             (appr.approver_kind === "REQUESTOR_BH" && (isAdmin ||
+              (me?.user_id != null && appr.approver_user_id != null
+               && String(me.user_id) === String(appr.approver_user_id)))));
+
+          return (
+            <li key={appr.approver_kind}
+              className="flex flex-wrap items-center gap-3 rounded-md border border-[var(--aws-border)] bg-[var(--surface-subtle)] px-3 py-2">
+              <span className="text-[13px] font-medium text-[var(--text-primary)] flex-1">
+                {GATE_KIND_LABELS[appr.approver_kind] ?? appr.approver_kind}
+              </span>
+              <ApprovalStatusPill status={appr.status} />
+              {canAct && (
+                <div className="flex items-center gap-2 ml-auto">
+                  <button
+                    disabled={busy}
+                    onClick={() => onAction("ACCEPT", appr.approver_kind)}
+                    className="h-7 px-3 rounded-[2px] bg-[var(--aws-orange)] text-white text-[12px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">
+                    Accept
+                  </button>
+                  <button
+                    disabled={busy}
+                    onClick={() => onAction("REJECT", appr.approver_kind)}
+                    className="h-7 px-3 rounded-[2px] border border-[var(--aws-error)] text-[var(--aws-error)] text-[12px] font-medium bg-white disabled:opacity-50 hover:bg-[#fdf3f1]">
+                    Reject
+                  </button>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </Card>
+  );
 }

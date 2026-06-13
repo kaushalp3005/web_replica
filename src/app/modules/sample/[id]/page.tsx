@@ -126,7 +126,7 @@ export default function SampleDetailPage() {
         <BrandMark />
         <nav className="text-[12px] text-[#d5dbdb] hidden sm:flex items-center gap-2 ml-2">
           <button onClick={() => router.push("/modules/sample")} className="hover:underline">Sample</button>
-          <span>/</span><span className="text-white">{req?.request_id ?? req?.requisition_number ?? id}</span>
+          <span>/</span><span className="text-white">{req?.request_id ?? id}</span>
         </nav>
         <div className="flex-1" />
         <button onClick={() => router.push("/modules/profile")} aria-label="Profile"
@@ -136,7 +136,7 @@ export default function SampleDetailPage() {
       <main className="flex-1 max-w-[980px] w-full mx-auto px-4 sm:px-6 py-6">
         <Breadcrumbs items={[
           ...(isNpdTrial ? NPD_DEV_ROOT : SAMPLE_ROOT),
-          { label: req?.request_id != null ? String(req.request_id) : (req?.requisition_number ?? String(id)) },
+          { label: req?.request_id != null ? String(req.request_id) : String(id) },
         ]} className="mb-3" />
 
         {error && <div className="mb-4 rounded-md border border-[#f0c7be] bg-[#fdf3f1] px-3 py-2 text-[13px] text-[#b1361e]">{error}</div>}
@@ -154,13 +154,12 @@ export default function SampleDetailPage() {
                   <div className="min-w-0">
                     <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--text-muted)] mb-1">Request</div>
                     <div className="flex flex-wrap items-center gap-2.5">
-                      <h1 className="text-[28px] leading-none font-semibold text-[var(--text-primary)] tabular-nums">{req.request_id ?? req.requisition_number}</h1>
+                      <h1 className="text-[28px] leading-none font-semibold text-[var(--text-primary)] tabular-nums">{req.request_id ?? id}</h1>
                       {isNpdTrial
                         ? <NpdStatusPill status={req.status} holdReason={holdReason} />
                         : <StatusPill status={req.status} />}
                       <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-[var(--surface-divider)] text-[var(--text-secondary)]">{TYPE_LABEL[req.sample_type] ?? req.sample_type}</span>
                     </div>
-                    <div className="mt-1.5 text-[12px] text-[var(--text-muted)]">Document no. <span className="text-[var(--text-secondary)]">{req.requisition_number}</span></div>
                   </div>
                   <div className="flex-1" />
                   <div className="flex items-center gap-2">
@@ -257,10 +256,10 @@ export default function SampleDetailPage() {
               <Card title="NPD review">
                 <p className="-mt-1 mb-3 text-[12px] text-[var(--text-muted)]">Record the NPD team&apos;s decision on this request — a reason is required to hold.</p>
                 <div className="flex flex-wrap gap-2">
-                  <button disabled={busy} onClick={() => run(() => npdReview(req.id, "APPROVE"))}
+                  <button disabled={busy} onClick={() => run(() => npdReview(req.id, "ACCEPT"))}
                     className="h-9 px-4 rounded-[2px] text-[13px] font-medium inline-flex items-center gap-1.5 bg-[var(--aws-orange)] text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-50">
                     <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M5 13l4 4L19 7" /></svg>
-                    Approve
+                    Accept
                   </button>
                   {req.status === "SUBMITTED" && (
                     <button disabled={busy} onClick={() => setModal("npdHold")}
@@ -294,23 +293,6 @@ export default function SampleDetailPage() {
               </Card>
             )}
 
-            {/* Approval chain */}
-            <Card title="Approval chain">
-              {(req.approvals?.length ?? 0) === 0 ? <Empty>No reviews yet.</Empty> : (
-                <ul className="space-y-2.5">
-                  {req.approvals!.map((ap) => (
-                    <li key={ap.id} className="flex flex-wrap items-center gap-2 text-[13px]">
-                      <span className="text-[11px] w-6 h-6 rounded-full bg-[var(--surface-divider)] text-[var(--text-secondary)] flex items-center justify-center shrink-0">{ap.sequence_no}</span>
-                      <span className="font-medium text-[var(--text-primary)]">{ap.approval_stage.replace(/_/g, " ")}</span>
-                      <ApprovalPill action={ap.action} />
-                      <span className="text-[var(--text-muted)]">{ap.role_at_action}</span>
-                      {ap.remarks && <span className="text-[var(--text-secondary)] truncate" title={ap.remarks}>— {ap.remarks}</span>}
-                      <span className="text-[var(--text-muted)] ml-auto whitespace-nowrap">{(ap.actioned_at ?? "").slice(0, 16).replace("T", " ")}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </Card>
           </div>
         )}
       </main>
@@ -552,20 +534,6 @@ function Field({ label, value }: { label: string; value: string }) {
   );
 }
 
-// Small coloured pill for an approval-chain action (APPROVED / REJECTED / HOLD).
-function ApprovalPill({ action }: { action: string }) {
-  const s = action === "APPROVED" ? { bg: "#ecfdf5", fg: "#047857" }
-    : action === "REJECTED" ? { bg: "#fdf3f1", fg: "#b1361e" }
-    : action === "HOLD" ? { bg: "#fef9c3", fg: "#854d0e" }
-    : { bg: "var(--surface-divider)", fg: "var(--text-secondary)" };
-  return (
-    <span className="text-[11px] font-medium px-1.5 py-0.5 rounded uppercase tracking-wide"
-      style={{ backgroundColor: s.bg, color: s.fg }}>{action}</span>
-  );
-}
-function Empty({ children }: { children: React.ReactNode }) {
-  return <p className="text-[13px] text-[var(--text-muted)]">{children}</p>;
-}
 function Input({ label, value, onChange, type = "text" }: { label: string; value: string; onChange: (v: string) => void; type?: string }) {
   return <label className="block text-[11px] text-[var(--text-secondary)]">{label}<input className="form-input mt-0.5" type={type} value={value} onChange={(e) => onChange(e.target.value)} /></label>;
 }

@@ -45,6 +45,22 @@ export interface DevPhase {
   yield_pct?: number | string | null;
 }
 
+// One approval row inside a pending promote gate.
+export interface PromoteApproval {
+  approver_kind: "INV_MGR" | "REQUESTOR_BH";
+  approver_user_id: number | null;   // INT on the wire (JSON number), not a string
+  status: "PENDING" | "ACCEPTED" | "REJECTED";
+}
+
+// Dual-approval gate returned by get_dev_job_card when a promote request is live.
+// Present (non-null) when a PENDING request exists; null when no active request.
+export interface PromoteGate {
+  id: number;
+  status: "PENDING";
+  created_at: string;
+  approvals: PromoteApproval[];
+}
+
 export interface DevJobCard {
   id: number;                       // 8-digit time-based BIGINT (new_short_time_id)
   dev_jc_number: string;
@@ -90,6 +106,8 @@ export interface DevJobCard {
   lines?: DevLine[];
   // Trial phases (multi-day) — present on the detail GET.
   phases?: DevPhase[];
+  // Pending dual-approval promote gate (null when no live request).
+  promote_gate?: PromoteGate | null;
 }
 
 export interface DevJobCardCreate {
@@ -232,10 +250,37 @@ export async function replaceDevLines(id: number, lines: DevLine[]): Promise<Dev
 
 export const startDevJobCard = (id: number) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/start`), "Start failed");
+
+// `/close` no longer closes the card directly — it opens a pending promote gate
+// and returns the request envelope (the actual close runs once both gates accept).
+export interface PromoteRequestResult {
+  ok: boolean;
+  promote_request_id?: number;
+  status: string;
+}
 export const closeDevJobCard = (id: number, body: DevJobCardCloseBody) =>
-  jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/close`, body), "Close failed");
+  jsonOrThrow<PromoteRequestResult>(post(`${BASE}/${id}/close`, body), "Close failed");
 export const cancelDevJobCard = (id: number, reason: string) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/cancel`, { reason }), "Cancel failed");
+
+// Promote-approval gate. Once `closeDevJobCard` opens the PENDING gate,
+// INV_MGR and REQUESTOR_BH each call this to ACCEPT or REJECT.
+// Always pass approver_kind explicitly (safe + future-proof for the case
+// where one user holds both gates simultaneously).
+export interface PromoteApprovalResult {
+  ok: boolean;
+  status: "PENDING_APPROVAL" | "PROMOTED" | "REJECTED";
+}
+export async function promoteApproval(
+  devJcId: number,
+  action: "ACCEPT" | "REJECT",
+  opts?: { remarks?: string; approver_kind?: "INV_MGR" | "REQUESTOR_BH" },
+): Promise<PromoteApprovalResult> {
+  return jsonOrThrow<PromoteApprovalResult>(
+    post(`${BASE}/${devJcId}/promote-approval`, { action, ...opts }),
+    "Approval action failed",
+  );
+}
 
 // Trial phases (multi-day) — each owns its recipe; start / complete independently.
 export const addDevPhase = (id: number, name: string, cloneFromPhaseId?: number) =>
