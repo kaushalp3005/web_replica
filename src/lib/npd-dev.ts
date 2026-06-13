@@ -48,7 +48,7 @@ export interface DevPhase {
 // One approval row inside a pending promote gate.
 export interface PromoteApproval {
   approver_kind: "INV_MGR" | "REQUESTOR_BH";
-  approver_user_id: string | null;
+  approver_user_id: number | null;   // INT on the wire (JSON number), not a string
   status: "PENDING" | "ACCEPTED" | "REJECTED";
 }
 

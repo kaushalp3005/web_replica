@@ -927,7 +927,8 @@ function PromoteGatePanel({ gate, devJcId, me, busy, onAction }: {
           const canAct =
             appr.status === "PENDING" &&
             ((appr.approver_kind === "INV_MGR" && me?.role_name === "inventory_manager") ||
-             (appr.approver_kind === "REQUESTOR_BH" && me?.user_id != null && me.user_id === appr.approver_user_id));
+             (appr.approver_kind === "REQUESTOR_BH" && me?.user_id != null && appr.approver_user_id != null
+              && String(me.user_id) === String(appr.approver_user_id)));
 
           return (
             <li key={appr.approver_kind}
