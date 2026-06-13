@@ -60,8 +60,7 @@ export interface AuditEntry {
 
 export interface Requisition {
   id: number;
-  request_id?: number;               // 8-digit BIGINT request handle (generated)
-  requisition_number: string;
+  request_id?: number;               // 8-digit BIGINT request handle — the surfaced identifier
   sample_type: SampleType;
   status: SampleStatus;
   requestor_user_id?: number;

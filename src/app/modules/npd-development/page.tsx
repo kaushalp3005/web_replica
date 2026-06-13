@@ -462,7 +462,7 @@ export default function NpdQueuePage() {
       {modal?.kind === "HOLD" && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-3" onClick={() => setModal(null)}>
           <div className="bg-white rounded-md w-full max-w-md p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-[15px] font-semibold mb-1">Hold request {modal.row.request_id ?? modal.row.requisition_number}</h3>
+            <h3 className="text-[15px] font-semibold mb-1">Hold request {modal.row.request_id ?? modal.row.id}</h3>
             <label className="block text-[11px] text-[var(--text-secondary)] mt-2">Start date
               <input type="date" className="form-input mt-0.5" value={holdStart} onChange={(e) => setHoldStart(e.target.value)} />
             </label>
@@ -485,7 +485,7 @@ export default function NpdQueuePage() {
       {modal?.kind === "CANCEL" && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-3" onClick={() => setModal(null)}>
           <div className="bg-white rounded-md w-full max-w-md p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-[15px] font-semibold mb-1">Cancel request {modal.row.request_id ?? modal.row.requisition_number}</h3>
+            <h3 className="text-[15px] font-semibold mb-1">Cancel request {modal.row.request_id ?? modal.row.id}</h3>
             <label className="block text-[11px] text-[var(--text-secondary)] mt-2">Reason (required)
               <textarea className="form-input mt-0.5 !h-20 py-1.5" value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />
             </label>
@@ -505,7 +505,7 @@ export default function NpdQueuePage() {
       {modal?.kind === "EDIT" && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-3" onClick={() => setModal(null)}>
           <div className="bg-white rounded-md w-full max-w-lg p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-[15px] font-semibold mb-2">Edit request {modal.row.request_id ?? modal.row.requisition_number}</h3>
+            <h3 className="text-[15px] font-semibold mb-2">Edit request {modal.row.request_id ?? modal.row.id}</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="sm:col-span-2">
                 <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Target NPD article name</label>

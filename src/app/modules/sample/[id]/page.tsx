@@ -126,7 +126,7 @@ export default function SampleDetailPage() {
         <BrandMark />
         <nav className="text-[12px] text-[#d5dbdb] hidden sm:flex items-center gap-2 ml-2">
           <button onClick={() => router.push("/modules/sample")} className="hover:underline">Sample</button>
-          <span>/</span><span className="text-white">{req?.request_id ?? req?.requisition_number ?? id}</span>
+          <span>/</span><span className="text-white">{req?.request_id ?? id}</span>
         </nav>
         <div className="flex-1" />
         <button onClick={() => router.push("/modules/profile")} aria-label="Profile"
@@ -136,7 +136,7 @@ export default function SampleDetailPage() {
       <main className="flex-1 max-w-[980px] w-full mx-auto px-4 sm:px-6 py-6">
         <Breadcrumbs items={[
           ...(isNpdTrial ? NPD_DEV_ROOT : SAMPLE_ROOT),
-          { label: req?.request_id != null ? String(req.request_id) : (req?.requisition_number ?? String(id)) },
+          { label: req?.request_id != null ? String(req.request_id) : String(id) },
         ]} className="mb-3" />
 
         {error && <div className="mb-4 rounded-md border border-[#f0c7be] bg-[#fdf3f1] px-3 py-2 text-[13px] text-[#b1361e]">{error}</div>}
@@ -154,13 +154,12 @@ export default function SampleDetailPage() {
                   <div className="min-w-0">
                     <div className="text-[10px] uppercase tracking-[0.14em] text-[var(--text-muted)] mb-1">Request</div>
                     <div className="flex flex-wrap items-center gap-2.5">
-                      <h1 className="text-[28px] leading-none font-semibold text-[var(--text-primary)] tabular-nums">{req.request_id ?? req.requisition_number}</h1>
+                      <h1 className="text-[28px] leading-none font-semibold text-[var(--text-primary)] tabular-nums">{req.request_id ?? id}</h1>
                       {isNpdTrial
                         ? <NpdStatusPill status={req.status} holdReason={holdReason} />
                         : <StatusPill status={req.status} />}
                       <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-[var(--surface-divider)] text-[var(--text-secondary)]">{TYPE_LABEL[req.sample_type] ?? req.sample_type}</span>
                     </div>
-                    <div className="mt-1.5 text-[12px] text-[var(--text-muted)]">Document no. <span className="text-[var(--text-secondary)]">{req.requisition_number}</span></div>
                   </div>
                   <div className="flex-1" />
                   <div className="flex items-center gap-2">
