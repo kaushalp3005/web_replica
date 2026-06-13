@@ -3892,7 +3892,7 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
         // server-saved row matches what the operator saw before hitting
         // Save. Order matches the AccountingSummaryRequest schema in
         // router.py (AccountingSummaryRequest at ~5185).
-        const rmKg = num(fgActualKg);  // FG actual kg — needed for fallback path
+        const fgKg = num(fgActualKg);
         const _articleByKey = new Map<string, typeof articles[number]>();
         for (const a of articles) {
           const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
@@ -3917,10 +3917,28 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
         );
         const balForSave = Object.values(balance).reduce((a, v) => a + num(v), 0);
         const fgUnitsVal = fgActualUnits.trim() === "" ? null : parseInt(fgActualUnits, 10);
+        // Guard against the silent zero-input class of bugs: when
+        // total_input_qty is 0 AND any output-side field is non-zero
+        // (FG actual / process loss / EGA / balance / byproducts / sample),
+        // the IS_BALANCED math will declare the batch unbalanced for the
+        // wrong reason — the operator never filled RM Issued / per-line
+        // consumption. Surface a non-blocking warning so they know to go
+        // back and fill RM, without blocking the save itself (the output
+        // row + sibling consumption are already persisted by the prior
+        // POST /outputs call, and re-saving will refresh the summary).
+        const outputSideTotal =
+          fgKg + num(processLoss) + num(extraGiveawayQty)
+          + balForSave + offgradeForSave + wastageForSave + num(controlSampleKg);
+        if (totalInputForSave <= 0 && outputSideTotal > 0) {
+          setFeedback({
+            kind: "err",
+            msg: "Output saved, but no RM Issued / consumption was filled — the IS_BALANCED summary will show as unbalanced until you record the input quantity.",
+          });
+        }
         const summaryBody: Record<string, unknown> = {
           total_input_qty:      totalInputForSave,
           input_uom:            "KGS",
-          output_qty:           rmKg,  // FG kg
+          output_qty:           fgKg,
           output_uom:           "KGS",
           output_qty_units:     fgUnitsVal != null && Number.isFinite(fgUnitsVal) ? fgUnitsVal : null,
           process_loss_qty:     num(processLoss),
@@ -3981,8 +3999,16 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
       // C3-H3 — backup GET /accounting in case the summary PUT above
       // failed (older server, non-2xx, etc.). Skipped silently on
       // failure; the live preview keeps rendering.
+      //
+      // Pass the selected batch so consumption / byproducts come back
+      // scoped to it instead of pooled across every batch on this JC.
+      // The accounting summary row itself is JC-level so it's unaffected
+      // by the filter — but limiting consumption / byproducts here keeps
+      // the response payload focused and matches the frontend's
+      // matchesBatch() filter semantics.
       try {
-        const accRes = await apiFetch(`/api/v1/production/job-cards-v2/${detail.job_card_id}/accounting`);
+        const accQs = selectedBatchId != null ? `?batch_id=${selectedBatchId}` : "";
+        const accRes = await apiFetch(`/api/v1/production/job-cards-v2/${detail.job_card_id}/accounting${accQs}`);
         if (accRes.ok) {
           const accJson = (await accRes.json().catch(() => null)) as
             | NonNullable<JobCardDetail["accounting"]>

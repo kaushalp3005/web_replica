@@ -7,7 +7,7 @@
 // C2 (Wave 4) — extended with the full v2 filter contract (so_number,
 // date_from / date_to, team_leader), server-driven pagination with a
 // 25/50/100 page-size selector, status visual + lock indicators per row,
-// and role-aware row actions (View / Notify QC / Force-Unlock). The cards
+// and role-aware row actions (View / Force-Unlock). The cards
 // grid stays on sm: viewports for the operator-friendly tap targets; the
 // dense table only renders on md+.
 
@@ -102,6 +102,32 @@ type SearchResponse = {
   capped?: boolean;
   hard_cap?: number;
 };
+
+// Floor master per plant. Kept inline here (rather than importing from the
+// planning page) so the JC list has no cross-route module dependency. Values
+// match planning/page.tsx FLOORS_BY_FACTORY byte-for-byte — keep them in sync
+// when a floor is added/renamed in one place.
+const FLOORS_BY_PLANT: Record<"W-202" | "A-185", readonly string[]> = {
+  "W-202": [
+    "Lower Basement", "Upper Basement",
+    "First Floor", "First Floor Mezz",
+    "Second Floor", "Second Floor Mezz",
+    "Terrace",
+  ],
+  "A-185": [
+    "Roasting Area", "Mezzanine", "Sorting Area", "Printing Area",
+    "Dmart Production Area", "Dmart Packing Area",
+    "Cheese Floor", "FG store", "FFS Packing Area",
+  ],
+};
+
+// Flat (Plant, Floor) tuple list for the unfiltered floor select. Used when
+// no Plant filter is selected so an admin can still pick any floor — the
+// option labels are prefixed with the plant for disambiguation.
+const ALL_FLOOR_OPTIONS: { plant: "W-202" | "A-185"; floor: string }[] = [
+  ...FLOORS_BY_PLANT["W-202"].map((f) => ({ plant: "W-202" as const, floor: f })),
+  ...FLOORS_BY_PLANT["A-185"].map((f) => ({ plant: "A-185" as const, floor: f })),
+];
 
 const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: "locked", label: "Locked" },
@@ -244,6 +270,7 @@ function JobCardListingPageBody() {
   const [factory, setFactory] = useState<"" | "W-202" | "A-185">(
     (cache?.factory as "" | "W-202" | "A-185" | undefined) ?? "",
   );
+  const [floor, setFloor] = useState<string>(cache?.floor ?? "");
   const [statusFilter, setStatusFilter] = useState<string[]>(cache?.statusFilter ?? []);
   const [search, setSearch] = useState(cache?.search ?? "");
   const [debouncedSearch, setDebouncedSearch] = useState(cache?.search ?? "");
@@ -271,9 +298,8 @@ function JobCardListingPageBody() {
     hardCap: number;
   } | null>(cache?.searchMeta ?? null);
 
-  // C2 (Wave 4) — manual reload trigger. Row actions (Notify QC,
-  // Force-Unlock) bump this so the list refetches after a write so the
-  // operator sees the lock/state flip in the same view.
+  // Manual reload trigger. Force-Unlock bumps this so the list refetches
+  // after a write so the operator sees the lock/state flip in the same view.
   const [reloadKey, setReloadKey] = useState(0);
   const reload = () => setReloadKey((k) => k + 1);
 
@@ -341,6 +367,17 @@ function JobCardListingPageBody() {
   }
   function changeFactory(v: typeof factory) {
     setFactory(v);
+    // Drop a floor selection that is no longer valid for the new plant.
+    // Matches the planning page's "factory cleared → no floors valid" rule
+    // (planning page.tsx, FLOORS_BY_FACTORY guard). Clearing to "" is also
+    // valid → keep whatever floor the operator had.
+    if (v && floor && !(FLOORS_BY_PLANT[v]?.includes(floor))) {
+      setFloor("");
+    }
+    setPage(1);
+  }
+  function changeFloor(v: string) {
+    setFloor(v);
     setPage(1);
   }
   function changeStatus(next: string[]) {
@@ -395,6 +432,7 @@ function JobCardListingPageBody() {
       const params = new URLSearchParams();
       if (entity) params.set("entity", entity);
       if (factory) params.set("factory", factory);
+      if (floor) params.set("floor", floor);
       if (statusFilter.length) params.set("status", statusFilter.join(","));
       // C2 (Wave 4) — extra v2 query params. Server allows so_number,
       // date_from / date_to (YYYY-MM-DD), and customer-style free text
@@ -444,7 +482,7 @@ function JobCardListingPageBody() {
             searchMeta: nextMeta,
             scrollY: 0,
             soNumber: debouncedSoNumber, dateFrom, dateTo,
-            teamLeader: debouncedTeamLeader, pageSize,
+            teamLeader: debouncedTeamLeader, pageSize, floor,
           });
         } else {
           const data = (await res.json()) as ListResponse;
@@ -461,7 +499,7 @@ function JobCardListingPageBody() {
             searchMeta: null,
             scrollY: 0,
             soNumber: debouncedSoNumber, dateFrom, dateTo,
-            teamLeader: debouncedTeamLeader, pageSize,
+            teamLeader: debouncedTeamLeader, pageSize, floor,
           });
         }
       } catch (e) {
@@ -479,7 +517,7 @@ function JobCardListingPageBody() {
       controller.abort();
     };
   }, [
-    entity, factory, statusFilter,
+    entity, factory, floor, statusFilter,
     debouncedSearch, debouncedSoNumber, debouncedTeamLeader,
     dateFrom, dateTo, dateRangeInvalid, page, pageSize, router, cache, authed, reloadKey,
   ]);
@@ -581,6 +619,19 @@ function JobCardListingPageBody() {
                   { value: "A-185", label: "A-185" },
                 ]}
                 onChange={(v) => changeFactory(v as typeof factory)}
+              />
+            ) : null}
+            {/* Floor filter — narrows by `job_card_v2.floor`. The plant
+                dictates which floors are valid; when no plant is picked,
+                the dropdown lists every plant's floors with a "(W-202)"
+                / "(A-185)" suffix so the operator can still pick. Admin
+                only, mirroring the Plant chip group above (non-admins are
+                already auto-scoped to their assigned floors server-side). */}
+            {isAdmin ? (
+              <FloorSelect
+                value={floor}
+                plant={factory}
+                onChange={changeFloor}
               />
             ) : null}
           </div>
@@ -728,6 +779,7 @@ function JobCardListingPageBody() {
           <EmptyState
             entity={entity}
             factory={factory}
+            floor={floor}
             statusFilter={statusFilter}
             search={debouncedSearch}
             userScope={userScope}
@@ -736,6 +788,7 @@ function JobCardListingPageBody() {
               // (React bails subsequent same-value calls).
               setEntity("");
               setFactory("");
+              setFloor("");
               setStatusFilter([]);
               setSearch("");
               setSoNumber("");
@@ -1247,10 +1300,9 @@ function JobCard({ jc, onReload }: { jc: JobCardRow; onReload: () => void }) {
         </dl>
       </button>
 
-      {/* C2 + C10 (Wave 4) — row actions. ActionButton hides itself entirely
-          when the role isn't allowed (admin bypass for Notify QC) so the
-          footer only shows what the operator can act on. View is always
-          rendered as the primary CTA. */}
+      {/* Row actions footer. ActionButton hides itself entirely when the
+          role isn't allowed, so the footer only shows what the operator can
+          act on. View is always rendered as the primary CTA. */}
       <div className="mt-3 pt-3 border-t border-[var(--aws-border)] flex flex-wrap items-center justify-end gap-2">
         <RowActions row={jc} onReload={onReload} onOpenDetail={openDetail} />
       </div>
@@ -1258,9 +1310,9 @@ function JobCard({ jc, onReload }: { jc: JobCardRow; onReload: () => void }) {
   );
 }
 
-// C2 + C10 (Wave 4) — shared row actions. Used by both the card grid (sm)
-// and the dense table (md+). Encapsulates the lock-aware Force-Unlock CTA
-// and the Notify-QC dispatch so neither rendering path duplicates logic.
+// Shared row actions. Used by both the card grid (sm) and the dense table
+// (md+). Encapsulates the lock-aware Force-Unlock CTA so neither rendering
+// path duplicates logic.
 function RowActions({
   row,
   onReload,
@@ -1276,32 +1328,7 @@ function RowActions({
     () => deriveRowLockIndicator(row, userMayForceUnlock(me)),
     [row, me],
   );
-  const status = row.status ?? "";
   const jcId = row.job_card_id;
-
-  async function notifyQc() {
-    if (!window.confirm(`Notify QC for JC #${row.job_card_number ?? jcId}?`)) return;
-    try {
-      const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/notify-qc`, {
-        method: "POST",
-      });
-      const data = (await res.json().catch(() => null)) as
-        | { dispatched?: number; failed?: number; warning?: string; message?: string; error?: string }
-        | null;
-      if (!res.ok) {
-        const msg = (data && (data.message || data.error)) || `HTTP ${res.status}`;
-        throw new Error(String(msg));
-      }
-      if (data?.warning === "no_qc_recipients_in_scope") {
-        window.alert("Notification sent but no QC inspector is scoped to this JC.");
-      } else {
-        window.alert(`QC notified: ${data?.dispatched ?? 0} dispatched, ${data?.failed ?? 0} failed.`);
-      }
-      onReload();
-    } catch (e) {
-      window.alert(friendlyApiError(e));
-    }
-  }
 
   async function forceUnlock() {
     // W4-MED-4 — match the detail-page UX: pre-fill empty, validate reason
@@ -1337,26 +1364,11 @@ function RowActions({
     }
   }
 
-  // Notify-QC is gated server-side — surface the CTA only when the JC is
-  // completed (the route 409s otherwise) AND for QC-in-scope roles or
-  // admin. The audit names admin / qc_inspector explicitly; floor_manager
-  // is also in scope for the rollout phase per the detail-page parity.
-  const notifyVisibleStatus = status === "completed";
-
   return (
     <>
       <ActionButton variant="secondary" onClick={onOpenDetail}>
         View
       </ActionButton>
-      {notifyVisibleStatus ? (
-        <ActionButton
-          roleAllow="qc_inspector,floor_manager,plant_manager"
-          variant="primary"
-          onClick={() => void notifyQc()}
-        >
-          Notify QC
-        </ActionButton>
-      ) : null}
       {lock.shouldShowForceUnlock ? (
         // LockableButton with a synthetic lockState that includes
         // mayForceUnlock so the button stays interactive for the
@@ -1413,9 +1425,51 @@ function ChipGroup({
   );
 }
 
+function FloorSelect({
+  value,
+  plant,
+  onChange,
+}: {
+  value: string;
+  plant: "" | "W-202" | "A-185";
+  // Free-form string — backend expects the floor label as-is.
+  onChange: (v: string) => void;
+}) {
+  // When a plant is chosen, only that plant's floors are valid. When no
+  // plant is chosen, show every floor with a plant suffix so the operator
+  // can disambiguate same-name floors across plants (today there's no
+  // overlap, but it's a cheap forward-looking guard).
+  const scoped = plant ? FLOORS_BY_PLANT[plant] : null;
+  return (
+    <label className="flex items-center gap-2">
+      <span className="text-[11px] uppercase tracking-wide text-[var(--text-secondary)] font-semibold mr-1">
+        Floor
+      </span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="h-7 px-2 text-[12px] rounded-full bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
+        aria-label="Filter by floor"
+      >
+        <option value="">All</option>
+        {scoped
+          ? scoped.map((f) => (
+              <option key={f} value={f}>{f}</option>
+            ))
+          : ALL_FLOOR_OPTIONS.map((o) => (
+              <option key={`${o.plant}|${o.floor}`} value={o.floor}>
+                {o.floor} ({o.plant})
+              </option>
+            ))}
+      </select>
+    </label>
+  );
+}
+
 function EmptyState({
   entity,
   factory,
+  floor,
   statusFilter,
   search,
   userScope,
@@ -1423,6 +1477,7 @@ function EmptyState({
 }: {
   entity: string;
   factory: string;
+  floor: string;
   statusFilter: string[];
   search: string;
   userScope: { isAdmin: boolean; warehouses: string[] };
@@ -1431,6 +1486,7 @@ function EmptyState({
   const active: string[] = [];
   if (entity) active.push(`entity=${entity}`);
   if (factory) active.push(`plant=${factory}`);
+  if (floor) active.push(`floor=${floor}`);
   if (statusFilter.length) active.push(`status=${statusFilter.join(",")}`);
   if (search) active.push(`search="${search}"`);
   const hasFilters = active.length > 0;
