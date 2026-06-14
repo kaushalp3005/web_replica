@@ -50,6 +50,16 @@ export default function SampleDetailPage() {
   const [modal, setModal] = useState<ModalMode>(null);
   const [editing, setEditing] = useState(false);
 
+  // Hydration gate. This page is server-rendered, where useRequireAuth returns
+  // true (no token store) but the first browser render starts authed=false — so
+  // a bare `if (!authed) return null` made the server HTML (full shell) and the
+  // first client render (null) diverge, and the stale prerendered shell wasn't
+  // cleanly replaced (you'd scroll past a ghost "Loading…" into the real view).
+  // Mirroring the list pages, we hold the auth/data branches until after mount
+  // so SSR and the first client paint are byte-identical.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { queueMicrotask(() => setMounted(true)); }, []);
+
   const refresh = useCallback(async () => {
     try {
       const r = await getRequisition(id);
@@ -108,7 +118,9 @@ export default function SampleDetailPage() {
     }
   }
 
-  if (!authed) return null;
+  // Only enforce the auth redirect AFTER mount — before then SSR and the first
+  // client paint must agree (see the `mounted` note above).
+  if (mounted && !authed) return null;
 
   const isNpdTrial = req != null && (req.sample_type === "NPD" || req.sample_type === "TRIAL");
   // Edit is for the Business head + admin (caps.canApprove), on the early

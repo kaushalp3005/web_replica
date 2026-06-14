@@ -7,7 +7,7 @@
 // the SKU lookup (free-text is rejected by the API, 422). Saves a DRAFT,
 // optionally submits for BH approval.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, SAMPLE_ROOT } from "@/components/Breadcrumbs";
@@ -124,7 +124,14 @@ export default function SampleFormPage() {
     }
   }
 
-  if (!authed) return null;
+  // Hydration gate: on SSR useRequireAuth returns true (no token store), but the
+  // first client render starts authed=false — a bare early-return made the server
+  // HTML and the first client paint diverge (the duplicated/ghost screen). Hold the
+  // redirect until after mount so SSR and the first client paint are identical.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { queueMicrotask(() => setMounted(true)); }, []);
+
+  if (mounted && !authed) return null;
 
   return (
     <div className="min-h-screen flex flex-col bg-[var(--background)]">

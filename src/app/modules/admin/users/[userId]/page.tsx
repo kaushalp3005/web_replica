@@ -114,7 +114,14 @@ export default function UserDetailPage() {
     }
   }
 
-  if (!authed) return null;
+  // Hydration gate: on SSR useRequireAuth returns true (no token store), but the
+  // first client render starts authed=false — a bare early-return made the server
+  // HTML and the first client paint diverge (the duplicated/ghost screen). Hold the
+  // redirect until after mount so SSR and the first client paint are identical.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { queueMicrotask(() => setMounted(true)); }, []);
+
+  if (mounted && !authed) return null;
 
   return (
     <div className="min-h-screen flex flex-col bg-[var(--background)]">
