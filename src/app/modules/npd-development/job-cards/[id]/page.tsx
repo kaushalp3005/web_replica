@@ -14,6 +14,7 @@ import type { MeResponse } from "@/lib/auth";
 import {
   getDevJobCard, replaceDevLines, startDevJobCard, closeDevJobCard, cancelDevJobCard, dispatchDevJobCard,
   addDevPhase, replacePhaseLines, startDevPhase, completeDevPhase, deleteDevPhase, promoteApproval,
+  promoteRejectByEmail,
   type DevJobCard, type DevLine, type DevPhase, type DevPhaseCompleteBody, type PromoteGate,
 } from "@/lib/npd-dev";
 import { DevJcStatusPill } from "../../../sample/_shared";
@@ -62,6 +63,13 @@ export default function DevJobCardDetailPage() {
   // Set to true after a successful "Record output & request promote" to show the
   // pending-gate message until the next full reload clears it.
   const [promoteRequested, setPromoteRequested] = useState(false);
+
+  // Promote-gate REJECT reason dialog. `email` is set when opened from the email
+  // Reject link (?promote_reject=<gate>&email=<addr>) — the submit then goes through the
+  // email-authenticated endpoint; otherwise it's a logged-in portal reject (session).
+  const [rejectGate, setRejectGate] = useState<
+    { kind: "INV_MGR" | "REQUESTOR_BH"; email?: string } | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
 
   // Close form (accounting). Yield % is derived, not entered.
   const [outQty, setOutQty] = useState("");
@@ -112,6 +120,41 @@ export default function DevJobCardDetailPage() {
       setBusy(false);
     }
   }, [load]);
+
+  // Arriving from the email Reject button (?promote_reject=<gate>&email=<addr>) → pop the
+  // reason dialog bound to that gate + email. Strip the params so a manual refresh doesn't
+  // re-open it. Runs once on mount (client-only — no SSR query access needed).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sp = new URLSearchParams(window.location.search);
+    const k = sp.get("promote_reject");
+    const em = sp.get("email");
+    if ((k === "INV_MGR" || k === "REQUESTOR_BH") && em) {
+      window.history.replaceState(null, "", window.location.pathname);
+      // Defer the state flips past the effect body (matches the load()/mounted pattern;
+      // keeps react-hooks/set-state-in-effect quiet).
+      queueMicrotask(() => { setRejectReason(""); setRejectGate({ kind: k, email: em }); });
+    }
+  }, []);
+
+  // Submit a promote-gate reject with the captured reason. Email-link rejects go through
+  // the email-authenticated endpoint (mandatory email check); portal rejects use the
+  // session endpoint. Keeps the dialog open on error so the reason isn't lost.
+  const submitReject = useCallback(async () => {
+    if (!rejectGate || !rejectReason.trim()) return;
+    const g = rejectGate, reason = rejectReason.trim();
+    setBusy(true); setError(null);
+    try {
+      if (g.email) await promoteRejectByEmail(id, { approver_kind: g.kind, email: g.email, remarks: reason });
+      else await promoteApproval(id, "REJECT", { approver_kind: g.kind, remarks: reason });
+      setRejectGate(null); setRejectReason("");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Reject failed");
+    } finally {
+      setBusy(false);
+    }
+  }, [rejectGate, rejectReason, id, load]);
 
   const isDraft = jc?.status === "DRAFT";
   // Base recipe is editable while DRAFT or IN_DEVELOPMENT (same as phase recipes).
@@ -512,9 +555,15 @@ export default function DevJobCardDetailPage() {
                 devJcId={id}
                 me={me}
                 busy={busy}
-                onAction={(action, approverKind) =>
-                  run(() => promoteApproval(id, action, { approver_kind: approverKind }))
-                }
+                onAction={(action, approverKind) => {
+                  if (action === "REJECT") {
+                    // Capture a reason first (a reject must record why).
+                    setRejectReason("");
+                    setRejectGate({ kind: approverKind });
+                  } else {
+                    run(() => promoteApproval(id, "ACCEPT", { approver_kind: approverKind }));
+                  }
+                }}
               />
             )}
 
@@ -552,6 +601,34 @@ export default function DevJobCardDetailPage() {
           </div>
         )}
       </main>
+
+      {/* Promote-gate reject — reason dialog (email-link or portal). Reject needs a
+          reason; email-link rejects authenticate via the carried email on submit. */}
+      {rejectGate && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-3"
+          onClick={() => { if (!busy) setRejectGate(null); }}>
+          <div className="bg-white rounded-md w-full max-w-md p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-[15px] font-semibold text-[var(--text-primary)] mb-1">
+              Reject promote — {rejectGate.kind === "INV_MGR" ? "Inventory manager" : "Requestor (business head)"}
+            </h3>
+            <p className="text-[13px] text-[var(--text-secondary)] mb-3">
+              The recipe will not be promoted. A reason is required.
+            </p>
+            <textarea autoFocus value={rejectReason} onChange={(e) => setRejectReason(e.target.value)}
+              placeholder="Reason for rejecting…"
+              className="form-input w-full min-h-[80px] resize-y" />
+            <div className="flex gap-2 mt-4">
+              <button onClick={() => { if (!busy) { setRejectGate(null); setRejectReason(""); } }}
+                className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:bg-[var(--surface-subtle)]">Cancel</button>
+              <div className="flex-1" />
+              <button disabled={busy || !rejectReason.trim()} onClick={submitReject}
+                className="h-9 px-5 rounded-[2px] bg-[var(--aws-error)] text-white text-[13px] font-medium disabled:opacity-50 hover:opacity-90">
+                {busy ? "Rejecting…" : "Submit reject"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete-phase confirmation dialog */}
       {phaseToDelete && (

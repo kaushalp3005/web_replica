@@ -282,6 +282,20 @@ export async function promoteApproval(
   );
 }
 
+// Email-driven reject: the mail's Reject button lands on the job-card page with
+// ?promote_reject=<gate>&email=<addr>; the reason dialog submits here. PUBLIC —
+// authenticated by `email` owning the gate (mandatory), so it works regardless of
+// session. Goes through the same-origin /api proxy (no mixed content).
+export async function promoteRejectByEmail(
+  devJcId: number,
+  body: { approver_kind: "INV_MGR" | "REQUESTOR_BH"; email: string; remarks: string },
+): Promise<PromoteApprovalResult> {
+  return jsonOrThrow<PromoteApprovalResult>(
+    post(`/api/v1/sample/email/promote-reject`, { dev_jc_id: devJcId, ...body }),
+    "Reject failed",
+  );
+}
+
 // Trial phases (multi-day) — each owns its recipe; start / complete independently.
 export const addDevPhase = (id: number, name: string, cloneFromPhaseId?: number) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/phases`,
