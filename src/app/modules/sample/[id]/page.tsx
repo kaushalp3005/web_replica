@@ -21,6 +21,7 @@ import {
   type PurposeTag, type Warehouse,
 } from "@/lib/sample";
 import { StatusPill, NpdStatusPill, TYPE_LABEL } from "../_shared";
+import { BillingFields, billingError, billingPayload, billingFrom, type BillingValue } from "../_form";
 
 type ModalMode =
   | null | "reject" | "cancel" | "gatePass" | "convertFull" | "convertPartial"
@@ -232,6 +233,9 @@ export default function SampleDetailPage() {
                       <Field label="Mode of transport" value={req.mode_of_transport ?? "—"} />
                       <Field label="Expected dispatch (BD)" value={req.expected_dispatch_date ? String(req.expected_dispatch_date).slice(0, 10) : "—"} />
                       <Field label="Confirmed dispatch (NPD)" value={req.confirmed_dispatch_date ? String(req.confirmed_dispatch_date).slice(0, 10) : "—"} />
+                      <Field label="Return type" value={req.returnable ? "Returnable" : req.non_returnable ? "Non-returnable" : "—"} />
+                      <Field label="Paid" value={req.paid ? "Yes" : "No"} />
+                      <Field label="Amount" value={req.paid && req.amount != null ? Number(req.amount).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—"} />
                       <div className="col-span-2 sm:col-span-4 min-w-0">
                         <dt className="text-[10px] uppercase tracking-[0.1em] text-[var(--text-muted)] mb-0.5">Ship-to address</dt>
                         <dd className="text-[13px] font-medium text-[var(--text-primary)]">{req.customer_ship_to_address ?? "—"}</dd>
@@ -343,12 +347,17 @@ function EditCard({ req, busy, onSave, onCancel }: {
   const [shipTo, setShipTo] = useState(req.customer_ship_to_address ?? "");
   const [modeOfTransport, setModeOfTransport] = useState(req.mode_of_transport ?? "");
   const [expectedDispatch, setExpectedDispatch] = useState((req.expected_dispatch_date ?? "").slice(0, 10));
+  // Billing checklist — only edited on NPD/TRIAL requisitions.
+  const isNpd = req.sample_type === "NPD" || req.sample_type === "TRIAL";
+  const [billing, setBilling] = useState<BillingValue>(() => billingFrom(req));
   // Quantity is derived = pcs × weight per piece (kg).
   const pcsNum = Number(pcs), wppNum = Number(weightPerPiece);
   const qtyNum = (pcs.trim() !== "" && weightPerPiece.trim() !== "" && Number.isFinite(pcsNum) && Number.isFinite(wppNum))
     ? Number((pcsNum * wppNum).toFixed(3)) : 0;
+  const billErr = isNpd ? billingError(billing) : null;
 
   function save() {
+    if (billErr) return;
     onSave({
       warehouse: (warehouse || undefined) as Warehouse | undefined,
       npd_target_name: target.trim() || undefined,
@@ -364,6 +373,8 @@ function EditCard({ req, busy, onSave, onCancel }: {
       customer_ship_to_address: shipTo.trim() || undefined,
       mode_of_transport: modeOfTransport.trim() || undefined,
       expected_dispatch_date: expectedDispatch || undefined,
+      // Billing only for NPD/TRIAL (always sent together so the paid/amount lock holds).
+      ...(isNpd ? billingPayload(billing) : {}),
     });
   }
 
@@ -419,11 +430,16 @@ function EditCard({ req, busy, onSave, onCancel }: {
       <label className="text-[12px] text-[var(--text-secondary)] sm:col-span-2">Description
         <textarea className="form-input mt-0.5 min-h-[56px] resize-y" value={description} onChange={(e) => setDescription(e.target.value)} />
       </label>
+      {isNpd && (
+        <div className="sm:col-span-2">
+          <BillingFields value={billing} onChange={setBilling} />
+        </div>
+      )}
       <div className="sm:col-span-2 flex items-center gap-2">
         <button disabled={busy} onClick={onCancel}
           className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:bg-[var(--surface-subtle)] disabled:opacity-50">Cancel</button>
         <div className="flex-1" />
-        <button disabled={busy || !warehouse} onClick={save}
+        <button disabled={busy || !warehouse || !!billErr} onClick={save}
           className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium hover:bg-[var(--aws-orange-hover)] disabled:opacity-50">{busy ? "Saving…" : "Save"}</button>
       </div>
     </div>

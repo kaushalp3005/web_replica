@@ -83,6 +83,11 @@ export interface DevJobCard {
   mode_of_transport?: string | null;
   expected_dispatch_date?: string | null;   // by BD team
   confirmed_dispatch_date?: string | null;  // by NPD
+  // Billing checklist — inherited (read-only) from the source requisition.
+  returnable?: boolean | null;
+  non_returnable?: boolean | null;
+  paid?: boolean | null;
+  amount?: number | string | null;
   status: DevJcStatus;
   output_qty?: number | string | null;
   output_uom?: string | null;

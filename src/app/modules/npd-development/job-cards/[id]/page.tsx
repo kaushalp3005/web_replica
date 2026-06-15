@@ -681,6 +681,9 @@ function DispatchPlanCard({ jc }: { jc: DevJobCard }) {
         <Field label="Mode of transport" value={jc.mode_of_transport ?? "—"} />
         <Field label="Expected dispatch (BD)" value={d(jc.expected_dispatch_date)} />
         <Field label="Confirmed dispatch (NPD)" value={jc.confirmed_dispatch_date ? d(jc.confirmed_dispatch_date) : "On close"} />
+        <Field label="Return type" value={jc.returnable ? "Returnable" : jc.non_returnable ? "Non-returnable" : "—"} />
+        <Field label="Paid" value={jc.paid ? "Yes" : "No"} />
+        <Field label="Amount" value={jc.paid && jc.amount != null ? Number(jc.amount).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—"} />
         <div className="col-span-2 sm:col-span-4">
           <dt className="text-[11px] text-[var(--text-muted)]">Ship-to address</dt>
           <dd className="text-[var(--text-primary)]">{jc.customer_ship_to_address ?? "—"}</dd>

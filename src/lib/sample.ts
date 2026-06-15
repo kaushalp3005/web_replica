@@ -91,6 +91,11 @@ export interface Requisition {
   expected_dispatch_date?: string | null;   // by BD team
   confirmed_dispatch_date?: string | null;  // by NPD
   cancellation_reason?: string | null;
+  // Billing checklist (NPD/TRIAL): returnable XOR non_returnable; amount is 0 unless paid.
+  returnable?: boolean | null;
+  non_returnable?: boolean | null;
+  paid?: boolean | null;
+  amount?: number | null;
   hold_start_date?: string | null;  // date a HOLD takes effect (set on hold)
   hold_reason?: string | null;      // latest HOLD remark (list rows; for the Hold pill tooltip)
   created_at?: string | null;
@@ -240,6 +245,11 @@ export interface RequisitionCreate {
   mode_of_transport?: string;
   expected_dispatch_date?: string;
   confirmed_dispatch_date?: string;
+  // Billing checklist (NPD/TRIAL). amount is 0 unless paid, else > 0 (≤2 decimals).
+  returnable?: boolean;
+  non_returnable?: boolean;
+  paid?: boolean;
+  amount?: number;
   // Optional — issuance flows (Basis RM/FG, Internal) send article lines; NPD /
   // TRIAL requests omit them (the backend defaults to an empty list).
   articles?: Array<Omit<Article, "id" | "issued_qty">>;
@@ -275,6 +285,11 @@ export interface NpdRequisitionCreate {
   description?: string;           // nullable
   purpose_tag?: PurposeTag;       // nullable
   requestor_team?: string;        // nullable
+  // Billing checklist: returnable XOR non_returnable; amount 0 unless paid, else > 0 (≤2 decimals).
+  returnable?: boolean;
+  non_returnable?: boolean;
+  paid?: boolean;
+  amount?: number;
 }
 
 export async function createNpdRequisition(body: NpdRequisitionCreate): Promise<Requisition> {

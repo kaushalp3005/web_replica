@@ -19,7 +19,10 @@ import {
   type NpdSampleType, type PurposeTag,
 } from "@/lib/sample";
 import { listUsers } from "@/lib/admin-api";
-import { FormSection } from "../sample/_form";
+import {
+  FormSection, BillingFields, billingError, billingPayload,
+  EMPTY_BILLING, type BillingValue,
+} from "../sample/_form";
 
 const PURPOSE_OPTIONS: { value: PurposeTag; label: string }[] = [
   { value: "CUSTOMER_DISPLAY", label: "Customer display" },
@@ -57,6 +60,7 @@ export function NpdSampleForm({ defaultType, heading }: {
   const [shipTo, setShipTo] = useState("");
   const [modeOfTransport, setModeOfTransport] = useState("");
   const [expectedDispatch, setExpectedDispatch] = useState("");
+  const [billing, setBilling] = useState<BillingValue>(EMPTY_BILLING);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedId, setSavedId] = useState<number | null>(null);
@@ -93,7 +97,7 @@ export function NpdSampleForm({ defaultType, heading }: {
     ? Number((pcsNum * wppNum).toFixed(3)) : 0;
   const canSave =
     !!warehouse && !!fgSkuName.trim() && pcsNum > 0 && wppNum > 0 &&
-    companyName.trim() !== "" && customerName.trim() !== "";
+    companyName.trim() !== "" && customerName.trim() !== "" && !billingError(billing);
 
   async function save(submit: boolean) {
     if (!canSave || !warehouse) return;
@@ -117,6 +121,7 @@ export function NpdSampleForm({ defaultType, heading }: {
           purpose_tag: purposeTag || undefined,
           requestor_team: effectiveRequestor.trim() || undefined,
           description: description.trim() || undefined,
+          ...billingPayload(billing),
         });
         reqId = req.id;
         setSavedId(reqId);
@@ -264,6 +269,9 @@ export function NpdSampleForm({ defaultType, heading }: {
             <div className="sm:col-span-2">
               <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Customer ship-to address</label>
               <textarea className="form-input min-h-[56px] resize-y" value={shipTo} onChange={(e) => setShipTo(e.target.value)} placeholder="Delivery address (optional)…" />
+            </div>
+            <div className="sm:col-span-2">
+              <BillingFields value={billing} onChange={setBilling} />
             </div>
           </div>
         </FormSection>

@@ -53,6 +53,107 @@ export function ReviewRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+// ── Returnable / Non-returnable / Paid checklist + Amount ───────────────────
+// Returnable and Non-returnable are mutually exclusive (only one). Amount is
+// LOCKED to 0 unless Paid is ticked; when Paid it is mandatory, > 0, and limited
+// to 2 decimal places (validated here AND by the backend, which rejects >2dp).
+// Shared by the NPD/TRIAL create forms and the requisition edit card.
+export interface BillingValue {
+  returnable: boolean;
+  non_returnable: boolean;
+  paid: boolean;
+  amount: string;          // raw input string ("" when not paid)
+}
+
+export const EMPTY_BILLING: BillingValue = {
+  returnable: false, non_returnable: false, paid: false, amount: "",
+};
+
+// Build the initial value from a saved requisition (for the edit card).
+export function billingFrom(req: { returnable?: boolean | null; non_returnable?: boolean | null; paid?: boolean | null; amount?: number | null }): BillingValue {
+  return {
+    returnable: !!req.returnable,
+    non_returnable: !!req.non_returnable,
+    paid: !!req.paid,
+    amount: req.paid && req.amount != null ? String(req.amount) : "",
+  };
+}
+
+// 3+ decimal places — used to reject (the backend's Amount2 rejects >2dp too). Parse
+// with Number() rather than a strict shape regex so we accept the same values the
+// backend does (e.g. ".5", "100.", "0.50") while still enforcing "at most 2 decimals".
+const TOO_MANY_DP = /\.\d{3,}$/;
+
+// Returns a validation message, or null when valid.
+export function billingError(v: BillingValue): string | null {
+  if (v.returnable && v.non_returnable) return "Pick only one of Returnable / Non-returnable.";
+  if (v.paid) {
+    const s = v.amount.trim();
+    const n = Number(s);
+    if (s === "" || !Number.isFinite(n) || n <= 0) return "Amount is required and must be greater than 0 when Paid.";
+    if (TOO_MANY_DP.test(s)) return "Amount can have at most 2 decimals.";
+  }
+  return null;
+}
+
+// Serialised billing fields for the create/update payload. amount is 0 unless paid.
+export function billingPayload(v: BillingValue): { returnable: boolean; non_returnable: boolean; paid: boolean; amount: number } {
+  const n = Number(v.amount);
+  return {
+    returnable: v.returnable,
+    non_returnable: v.non_returnable,
+    paid: v.paid,
+    amount: v.paid && Number.isFinite(n) && n > 0 ? Number(n.toFixed(2)) : 0,
+  };
+}
+
+export function BillingFields({ value, onChange }: {
+  value: BillingValue;
+  onChange: (v: BillingValue) => void;
+}) {
+  const err = billingError(value);
+  const set = (patch: Partial<BillingValue>) => onChange({ ...value, ...patch });
+  return (
+    <div className="rounded-md border border-[var(--aws-border)] p-3">
+      <span className="block text-[12px] font-medium text-[var(--text-secondary)] mb-3">Return &amp; payment <span className="font-normal text-[var(--text-muted)]">(optional)</span></span>
+      <div className="flex flex-wrap gap-x-6 gap-y-2 mb-3">
+        <label className="flex items-center gap-2 text-[13px] text-[var(--text-secondary)] cursor-pointer">
+          <input type="checkbox" checked={value.returnable}
+            onChange={(e) => set({ returnable: e.target.checked, non_returnable: e.target.checked ? false : value.non_returnable })} />
+          Returnable
+        </label>
+        <label className="flex items-center gap-2 text-[13px] text-[var(--text-secondary)] cursor-pointer">
+          <input type="checkbox" checked={value.non_returnable}
+            onChange={(e) => set({ non_returnable: e.target.checked, returnable: e.target.checked ? false : value.returnable })} />
+          Non-returnable
+        </label>
+        <label className="flex items-center gap-2 text-[13px] text-[var(--text-secondary)] cursor-pointer">
+          <input type="checkbox" checked={value.paid}
+            onChange={(e) => set({ paid: e.target.checked, amount: e.target.checked ? value.amount : "" })} />
+          Paid
+        </label>
+      </div>
+      <div className="sm:max-w-[50%]">
+        <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">
+          Amount {value.paid && <span className="text-[var(--aws-error)]">*</span>}
+        </label>
+        <input
+          type="number" min="0" step="0.01" inputMode="decimal"
+          className={`form-input ${value.paid ? "" : "bg-[var(--surface-subtle)] cursor-not-allowed"}`}
+          value={value.paid ? value.amount : ""}
+          placeholder={value.paid ? "e.g. 1500.00" : "0.00 — tick Paid to enter"}
+          disabled={!value.paid} readOnly={!value.paid} tabIndex={value.paid ? 0 : -1}
+          onChange={(e) => set({ amount: e.target.value })}
+          onWheel={(e) => e.currentTarget.blur()} />
+        <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+          {value.paid ? "Required when Paid · up to 2 decimals." : "Locked to 0 unless Paid is ticked."}
+        </p>
+      </div>
+      {err && <p className="mt-2 text-[12px] text-[var(--aws-error)]">{err}</p>}
+    </div>
+  );
+}
+
 function CheckIcon() {
   return (
     <svg viewBox="0 0 20 20" className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="2.5">

@@ -16,7 +16,10 @@ import {
   createNpdRequisition, NPD_SAMPLE_TYPES, NPD_WAREHOUSES,
   type NpdSampleType, type PurposeTag,
 } from "@/lib/sample";
-import { FormSection, ReviewRow } from "../../_form";
+import {
+  FormSection, ReviewRow, BillingFields, billingError, billingPayload,
+  EMPTY_BILLING, type BillingValue,
+} from "../../_form";
 
 const PURPOSE_OPTIONS: { value: PurposeTag; label: string }[] = [
   { value: "CUSTOMER_DISPLAY", label: "Customer display" },
@@ -46,6 +49,7 @@ export default function NewNpdRequisitionPage() {
   const [shipTo, setShipTo] = useState("");
   const [modeOfTransport, setModeOfTransport] = useState("");
   const [expectedDispatch, setExpectedDispatch] = useState("");
+  const [billing, setBilling] = useState<BillingValue>(EMPTY_BILLING);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -58,7 +62,7 @@ export default function NewNpdRequisitionPage() {
     ? Number((pcsNum * wppNum).toFixed(3)) : 0;
   const canSubmit =
     !!sampleType && targetArticle.trim() !== "" && pcsNum > 0 && wppNum > 0 && !!warehouse &&
-    companyName.trim() !== "" && customerName.trim() !== "";
+    companyName.trim() !== "" && customerName.trim() !== "" && !billingError(billing);
 
   async function save() {
     if (!canSubmit || !sampleType || !warehouse) return;
@@ -80,6 +84,7 @@ export default function NewNpdRequisitionPage() {
         description: description.trim() || undefined,
         purpose_tag: purposeTag || undefined,
         requestor_team: requestorTeam.trim() || undefined,
+        ...billingPayload(billing),
       });
       router.push("/modules/sample");
     } catch (e) {
@@ -213,6 +218,9 @@ export default function NewNpdRequisitionPage() {
               <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Customer ship-to address</label>
               <textarea className="form-input min-h-[56px] resize-y" value={shipTo} onChange={(e) => setShipTo(e.target.value)} placeholder="Delivery address (optional)…" />
             </div>
+            <div className="sm:col-span-2">
+              <BillingFields value={billing} onChange={setBilling} />
+            </div>
           </div>
         </FormSection>
 
@@ -234,6 +242,8 @@ export default function NewNpdRequisitionPage() {
             <ReviewRow label="Purpose" value={purposeTag || "—"} />
             {requestorTeam && <ReviewRow label="Requestor team" value={requestorTeam} />}
             {description && <ReviewRow label="Description" value={description} />}
+            <ReviewRow label="Return type" value={billing.returnable ? "Returnable" : billing.non_returnable ? "Non-returnable" : "—"} />
+            <ReviewRow label="Paid" value={billing.paid ? `Yes · ${billing.amount || "0"}` : "No"} />
           </dl>
         </FormSection>
 

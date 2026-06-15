@@ -47,6 +47,16 @@ function Shell({ initial, router, children }: {
   );
 }
 
+// Compact billing summary for a list row (NPD/TRIAL): return type + paid amount.
+// "—" when nothing is set (e.g. non-NPD requisitions).
+function billingSummary(r: Requisition): string {
+  const rt = r.returnable ? "Returnable" : r.non_returnable ? "Non-returnable" : "";
+  const paid = r.paid
+    ? `Paid ${Number(r.amount ?? 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : "";
+  return [rt, paid].filter(Boolean).join(" · ") || "—";
+}
+
 export default function SampleQueuePage() {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
@@ -196,6 +206,7 @@ export default function SampleQueuePage() {
                   <span>{TYPE_LABEL[r.sample_type] ?? r.sample_type}</span>
                   <span>{r.warehouse}</span>
                   {r.quantity != null && <span>Qty {r.quantity}</span>}
+                  {billingSummary(r) !== "—" && <span>{billingSummary(r)}</span>}
                   <span>{(r.created_at ?? "").slice(0, 10)}</span>
                 </div>
                 {r.npd_target_name && (
@@ -217,6 +228,7 @@ export default function SampleQueuePage() {
                   <th className="px-3 py-2 font-semibold text-right">Qty</th>
                   <th className="px-3 py-2 font-semibold">Purpose</th>
                   <th className="px-3 py-2 font-semibold">Team</th>
+                  <th className="px-3 py-2 font-semibold">Billing</th>
                   <th className="px-3 py-2 font-semibold">Created</th>
                 </tr>
               </thead>
@@ -232,6 +244,7 @@ export default function SampleQueuePage() {
                     <td className="px-3 py-2 text-right tabular-nums">{r.quantity ?? "—"}</td>
                     <td className="px-3 py-2 max-w-[160px] truncate" title={r.purpose_tag ?? ""}>{r.purpose_tag ?? "—"}</td>
                     <td className="px-3 py-2 max-w-[160px] truncate" title={r.requestor_team ?? ""}>{r.requestor_team ?? "—"}</td>
+                    <td className="px-3 py-2 whitespace-nowrap tabular-nums text-[12px]">{billingSummary(r)}</td>
                     <td className="px-3 py-2 text-[var(--text-secondary)] whitespace-nowrap">{(r.created_at ?? "").slice(0, 10)}</td>
                   </tr>
                 ))}
