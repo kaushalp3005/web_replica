@@ -312,47 +312,48 @@ export default function NpdQueuePage() {
   return (
     <Shell initial={initial} router={router}>
       <Breadcrumbs items={[{ label: "Modules", href: "/modules" }, { label: "NPD Development" }]} className="mb-3" />
-      <div className="flex flex-wrap items-center gap-3 mb-5">
+      <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:flex-wrap sm:items-center">
         <div className="min-w-0">
-          <h1 className="text-[22px] leading-7 font-semibold text-[var(--text-primary)]">NPD samples</h1>
+          <h1 className="text-[20px] sm:text-[22px] leading-7 font-semibold text-[var(--text-primary)]">NPD samples</h1>
           <p className="text-[12px] text-[var(--text-secondary)] mt-0.5">{rows.length} shown · new product development</p>
         </div>
-        <div className="flex-1" />
-        <button
-          onClick={() => router.push("/modules/sample/rm-issue-forms")}
-          title="Raw material issue / collection forms (Document 015)"
-          className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:bg-[var(--surface-subtle)]"
-        >RM forms</button>
-        {caps.canRequest && (
-          <div className="relative">
-            <button
-              onClick={() => setMenuOpen((o) => !o)}
-              className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium hover:bg-[var(--aws-orange-hover)] inline-flex items-center gap-1.5"
-            >
-              + New NPD sample
-              <svg viewBox="0 0 20 20" className={`w-3.5 h-3.5 transition-transform ${menuOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 7l5 5 5-5" strokeLinecap="round" strokeLinejoin="round" /></svg>
-            </button>
-            {menuOpen && (
-              <>
-                <button type="button" aria-hidden tabIndex={-1} className="fixed inset-0 z-10 cursor-default" onClick={() => setMenuOpen(false)} />
-                <div className="absolute right-0 z-20 mt-1 w-64 bg-white border border-[var(--aws-border-strong)] rounded-[2px] shadow-md py-1">
-                  <MenuItem title="Sample requisition" desc="NPD · Customer trial · Convert" onClick={() => { setMenuOpen(false); router.push("/modules/npd-development/new"); }} />
-                  {caps.canNpd && <MenuItem title="Development job card" desc="R&amp;D — build & promote a BOM" onClick={() => { setMenuOpen(false); router.push("/modules/npd-development/job-cards/new"); }} />}
-                  <div className="my-1 border-t border-[var(--surface-divider)]" />
-                  <MenuItem title="Browse job cards" desc="Open existing development job cards" onClick={() => { setMenuOpen(false); router.push("/modules/npd-development/job-cards"); }} />
-                </div>
-              </>
-            )}
-          </div>
-        )}
+        <div className="flex items-center gap-2 sm:ml-auto">
+          <button
+            onClick={() => router.push("/modules/sample/rm-issue-forms")}
+            title="Raw material issue / collection forms (Document 015)"
+            className="h-9 px-3 sm:px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:bg-[var(--surface-subtle)] whitespace-nowrap"
+          >RM forms</button>
+          {caps.canRequest && (
+            <div className="relative flex-1 sm:flex-none">
+              <button
+                onClick={() => setMenuOpen((o) => !o)}
+                className="w-full sm:w-auto h-9 px-3 sm:px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium hover:bg-[var(--aws-orange-hover)] inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
+              >
+                + New NPD sample
+                <svg viewBox="0 0 20 20" className={`w-3.5 h-3.5 transition-transform ${menuOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 7l5 5 5-5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </button>
+              {menuOpen && (
+                <>
+                  <button type="button" aria-hidden tabIndex={-1} className="fixed inset-0 z-10 cursor-default" onClick={() => setMenuOpen(false)} />
+                  <div className="absolute right-0 z-20 mt-1 w-64 max-w-[calc(100vw_-_2rem)] bg-white border border-[var(--aws-border-strong)] rounded-[2px] shadow-md py-1">
+                    <MenuItem title="Sample requisition" desc="NPD · Customer trial · Convert" onClick={() => { setMenuOpen(false); router.push("/modules/npd-development/new"); }} />
+                    {caps.canNpd && <MenuItem title="Development job card" desc="R&amp;D — build & promote a BOM" onClick={() => { setMenuOpen(false); router.push("/modules/npd-development/job-cards/new"); }} />}
+                    <div className="my-1 border-t border-[var(--surface-divider)]" />
+                    <MenuItem title="Browse job cards" desc="Open existing development job cards" onClick={() => { setMenuOpen(false); router.push("/modules/npd-development/job-cards"); }} />
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Filters */}
       <div className="flex flex-wrap items-end gap-2 mb-4">
-        <div className="flex flex-col">
+        <div className="flex flex-col w-full sm:w-auto">
           <label className="text-[11px] text-[var(--text-muted)] mb-0.5">Search</label>
           <input
-            className="form-input !w-56" placeholder="ID, number, article, requestor…"
+            className="form-input w-full sm:w-56!" placeholder="ID, number, article, requestor…"
             value={searchInput} onChange={(e) => setSearchInput(e.target.value)} aria-label="Search"
           />
         </div>
