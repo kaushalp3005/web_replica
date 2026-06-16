@@ -32,6 +32,12 @@ export interface AdminUser {
   // derived helper (`primaryRole`) for the UI.
   role_id?: number | null;
   role_name?: string | null;
+  // Multi-role: a user can hold several roles. `role_codes` / `roles` carry
+  // the full set (primary first); `role_name`/`role_id` stay the primary for
+  // legacy single-role displays. `is_admin` is the aggregated flag.
+  role_codes?: string[];
+  role_ids?: number[];
+  roles?: { role_id: string; code: string; is_admin: boolean }[];
   is_admin?: boolean;
   entity?: string | null;
   entities?: string[];
@@ -123,7 +129,12 @@ export async function createUser(p: CreateUserPayload): Promise<AdminUser> {
 export interface EditUserPayload {
   full_name?: string;
   email?: string | null;
+  // Single primary role (legacy). For multi-role assignment send `role_codes`
+  // (role names) or `role_ids`; the server replaces the whole set and the
+  // first becomes the primary/display role.
   role_id?: number;
+  role_codes?: string[];
+  role_ids?: number[];
   // `status` is the canonical edit; `is_active` is the legacy flag the
   // server's allowlist also accepts.
   status?: "active" | "suspended";
@@ -298,6 +309,14 @@ export async function deletePermission(permissionId: number): Promise<{ permissi
 
 export function userPrimaryRoleName(u: AdminUser): string {
   return u.role_name || "";
+}
+
+// All role names a user holds (primary first). Falls back to the single
+// primary role for records the server returned without the multi-role set.
+export function userRoleNames(u: AdminUser): string[] {
+  if (u.role_codes && u.role_codes.length) return u.role_codes;
+  if (u.roles && u.roles.length) return u.roles.map((r) => r.code);
+  return u.role_name ? [u.role_name] : [];
 }
 
 export function userIsAdmin(u: AdminUser): boolean {

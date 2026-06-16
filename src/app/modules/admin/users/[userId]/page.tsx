@@ -32,7 +32,7 @@ import {
   replaceUserScope,
   userEntities,
   userFloors,
-  userPrimaryRoleName,
+  userRoleNames,
   userWarehouses,
 } from "@/lib/admin-api";
 
@@ -265,11 +265,14 @@ function UserHeader({
         <div className="flex items-center flex-wrap gap-2 text-[11px] mt-0.5">
           <span className="text-[var(--text-muted)] font-mono">{user.phone || "—"}</span>
           {user.email && <span className="text-[var(--text-muted)] truncate">{user.email}</span>}
-          {userPrimaryRoleName(user) && (
-            <span className="inline-block text-[10px] uppercase tracking-wide font-bold bg-[#eaf3ff] text-[#0f4c81] rounded-sm px-1.5 py-0.5">
-              {userPrimaryRoleName(user)}
+          {userRoleNames(user).map((rn, i) => (
+            <span
+              key={`${rn}-${i}`}
+              className="inline-block text-[10px] uppercase tracking-wide font-bold bg-[#eaf3ff] text-[#0f4c81] rounded-sm px-1.5 py-0.5"
+            >
+              {rn}
             </span>
-          )}
+          ))}
           {user.is_admin && (
             <span className="inline-block text-[10px] uppercase tracking-wide font-bold bg-[#fef3e6] text-[#a35200] rounded-sm px-1.5 py-0.5">
               Admin

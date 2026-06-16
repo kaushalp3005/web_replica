@@ -43,7 +43,7 @@ import {
   userEntities,
   userFloors,
   userIsAdmin,
-  userPrimaryRoleName,
+  userRoleNames,
   userWarehouses,
 } from "@/lib/admin-api";
 
@@ -264,7 +264,7 @@ function UsersTab({
       (u.full_name ?? "").toLowerCase().includes(debouncedSearch) ||
       (u.phone ?? "").toLowerCase().includes(debouncedSearch) ||
       (u.email ?? "").toLowerCase().includes(debouncedSearch) ||
-      userPrimaryRoleName(u).toLowerCase().includes(debouncedSearch),
+      userRoleNames(u).some((rn) => rn.toLowerCase().includes(debouncedSearch)),
     );
   }, [users, debouncedSearch]);
 
@@ -387,21 +387,28 @@ function UsersTab({
                         forcing scroll. */}
                     <div className="text-[10px] text-[var(--text-muted)] truncate sm:hidden">
                       {u.phone || "—"}
-                      {userPrimaryRoleName(u) && ` · ${userPrimaryRoleName(u)}`}
+                      {userRoleNames(u).length > 0 && ` · ${userRoleNames(u).join(", ")}`}
                       {admin && " · Admin"}
                     </div>
                     {u.email && <div className="text-[10px] text-[var(--text-muted)] truncate hidden sm:block">{u.email}</div>}
                   </td>
                   <td className="px-3 py-2 font-mono text-[12px] hidden sm:table-cell truncate">{u.phone || "—"}</td>
                   <td className="px-3 py-2 hidden sm:table-cell">
-                    <span className="inline-block text-[10px] uppercase tracking-wide font-bold bg-[#eaf3ff] text-[#0f4c81] rounded-sm px-1.5 py-0.5">
-                      {userPrimaryRoleName(u) || "—"}
-                    </span>
-                    {admin && (
-                      <span className="ml-1 inline-block text-[9px] uppercase tracking-wide font-bold bg-[#fef3e6] text-[#a35200] rounded-sm px-1 py-0.5">
-                        Admin
-                      </span>
-                    )}
+                    <div className="flex flex-wrap gap-1">
+                      {(userRoleNames(u).length ? userRoleNames(u) : ["—"]).map((rn, i) => (
+                        <span
+                          key={`${rn}-${i}`}
+                          className="inline-block text-[10px] uppercase tracking-wide font-bold bg-[#eaf3ff] text-[#0f4c81] rounded-sm px-1.5 py-0.5"
+                        >
+                          {rn}
+                        </span>
+                      ))}
+                      {admin && (
+                        <span className="inline-block text-[9px] uppercase tracking-wide font-bold bg-[#fef3e6] text-[#a35200] rounded-sm px-1 py-0.5">
+                          Admin
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-3 py-2 hidden lg:table-cell"><ChipList items={ents} /></td>
                   <td className="px-3 py-2 hidden lg:table-cell"><ChipList items={whs} /></td>
@@ -543,7 +550,9 @@ function UserModal({
   const [phone, setPhone] = useState(user?.phone ?? "");
   const [email, setEmail] = useState(user?.email ?? "");
   const [password, setPassword] = useState("");
-  const [roleId, setRoleId] = useState<number | "">(user?.role_id ?? "");
+  // Multi-role: a user can hold several roles. Values are role NAMES (the
+  // create/edit payloads use role_codes); the first selected is the primary.
+  const [roleCodes, setRoleCodes] = useState<string[]>(() => (user ? userRoleNames(user) : []));
   const [entities, setEntities] = useState<string[]>(() => (user ? userEntities(user) : []));
   const [warehouses, setWarehouses] = useState<string[]>(() => (user ? userWarehouses(user) : []));
   const [floors, setFloors] = useState<string[]>(() => (user ? userFloors(user) : []));
@@ -565,11 +574,7 @@ function UserModal({
 
   async function onSave() {
     if (!fullName.trim()) return onError("Name is required");
-    if (roleId === "" || roleId === undefined) return onError("Select a role");
-
-    const role = roles.find((r) => r.role_id === Number(roleId));
-    const roleCode = role?.role_name;
-    if (!roleCode) return onError("Selected role has no code");
+    if (roleCodes.length === 0) return onError("Select at least one role");
 
     setBusy(true);
     try {
@@ -581,7 +586,7 @@ function UserModal({
           password,
           full_name: fullName.trim(),
           email: email.trim() || null,
-          role_codes: [roleCode],
+          role_codes: roleCodes,
           entities,
           warehouses,
           floors,
@@ -589,14 +594,20 @@ function UserModal({
         };
         await createUser(payload);
       } else if (user) {
-        // Header fields (full_name, email, status, role_id) go through PUT /users/{id}.
+        // Header fields (full_name, email, status, roles) go through PUT /users/{id}.
         const newStatus: "active" | "suspended" = active ? "active" : "suspended";
         const patch: EditUserPayload = {
           full_name: fullName.trim(),
           email: email.trim() || null,
           status: newStatus,
         };
-        if (Number(roleId) !== user.role_id) patch.role_id = Number(roleId);
+        // Order-sensitive compare so changing the PRIMARY (first) role also
+        // triggers a write. Sends the whole set; server replaces it.
+        const beforeRoles = userRoleNames(user);
+        const rolesChanged =
+          beforeRoles.length !== roleCodes.length ||
+          beforeRoles.some((r, i) => r !== roleCodes[i]);
+        if (rolesChanged) patch.role_codes = roleCodes;
         await editUser(user.user_id, patch);
 
         // Scope is a separate endpoint (PUT /users/{id}/scope). Only call it
@@ -656,19 +667,19 @@ function UserModal({
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-          <Field label="Role *">
-            <select
-              value={roleId}
-              onChange={(e) => setRoleId(e.target.value ? Number(e.target.value) : "")}
-              className="form-input"
-            >
-              <option value="">— Select Role —</option>
-              {roles.map((r) => (
-                <option key={r.role_id} value={r.role_id}>
-                  {r.role_name}{r.is_admin ? " (Admin)" : ""}
-                </option>
-              ))}
-            </select>
+          <Field label="Roles * (one or more)">
+            <ChipGroup
+              options={roles.map((r) => ({
+                value: r.role_name,
+                label: `${r.role_name}${r.is_admin ? " (Admin)" : ""}`,
+              }))}
+              selected={roleCodes}
+              onToggle={(v) => toggle(roleCodes, setRoleCodes, v)}
+            />
+            <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+              A user can hold several roles (e.g. Admin + Business Head). The first
+              selected is the primary; admin in any role grants admin access.
+            </p>
           </Field>
           {mode === "create" && (
             <Field label="Password *">
