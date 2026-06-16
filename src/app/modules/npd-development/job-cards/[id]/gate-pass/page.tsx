@@ -4,11 +4,12 @@
 // interunit-transfer direct-out delivery challan (components/transfer/DeliveryChallan.tsx).
 // A dedicated print route: the whole page IS the document, and it auto-opens the browser
 // print dialog (Save as PDF) once the data loads — same mechanism as the IMS DC.
-// Read-only; no inventory side effects. Reached from the "Download gate pass" button.
+// Read-only; no inventory side effects. Reached from the "Download outpass" button.
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { useRequireAuth } from "@/lib/user";
+import { useRequireAuth, useMe } from "@/lib/user";
+import { sampleCaps } from "@/lib/sample-roles";
 import { getDevJobCard, type DevJobCard } from "@/lib/npd-dev";
 
 const BURGUNDY = "#8B4049";
@@ -43,6 +44,8 @@ export default function DevJcGatePassPage() {
   const params = useParams<{ id: string }>();
   const id = Number(params.id);
   const authed = useRequireAuth(router.replace);
+  const me = useMe();
+  const canOutpass = sampleCaps(me).canOutpass;
 
   const [jc, setJc] = useState<DevJobCard | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -50,6 +53,14 @@ export default function DevJcGatePassPage() {
   // Hydration gate (SSR true vs first client false) — mirror the other pages.
   const [mounted, setMounted] = useState(false);
   useEffect(() => { queueMicrotask(() => setMounted(true)); }, []);
+
+  // npd_team + admin only — BH/IM are module members but must not reach the
+  // outpass. The module layout lets them in; this is the finer gate.
+  useEffect(() => {
+    if (authed && me !== null && !canOutpass) {
+      router.replace(`/modules/npd-development/job-cards/${id}`);
+    }
+  }, [authed, me, canOutpass, router, id]);
 
   useEffect(() => {
     if (!authed || !Number.isFinite(id)) return;
@@ -67,12 +78,13 @@ export default function DevJcGatePassPage() {
   }, [jc]);
 
   if (mounted && !authed) return null;
+  if (mounted && me !== null && !canOutpass) return null;
 
   if (error) {
     return <div style={{ padding: 24, fontFamily: "Arial, sans-serif", color: "#b1361e" }}>{error}</div>;
   }
   if (!jc) {
-    return <div style={{ padding: 24, fontFamily: "Arial, sans-serif", color: "#666" }}>Loading gate pass…</div>;
+    return <div style={{ padding: 24, fontFamily: "Arial, sans-serif", color: "#666" }}>Loading outpass…</div>;
   }
 
   const itemDesc = jc.fg_sku_name || jc.title || "—";
@@ -82,11 +94,18 @@ export default function DevJcGatePassPage() {
   const toAddr = jc.customer_ship_to_address || "";
   const fromAddr = (jc.warehouse && WAREHOUSE_ADDR[jc.warehouse]) || jc.warehouse || "—";
   const recipient = jc.dispatch_recipient || "—";
-  const reason = jc.output_notes || `NPD sample dispatch — ${jc.dev_jc_number ?? id}`;
+  const reason = jc.output_notes || `NPD sample dispatch — ${id}`;
   // Promote-gate digital signatures (name + decided date) — BH = REQUESTOR_BH, Inventory
   // manager = INV_MGR. Absent for a sourceless / pre-gate card → blank signature line.
   const bh = jc.gate_signatures?.REQUESTOR_BH;
   const im = jc.gate_signatures?.INV_MGR;
+  // Billing type carried (read-only) from the source requisition. Show the flags
+  // that are set — Returnable / Non-returnable / Paid — but never the amount.
+  const sampleType = [
+    jc.returnable ? "Returnable" : null,
+    jc.non_returnable ? "Non-returnable" : null,
+    jc.paid ? "Paid" : null,
+  ].filter(Boolean).join(" · ") || "—";
 
   const td: React.CSSProperties = { padding: "8px", border: "1px solid #000" };
   const cell = (extra: React.CSSProperties = {}): React.CSSProperties =>
@@ -142,13 +161,13 @@ export default function DevJcGatePassPage() {
                 <img src="/candor_logo.jpg" alt="Candor Foods" style={{ height: "60px", width: "auto" }} />
                 <div>
                   <div style={{ fontSize: "20px", fontWeight: "bold", color: BURGUNDY }}>CANDOR FOODS</div>
-                  <div style={{ fontSize: "14px", marginTop: "5px", color: "#333", fontWeight: "bold", letterSpacing: "0.5px" }}>NPD SAMPLE GATEPASS</div>
+                  <div style={{ fontSize: "24px", marginTop: "6px", color: BURGUNDY, fontWeight: "bold", letterSpacing: "1px" }}>SAMPLE OUTPASS</div>
                 </div>
               </div>
             </td>
           </tr>
           <tr>
-            <td colSpan={3} style={td}><strong>Challan No:</strong> {jc.dev_jc_number ?? id}</td>
+            <td colSpan={3} style={td}><strong>Outpass No:</strong> {id}</td>
             <td colSpan={2} style={td}><strong>Date:</strong> {date}</td>
           </tr>
           <tr>
@@ -166,6 +185,9 @@ export default function DevJcGatePassPage() {
           <tr>
             <td colSpan={3} style={td}><strong>Vehicle No:</strong> —</td>
             <td colSpan={2} style={td}><strong>Recipient / Driver:</strong> {recipient}</td>
+          </tr>
+          <tr>
+            <td colSpan={COLS} style={td}><strong>Sample type:</strong> {sampleType}</td>
           </tr>
           <tr style={{ backgroundColor: "#e0e0e0" }}>
             <td style={cell({ fontWeight: "bold", textAlign: "center" })}>S.No</td>
@@ -201,7 +223,7 @@ export default function DevJcGatePassPage() {
           </tr>
           <tr>
             <td colSpan={COLS} style={{ padding: "15px 10px", borderTop: "2px solid #000", textAlign: "center", fontSize: "10px", fontStyle: "italic", backgroundColor: "#f8f9fa" }}>
-              This is a computer-generated NPD sample gate pass. Business head &amp; inventory manager signatures are captured digitally; the security signature is taken at the gate.
+              This is a computer-generated sample outpass. Business head &amp; inventory manager signatures are captured digitally; the security signature is taken at the gate.
             </td>
           </tr>
         </tbody>
@@ -212,7 +234,7 @@ export default function DevJcGatePassPage() {
         <span style={{ position: "absolute", top: "-12px", left: "50%", transform: "translateX(-50%)", backgroundColor: "white", padding: "0 15px", fontSize: "12px", color: "#666", fontWeight: "bold" }}>✂ CUT HERE</span>
       </div>
 
-      {/* ── GATE PASS ── */}
+      {/* ── OUTPASS (gate stub) ── */}
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "11px", pageBreakInside: "avoid", tableLayout: "fixed" }}>
         <colgroup><col style={{ width: "8%" }} /><col style={{ width: "40%" }} /><col style={{ width: "12%" }} /><col style={{ width: "16%" }} /><col style={{ width: "24%" }} /></colgroup>
         <thead>
@@ -221,20 +243,22 @@ export default function DevJcGatePassPage() {
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "15px" }}>
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src="/candor_logo.jpg" alt="Candor Foods" style={{ height: "50px", width: "auto" }} />
-                <div style={{ fontSize: "18px", fontWeight: "bold", color: BURGUNDY }}>CANDOR FOODS - GATE PASS</div>
+                <div style={{ fontSize: "18px", fontWeight: "bold", color: BURGUNDY }}>CANDOR FOODS - OUTPASS</div>
               </div>
             </td>
           </tr>
         </thead>
         <tbody>
           <tr>
-            <td colSpan={2} style={td}><strong>Challan No:</strong> {jc.dev_jc_number ?? id}</td>
-            <td colSpan={2} style={td}><strong>Date:</strong> {date}</td>
-            <td style={td}><strong>Recipient:</strong> {recipient}</td>
+            <td colSpan={2} style={td}><strong>Outpass No:</strong> {id}</td>
+            <td colSpan={3} style={td}><strong>Date:</strong> {date}</td>
           </tr>
           <tr>
             <td colSpan={2} style={td}><strong>From:</strong> Candor Foods, {fromAddr}</td>
             <td colSpan={3} style={td}><strong>To:</strong> {toName}{toAddr ? `, ${toAddr}` : ""}</td>
+          </tr>
+          <tr>
+            <td colSpan={5} style={td}><strong>Sample type:</strong> {sampleType}</td>
           </tr>
           <tr style={{ backgroundColor: "#f8f9fa" }}>
             <td colSpan={5} style={{ padding: "6px", border: "1px solid #000", fontWeight: "bold", textAlign: "center" }}>ITEMS SUMMARY</td>
@@ -273,7 +297,7 @@ export default function DevJcGatePassPage() {
           </tr>
           <tr>
             <td colSpan={5} style={{ padding: "6px", border: "1px solid #000", textAlign: "center", fontSize: "10px", fontStyle: "italic", backgroundColor: "#f8f9fa" }}>
-              Present this gate pass at the security gate.
+              Present this outpass at the security gate.
             </td>
           </tr>
         </tbody>

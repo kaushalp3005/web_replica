@@ -15,6 +15,10 @@ export interface ModuleItem {
   // Admin tile's pattern (route === "admin" was previously hardcoded in
   // /modules/page.tsx; folded into the flag so the rule lives in one place).
   adminOnly?: boolean;
+  // When set, the tile/route is visible to admins OR any user holding one of
+  // these role codes (and hidden from everyone else). Distinct from adminOnly,
+  // which is admin-only. Honored by /modules and the module's route guard.
+  allowedRoles?: string[];
   Icon: ComponentType<SVGProps<SVGSVGElement>>;
 }
 
@@ -166,7 +170,7 @@ export const MODULES: ModuleItem[] = [
     stat: "Requests · Review · Dev job cards",
     route: "npd-development",
     implemented: true,
-    adminOnly: true,
+    allowedRoles: ["npd_team", "business_head", "inventory_manager"],
     Icon: NpdDevIcon,
   },
   {

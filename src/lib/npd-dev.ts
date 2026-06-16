@@ -62,8 +62,7 @@ export interface PromoteGate {
 }
 
 export interface DevJobCard {
-  id: number;                       // 8-digit time-based BIGINT (new_short_time_id)
-  dev_jc_number: string;
+  id: number;                       // 8-digit time-based BIGINT (new_short_time_id) — the only identifier
   title: string;
   description?: string | null;
   warehouse?: string | null;

@@ -9,7 +9,7 @@ import { useParams, useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
-import { sampleCaps, roleNameOf, isAdminMe } from "@/lib/sample-roles";
+import { sampleCaps, roleNamesOf, isAdminMe } from "@/lib/sample-roles";
 import type { MeResponse } from "@/lib/auth";
 import {
   getDevJobCard, replaceDevLines, startDevJobCard, closeDevJobCard, cancelDevJobCard,
@@ -291,7 +291,6 @@ export default function DevJobCardDetailPage() {
                   <span className="text-[12px] text-[var(--text-success)]">→ live BOM #{jc.promoted_bom_id}</span>
                 )}
               </div>
-              <div className="mt-1 text-[12px] text-[var(--text-muted)]">Document no. <span className="text-[var(--text-secondary)] font-mono">{jc.dev_jc_number}</span></div>
               <p className="mt-1 text-[15px] font-medium text-[var(--text-primary)]">{jc.title}</p>
               {jc.description && <p className="text-[13px] text-[var(--text-secondary)]">{jc.description}</p>}
               <dl className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-y-2 gap-x-4 text-[13px]">
@@ -590,14 +589,17 @@ export default function DevJobCardDetailPage() {
                     {jc.dispatch_mat_doc_id ? ` · GI ${jc.dispatch_mat_doc_id}` : ""}
                   </p>
                 )}
-                {/* Permanent gate pass — A4 Delivery Challan + Gate Pass for the FG sample. */}
+                {/* Permanent outpass — A4 Delivery Challan + Gate Pass for the FG sample.
+                    npd_team + admin only; BH/IM may view the card but not download. */}
+                {caps.canOutpass && (
                 <div className="mt-3">
                   <button onClick={openGatePass}
                     className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium hover:bg-[var(--aws-orange-hover)] inline-flex items-center gap-1.5">
                     <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
-                    Download gate pass
+                    Download outpass
                   </button>
                 </div>
+                )}
               </Card>
             )}
           </div>
@@ -996,7 +998,7 @@ function PromoteGatePanel({ gate, devJcId, me, busy, onAction }: {
   // `me.role_name` is always undefined in this app (the /me payload only carries
   // roles[]), so resolve the role via the fallback-aware helper the rest of the UI
   // uses. An admin can act on either gate (mirrors the backend admin bypass).
-  const isInvMgr = roleNameOf(me) === "inventory_manager";
+  const isInvMgr = roleNamesOf(me).includes("inventory_manager");
   const isAdmin = isAdminMe(me);
 
   return (

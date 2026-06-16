@@ -138,7 +138,6 @@ export default function NpdDevJobCardsPage() {
                   <span className="font-semibold text-[13px] text-[var(--text-primary)] font-mono tabular-nums">{r.id}</span>
                   <DevJcStatusPill status={r.status} />
                 </div>
-                <div className="text-[11px] text-[var(--text-muted)] font-mono">{r.dev_jc_number}</div>
                 <div className="mt-0.5 text-[13px] text-[var(--text-primary)] truncate">{r.title}</div>
                 {r.fg_sku_name && <div className="text-[12px] text-[var(--text-secondary)] truncate">Target: {r.fg_sku_name}</div>}
                 <div className="mt-1 text-[12px] text-[var(--text-secondary)] flex flex-wrap gap-x-3 gap-y-0.5">
@@ -175,7 +174,7 @@ export default function NpdDevJobCardsPage() {
                 {rows.map((r) => (
                   <tr key={r.id} onClick={() => openRow(r.id)}
                     className="border-t border-[var(--surface-divider)] hover:bg-[var(--surface-subtle)] cursor-pointer">
-                    <td className="px-3 py-2 font-medium text-[var(--text-primary)] font-mono tabular-nums whitespace-nowrap">{r.id}<div className="text-[11px] font-normal text-[var(--text-muted)]">{r.dev_jc_number}</div></td>
+                    <td className="px-3 py-2 font-medium text-[var(--text-primary)] font-mono tabular-nums whitespace-nowrap">{r.id}</td>
                     <td className="px-3 py-2 max-w-[200px] truncate" title={r.title}>{r.title}</td>
                     <td className="px-3 py-2 max-w-[200px] truncate" title={r.fg_sku_name ?? ""}>{r.fg_sku_name ?? "—"}</td>
                     <td className="px-3 py-2 max-w-[160px] truncate" title={r.customer_name ?? ""}>{r.customer_name ?? "—"}</td>

@@ -10,7 +10,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, SAMPLE_ROOT, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useMe, useIsAdmin } from "@/lib/user";
+import { listUsers } from "@/lib/admin-api";
 import { sampleCaps } from "@/lib/sample-roles";
 import {
   getRequisition, submitRequisition, cancelRequisition, closeRequisition,
@@ -350,6 +351,27 @@ function EditCard({ req, busy, onSave, onCancel }: {
   // Billing checklist — only edited on NPD/TRIAL requisitions.
   const isNpd = req.sample_type === "NPD" || req.sample_type === "TRIAL";
   const [billing, setBilling] = useState<BillingValue>(() => billingFrom(req));
+  // Requestor dropdown — business heads only (mirrors the create form). Admin-gated
+  // because /users is admin-only; non-admins keep the free-text input.
+  const isAdmin = useIsAdmin();
+  const [reqOptions, setReqOptions] = useState<string[]>([]);
+  useEffect(() => {
+    if (!isAdmin) return;
+    let cancelled = false;
+    listUsers().then((users) => {
+      if (cancelled) return;
+      setReqOptions(Array.from(new Set(users
+        .filter((u) => u.role_name === "business_head")
+        .map((u) => (u.full_name ?? "").trim())
+        .filter(Boolean))));
+    }).catch(() => { /* leave empty — the placeholder prompts a selection */ });
+    return () => { cancelled = true; };
+  }, [isAdmin]);
+  // Keep the currently-saved requestor selectable even if it isn't (or is no longer)
+  // a business head, so editing never silently blanks an existing value.
+  const currentReq = (req.requestor_team ?? "").trim();
+  const reqChoices = currentReq && !reqOptions.includes(currentReq)
+    ? [currentReq, ...reqOptions] : reqOptions;
   // Quantity is derived = pcs × weight per piece (kg).
   const pcsNum = Number(pcs), wppNum = Number(weightPerPiece);
   const qtyNum = (pcs.trim() !== "" && weightPerPiece.trim() !== "" && Number.isFinite(pcsNum) && Number.isFinite(wppNum))
@@ -407,7 +429,14 @@ function EditCard({ req, busy, onSave, onCancel }: {
         </select>
       </label>
       <label className="text-[12px] text-[var(--text-secondary)]">Requestor
-        <input className="form-input mt-0.5" value={requestorTeam} onChange={(e) => setRequestorTeam(e.target.value)} />
+        {isAdmin ? (
+          <select className="form-input mt-0.5" value={requestorTeam} onChange={(e) => setRequestorTeam(e.target.value)}>
+            <option value="">Select a business head…</option>
+            {reqChoices.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        ) : (
+          <input className="form-input mt-0.5" value={requestorTeam} onChange={(e) => setRequestorTeam(e.target.value)} />
+        )}
       </label>
       <label className="text-[12px] text-[var(--text-secondary)]">Company name
         <input className="form-input mt-0.5" value={companyName} onChange={(e) => setCompanyName(e.target.value)} />

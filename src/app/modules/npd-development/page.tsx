@@ -13,7 +13,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useMe, useIsAdmin } from "@/lib/user";
+import { listUsers } from "@/lib/admin-api";
 import { sampleCaps } from "@/lib/sample-roles";
 import {
   listRequisitions, listRequestors, npdReview, cancelRequisition, updateRequisition,
@@ -21,6 +22,9 @@ import {
   type Requisition, type PurposeTag, type Warehouse,
 } from "@/lib/sample";
 import { NpdStatusPill, NPD_STATUS_FILTERS } from "../sample/_shared";
+import {
+  BillingFields, billingError, billingPayload, billingFrom, EMPTY_BILLING, type BillingValue,
+} from "../sample/_form";
 
 const PAGE_SIZE = 50;
 const NPD_TYPES_CSV = "NPD,TRIAL";
@@ -116,8 +120,11 @@ function RowActions({ flags, busy, onView, onAccept, onHold, onCancel, onEdit }:
 }
 
 type EditForm = {
-  npd_target_name: string; quantity: string; warehouse: string;
-  description: string; purpose_tag: string; requestor_team: string;
+  npd_target_name: string; pcs: string; weight_per_piece: string; warehouse: string;
+  purpose_tag: string; requestor_team: string; description: string;
+  company_name: string; customer_name: string; customer_contact: string;
+  customer_ship_to_address: string; mode_of_transport: string; expected_dispatch_date: string;
+  billing: BillingValue;
 };
 type Modal =
   | { kind: "HOLD" | "CANCEL"; row: Requisition }
@@ -154,8 +161,35 @@ export default function NpdQueuePage() {
   const [reason, setReason] = useState("");
   const [holdStart, setHoldStart] = useState("");
   const [editForm, setEditForm] = useState<EditForm>({
-    npd_target_name: "", quantity: "", warehouse: "", description: "", purpose_tag: "", requestor_team: "",
+    npd_target_name: "", pcs: "", weight_per_piece: "", warehouse: "",
+    purpose_tag: "", requestor_team: "", description: "",
+    company_name: "", customer_name: "", customer_contact: "",
+    customer_ship_to_address: "", mode_of_transport: "", expected_dispatch_date: "",
+    billing: EMPTY_BILLING,
   });
+  // Requestor dropdown — business heads only (mirrors the create form), admin-gated
+  // (/users is admin-only); non-admins keep free-text. Plus derived qty + billing guard.
+  const isAdmin = useIsAdmin();
+  const [bhOptions, setBhOptions] = useState<string[]>([]);
+  useEffect(() => {
+    if (!isAdmin) return;
+    let cancelled = false;
+    listUsers().then((users) => {
+      if (cancelled) return;
+      setBhOptions(Array.from(new Set(users
+        .filter((u) => u.role_name === "business_head")
+        .map((u) => (u.full_name ?? "").trim()).filter(Boolean))));
+    }).catch(() => { /* leave empty — the placeholder prompts a selection */ });
+    return () => { cancelled = true; };
+  }, [isAdmin]);
+  const editPcsN = Number(editForm.pcs), editWppN = Number(editForm.weight_per_piece);
+  const editQty = (editForm.pcs.trim() && editForm.weight_per_piece.trim()
+    && Number.isFinite(editPcsN) && Number.isFinite(editWppN))
+    ? Number((editPcsN * editWppN).toFixed(3)) : 0;
+  // Keep the saved requestor selectable even if it isn't a business head (no silent blank).
+  const reqChoices = editForm.requestor_team.trim() && !bhOptions.includes(editForm.requestor_team.trim())
+    ? [editForm.requestor_team.trim(), ...bhOptions] : bhOptions;
+  const editBillErr = billingError(editForm.billing);
 
   const [mounted, setMounted] = useState(false);
   useEffect(() => { queueMicrotask(() => setMounted(true)); }, []);
@@ -209,11 +243,19 @@ export default function NpdQueuePage() {
   function openEdit(row: Requisition) {
     setEditForm({
       npd_target_name: row.npd_target_name ?? "",
-      quantity: row.quantity != null ? String(row.quantity) : "",
+      pcs: row.pcs != null ? String(row.pcs) : "",
+      weight_per_piece: row.weight_per_piece != null ? String(row.weight_per_piece) : "",
       warehouse: row.warehouse ?? "",
-      description: row.description ?? "",
       purpose_tag: row.purpose_tag ?? "",
       requestor_team: row.requestor_team ?? "",
+      description: row.description ?? "",
+      company_name: row.company_name ?? "",
+      customer_name: row.customer_name ?? "",
+      customer_contact: row.customer_contact ?? "",
+      customer_ship_to_address: row.customer_ship_to_address ?? "",
+      mode_of_transport: row.mode_of_transport ?? "",
+      expected_dispatch_date: (row.expected_dispatch_date ?? "").slice(0, 10),
+      billing: billingFrom(row),
     });
     setModal({ kind: "EDIT", row });
   }
@@ -232,14 +274,23 @@ export default function NpdQueuePage() {
   }
 
   function saveEdit(row: Requisition) {
-    const qty = editForm.quantity.trim() ? Number(editForm.quantity) : undefined;
+    if (editBillErr) return;
     return run(row.id, () => updateRequisition(row.id, {
       npd_target_name: editForm.npd_target_name.trim() || undefined,
-      quantity: qty != null && Number.isFinite(qty) ? qty : undefined,
+      pcs: editForm.pcs.trim() ? editPcsN : undefined,
+      weight_per_piece: editForm.weight_per_piece.trim() ? editWppN : undefined,
+      quantity: editQty > 0 ? editQty : undefined,
       warehouse: (editForm.warehouse || undefined) as Warehouse | undefined,
-      description: editForm.description.trim() || undefined,
       purpose_tag: (editForm.purpose_tag || undefined) as PurposeTag | undefined,
       requestor_team: editForm.requestor_team.trim() || undefined,
+      description: editForm.description.trim() || undefined,
+      company_name: editForm.company_name.trim() || undefined,
+      customer_name: editForm.customer_name.trim() || undefined,
+      customer_contact: editForm.customer_contact.trim() || undefined,
+      customer_ship_to_address: editForm.customer_ship_to_address.trim() || undefined,
+      mode_of_transport: editForm.mode_of_transport.trim() || undefined,
+      expected_dispatch_date: editForm.expected_dispatch_date || undefined,
+      ...billingPayload(editForm.billing),
     }));
   }
 
@@ -504,7 +555,7 @@ export default function NpdQueuePage() {
       {/* Edit modal — request body */}
       {modal?.kind === "EDIT" && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-3" onClick={() => setModal(null)}>
-          <div className="bg-white rounded-md w-full max-w-lg p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white rounded-md w-full max-w-2xl p-4 shadow-xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-[15px] font-semibold mb-2">Edit request {modal.row.request_id ?? modal.row.id}</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="sm:col-span-2">
@@ -513,10 +564,21 @@ export default function NpdQueuePage() {
                   onChange={(e) => setEditForm((f) => ({ ...f, npd_target_name: e.target.value }))} />
               </div>
               <div>
-                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Quantity (kg)</label>
-                <input type="number" min="0" step="0.001" className="form-input" value={editForm.quantity}
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Pcs</label>
+                <input type="number" min="0" step="1" className="form-input" value={editForm.pcs}
                   onWheel={(e) => e.currentTarget.blur()}
-                  onChange={(e) => setEditForm((f) => ({ ...f, quantity: e.target.value }))} />
+                  onChange={(e) => setEditForm((f) => ({ ...f, pcs: e.target.value }))} />
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Weight per piece (kg)</label>
+                <input type="number" min="0" step="0.001" className="form-input" value={editForm.weight_per_piece}
+                  onWheel={(e) => e.currentTarget.blur()}
+                  onChange={(e) => setEditForm((f) => ({ ...f, weight_per_piece: e.target.value }))} />
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Quantity (kg)</label>
+                <input className="form-input bg-[var(--surface-subtle)] cursor-not-allowed"
+                  value={editQty > 0 ? editQty.toLocaleString("en-IN") : "—"} readOnly tabIndex={-1} />
               </div>
               <div>
                 <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Warehouse</label>
@@ -540,20 +602,61 @@ export default function NpdQueuePage() {
               </div>
               <div>
                 <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Requestor</label>
-                <input className="form-input" value={editForm.requestor_team}
-                  onChange={(e) => setEditForm((f) => ({ ...f, requestor_team: e.target.value }))} />
+                {isAdmin ? (
+                  <select className="form-input" value={editForm.requestor_team}
+                    onChange={(e) => setEditForm((f) => ({ ...f, requestor_team: e.target.value }))}>
+                    <option value="">Select a business head…</option>
+                    {reqChoices.map((n) => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                ) : (
+                  <input className="form-input" value={editForm.requestor_team}
+                    onChange={(e) => setEditForm((f) => ({ ...f, requestor_team: e.target.value }))} />
+                )}
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Company name</label>
+                <input className="form-input" value={editForm.company_name}
+                  onChange={(e) => setEditForm((f) => ({ ...f, company_name: e.target.value }))} />
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Customer name</label>
+                <input className="form-input" value={editForm.customer_name}
+                  onChange={(e) => setEditForm((f) => ({ ...f, customer_name: e.target.value }))} />
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Customer contact</label>
+                <input className="form-input" value={editForm.customer_contact}
+                  onChange={(e) => setEditForm((f) => ({ ...f, customer_contact: e.target.value }))} />
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Mode of transport</label>
+                <input className="form-input" value={editForm.mode_of_transport}
+                  onChange={(e) => setEditForm((f) => ({ ...f, mode_of_transport: e.target.value }))} />
+              </div>
+              <div>
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Expected dispatch date</label>
+                <input type="date" className="form-input" value={editForm.expected_dispatch_date}
+                  onChange={(e) => setEditForm((f) => ({ ...f, expected_dispatch_date: e.target.value }))} />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Customer ship-to address</label>
+                <textarea className="form-input min-h-[56px] resize-y" value={editForm.customer_ship_to_address}
+                  onChange={(e) => setEditForm((f) => ({ ...f, customer_ship_to_address: e.target.value }))} />
               </div>
               <div className="sm:col-span-2">
                 <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Description</label>
                 <textarea className="form-input min-h-[56px] resize-y" value={editForm.description}
                   onChange={(e) => setEditForm((f) => ({ ...f, description: e.target.value }))} />
               </div>
+              <div className="sm:col-span-2">
+                <BillingFields value={editForm.billing} onChange={(b) => setEditForm((f) => ({ ...f, billing: b }))} />
+              </div>
             </div>
             <div className="flex gap-2 mt-4">
               <button onClick={() => setModal(null)}
                 className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:bg-[var(--surface-subtle)]">Cancel</button>
               <div className="flex-1" />
-              <button disabled={busyId === modal.row.id || !editForm.npd_target_name.trim()}
+              <button disabled={busyId === modal.row.id || !editForm.npd_target_name.trim() || !!editBillErr}
                 onClick={() => saveEdit(modal.row)}
                 className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">{busyId === modal.row.id ? "Saving…" : "Save changes"}</button>
             </div>

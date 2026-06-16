@@ -7,6 +7,7 @@ import { fetchMe, signOut, userStore, type MeResponse } from "@/lib/auth";
 // `signOut` is still used by the unauthorised-/me fallback below.
 import { useRequireAuth, useUserInitial } from "@/lib/user";
 import { MODULES } from "@/lib/modules";
+import { roleNamesOf } from "@/lib/sample-roles";
 
 export default function ModulesPage() {
   const router = useRouter();
@@ -60,10 +61,16 @@ export default function ModulesPage() {
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    // Hide admin-only tiles (Admin / Purchase / QC / Sample / Transfer)
-    // from non-admins. Each module's root page also inline-gates itself for
-    // direct navigation; suppressing the entry point keeps the grid honest.
-    const visible = me?.is_admin ? MODULES : MODULES.filter((m) => !m.adminOnly);
+    // Hide admin-only tiles (Admin / Purchase / QC / Sample / Transfer) from
+    // non-admins, and allowedRoles tiles (NPD Development) from users who hold
+    // none of the listed roles. Each module's root page also inline-gates itself
+    // for direct navigation; suppressing the entry point keeps the grid honest.
+    const myRoles = roleNamesOf(me);
+    const visible = me?.is_admin
+      ? MODULES
+      : MODULES.filter((m) =>
+          !m.adminOnly &&
+          (!m.allowedRoles || m.allowedRoles.some((r) => myRoles.includes(r))));
     if (!q) return visible;
     return visible.filter((m) => m.title.toLowerCase().includes(q));
   }, [query, me]);

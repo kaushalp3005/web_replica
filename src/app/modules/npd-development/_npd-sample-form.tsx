@@ -51,7 +51,7 @@ export function NpdSampleForm({ defaultType, heading }: {
   const [purposeTag, setPurposeTag] = useState<PurposeTag | "">("");
   const [requestorTeam, setRequestorTeam] = useState("");
   const [requestorTouched, setRequestorTouched] = useState(false);
-  const [reqOptions, setReqOptions] = useState<string[]>([]);   // admin / business-head names (admins only)
+  const [reqOptions, setReqOptions] = useState<string[]>([]);   // business-head names (no admins)
   const [description, setDescription] = useState("");
   // Customer + dispatch planning (Company / Customer mandatory).
   const [companyName, setCompanyName] = useState("");
@@ -65,10 +65,11 @@ export function NpdSampleForm({ defaultType, heading }: {
   const [error, setError] = useState<string | null>(null);
   const [savedId, setSavedId] = useState<number | null>(null);
 
-  // Requestor defaults to the signed-in user's profile name until they change it.
-  const effectiveRequestor = requestorTouched ? requestorTeam : profileName;
+  // Requestor is a business head chosen from the dropdown. An admin must pick one
+  // (no self-default); a non-admin's free-text field still defaults to their own name.
+  const effectiveRequestor = requestorTouched ? requestorTeam : (isAdmin ? "" : profileName);
 
-  // Admins pick the requestor from a dropdown of all admins + business heads.
+  // Admins pick the requestor from a dropdown of business heads ONLY (no admins).
   // (The /users endpoint is admin-gated, so non-admins never call it.)
   useEffect(() => {
     if (!isAdmin) return;
@@ -76,17 +77,16 @@ export function NpdSampleForm({ defaultType, heading }: {
     listUsers().then((users) => {
       if (cancelled) return;
       const names = users
-        .filter((u) => u.is_admin === true || u.role_name === "business_head")
+        .filter((u) => u.role_name === "business_head")
         .map((u) => (u.full_name ?? "").trim())
         .filter(Boolean);
       setReqOptions(Array.from(new Set(names)));
-    }).catch(() => { /* leave empty — falls back to the profile name */ });
+    }).catch(() => { /* leave empty — the placeholder prompts a selection */ });
     return () => { cancelled = true; };
   }, [isAdmin]);
 
-  // The dropdown always includes the signed-in admin's own name as the default.
-  const requestorChoices = (profileName && !reqOptions.includes(profileName))
-    ? [profileName, ...reqOptions] : reqOptions;
+  // Business heads only — never the signed-in admin's own name.
+  const requestorChoices = reqOptions;
 
   // Mandatory: target article, pcs (>0), weight per piece (>0), warehouse,
   // company, customer. Quantity is derived = pcs × weight per piece (kg).
@@ -224,7 +224,7 @@ export function NpdSampleForm({ defaultType, heading }: {
                   {isAdmin ? (
                     <select className="form-input" value={effectiveRequestor}
                       onChange={(e) => { setRequestorTouched(true); setRequestorTeam(e.target.value); }}>
-                      {requestorChoices.length === 0 && <option value="">Select…</option>}
+                      <option value="">Select a business head…</option>
                       {requestorChoices.map((n) => <option key={n} value={n}>{n}</option>)}
                     </select>
                   ) : (
