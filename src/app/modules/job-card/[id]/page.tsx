@@ -217,6 +217,33 @@ type JobCardDetail = {
     is_balanced?: boolean | null;
     [k: string]: unknown;
   } | null;
+  /** Migration 049: per-batch accounting rows. One entry per existing
+   *  job_card_accounting_v2 row tagged with this JC. The SummaryCard's
+   *  per-batch collapsibles read the matching row (by batch_id) so each
+   *  batch's saved IS_BALANCED + percentages render directly without
+   *  recomputing from the JC-level roll-up. NULL batch_id rows are
+   *  pre-049 legacy rows kept under the COALESCE-0 sentinel. */
+  accounting_per_batch?: Array<{
+    batch_id?: number | null;
+    is_balanced?: boolean | null;
+    balance_difference_qty?: number | string | null;
+    total_input_qty?: number | string | null;
+    output_qty?: number | string | null;
+    process_loss_qty?: number | string | null;
+    wastage_qty?: number | string | null;
+    extra_give_away_qty?: number | string | null;
+    offgrade_total_qty?: number | string | null;
+    control_sample_qty?: number | string | null;
+    balance_material_qty?: number | string | null;
+    process_loss_pct?: number | string | null;
+    ega_loss_pct?: number | string | null;
+    invisible_loss_pct?: number | string | null;
+    total_loss_pct?: number | string | null;
+    offgrade_pct?: number | string | null;
+    rejection_pct?: number | string | null;
+    allowed_balance_tolerance_pct?: number | null;
+    [k: string]: unknown;
+  }> | null;
 
   /** Qty carried in from the previous stage (only > 0 for stages 2+). Used
    *  by the server's loss formulas as part of `total_input = rm_issued +
@@ -366,6 +393,24 @@ function computeBatchSummary(
   articles: BatchSummaryArticle[],
 ): SummaryCardData {
   const batchId = batch.batch_id;
+  // Migration 049 — every numeric field shown in the per-batch summary
+  // (kg + percentages + IS_BALANCED) is derived from local state inside
+  // this function: BatchRow snapshot (kg buckets) + detail rows filtered
+  // by batch_id (consumption / byproducts / balance). NEVER mix in
+  // server-stored percentages from accounting_per_batch — pre-049 the
+  // server row was JC-level, so any per-batch percentages it carries
+  // are leaked from whichever batch saved last. The screenshot symptom
+  // was "Process Loss 0.00 kg | 6.00%" caused by exactly that mismatch.
+  //
+  // For batches saved AFTER migration 049 the saved percentages would
+  // agree with the local recompute anyway (kg and pct were written from
+  // the same form state in the same save). Trusting the local recompute
+  // is then equivalent — but guarantees self-consistency on legacy data
+  // too, where the saved pct may belong to a different batch.
+  //
+  // accounting_per_batch is still surfaced on the JobCardDetail type so
+  // callers that want the raw server snapshot (e.g. debugging tools)
+  // can read it; computeBatchSummary just doesn't use it.
   // Consumption rows (PM excluded — they don't convert into FG mass).
   const consumption = consumptionStateFromDetail(detail.consumption_lines, batchId);
   const articleByKey = new Map<string, BatchSummaryArticle>();
@@ -3388,30 +3433,22 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
       ? ((lossKg + egaAbsKg + offgradeTotal) / lossDenom) * 100
       : null;
 
-    // Prefer server-authoritative numbers when the JC payload has them
-    // (i.e. after at least one save and an /accounting refetch on the
-    // page). Falls back to the locally-computed preview otherwise.
-    const acc = effectiveAccounting;
-    const numFromServer = (k: keyof NonNullable<JobCardDetail["accounting"]>) =>
-      acc && acc[k] != null && Number.isFinite(Number(acc[k]))
-        ? Number(acc[k])
-        : null;
-
-    const processLossPctSrv   = numFromServer("process_loss_pct");
-    const invisibleLossPctSrv = numFromServer("invisible_loss_pct");
-    const totalLossPctSrv     = numFromServer("total_loss_pct");
-    const egaLossPctSrv       = numFromServer("ega_loss_pct");
-    // other_loss_pct + rejection_pct retired per operator policy
-    // (server still emits them as NULL for back-compat; no longer read).
-    const offgradePctSrv      = numFromServer("offgrade_pct");
-    const balanceDiffSrv      = numFromServer("balance_diff_kg");
-    const balanceDiffPctSrv   = numFromServer("balance_diff_pct");
-    const isBalancedSrv       = acc?.is_balanced;
-
-    // EGA Loss % anchored on FG output, matching the other loss pcts.
-    // Server emits ega_loss_pct rooted in total_input; we prefer the
-    // server value when present, otherwise reconstruct on FG-output
-    // basis like the rest of the local preview.
+    // R10 / Bug 1 fix — the LIVE preview for the currently-selected batch
+    // must NOT mix sources. Previously kg buckets were recomputed from
+    // form state but percentages and balance signals preferred the
+    // server-stored `effectiveAccounting` row. That row was JC-level
+    // (one per JC before migration 049 — and even after 049, the form
+    // state can diverge from any saved batch's row while the operator
+    // is typing). Mixing produced the screenshot's "Process Loss 0.00 kg
+    // | 6.00%" — kg from live state, % from a stale prior save with a
+    // different process_loss number.
+    //
+    // The live `summary` now derives EVERY field from local state. The
+    // SummaryCard's per-batch collapsibles for *other* batches still read
+    // from the persisted server snapshot via computeBatchSummary, which
+    // is internally consistent. The total roll-up sums per-batch
+    // snapshots + the live summary for the selected batch, so it stays
+    // accurate too.
     const localEgaLossPct = lossDenom > 0 && egaAbsKg > 0
       ? (egaAbsKg / lossDenom) * 100
       : null;
@@ -3432,15 +3469,18 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
       egaKg: egaAbsKg,
       additivesKg: additivesKgTotal,
       lossKg, balTotal, offgradeTotal, ctrlSample,
-      // R9 percentages — server-authoritative when available, live preview otherwise.
-      processLossPct:   processLossPctSrv   ?? localProcessLossPct,
-      egaLossPct:       egaLossPctSrv       ?? localEgaLossPct,
-      invisibleLossPct: invisibleLossPctSrv ?? localInvisibleLossPct,
-      totalLossPct:     totalLossPctSrv     ?? localTotalLossPct,
-      offgradePct:      offgradePctSrv      ?? pct(offgradeTotal),
-      balanceDiff:      balanceDiffSrv      ?? balanceDiff,
-      balanceDiffPct:   balanceDiffPctSrv   ?? balanceDiffPct,
-      isBalanced:       typeof isBalancedSrv === "boolean" ? isBalancedSrv : isBalanced,
+      // R9 percentages — derived from the SAME local state as the kg
+      // buckets above so kg/% always agree. (Bug 1 fix: previously these
+      // preferred server-stored values, producing kg-vs-% mismatches when
+      // the operator's typed state diverged from the last persisted save.)
+      processLossPct:   localProcessLossPct,
+      egaLossPct:       localEgaLossPct,
+      invisibleLossPct: localInvisibleLossPct,
+      totalLossPct:     localTotalLossPct,
+      offgradePct:      pct(offgradeTotal),
+      balanceDiff,
+      balanceDiffPct,
+      isBalanced,
       tolerancePct:     allowedTolerancePctUnits,
       inputBasis,
     };
@@ -3948,6 +3988,11 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
           rejection_qty:        0,  // off-grade and rejection are one bucket per operator policy
           wastage_qty:          wastageForSave,
           control_sample_qty:   num(controlSampleKg),
+          // Migration 049 — tag the summary row with the picked batch so
+          // multiple batches on the same JC each persist their own
+          // IS_BALANCED / percentages instead of stomping a single
+          // JC-level row. Older servers ignore the unknown field.
+          batch_id:             selectedBatchId,
         };
         const sumRes = await apiFetch(
           `/api/v1/production/job-cards-v2/${detail.job_card_id}/accounting/summary`,
