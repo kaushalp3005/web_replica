@@ -12,7 +12,7 @@ import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
 import { sampleCaps, roleNameOf, isAdminMe } from "@/lib/sample-roles";
 import type { MeResponse } from "@/lib/auth";
 import {
-  getDevJobCard, replaceDevLines, startDevJobCard, closeDevJobCard, cancelDevJobCard, dispatchDevJobCard,
+  getDevJobCard, replaceDevLines, startDevJobCard, closeDevJobCard, cancelDevJobCard,
   addDevPhase, replacePhaseLines, startDevPhase, completeDevPhase, deleteDevPhase, promoteApproval,
   promoteRejectByEmail,
   type DevJobCard, type DevLine, type DevPhase, type DevPhaseCompleteBody, type PromoteGate,
@@ -221,10 +221,9 @@ export default function DevJobCardDetailPage() {
     if (reason == null) return; // user dismissed
     run(() => cancelDevJobCard(id, reason || "cancelled"));
   }
-  function dispatch() {
-    const recipient = window.prompt("Recipient for this sample dispatch?");
-    if (recipient == null) return;
-    run(() => dispatchDevJobCard(id, { recipient: recipient || undefined }));
+  function openGatePass() {
+    // A4 Delivery Challan + Gate Pass print page (reproduces the IMS direct-out DC).
+    window.open(`/modules/npd-development/job-cards/${id}/gate-pass`, "_blank", "noopener");
   }
   // Trial phases (multi-day). Each phase clones the previous phase's recipe, then
   // is edited / started / completed (with output + accounting) independently.
@@ -584,18 +583,21 @@ export default function DevJobCardDetailPage() {
                     uom={jc.output_uom || jc.uom || "kg"} className="mt-3" />
                 )}
                 {jc.output_notes && <p className="mt-2 text-[13px] text-[var(--text-secondary)]">{jc.output_notes}</p>}
-                {/* Step C — issue the developed FG sample out of R&D. */}
-                {jc.dispatched_at ? (
+                {/* Historical dispatch info (if the sample was ever issued out). */}
+                {jc.dispatched_at && (
                   <p className="mt-3 text-[12px] text-[var(--text-secondary)]">
                     Dispatched {(jc.dispatched_at ?? "").slice(0, 10)} to <strong>{jc.dispatch_recipient || "—"}</strong>
                     {jc.dispatch_mat_doc_id ? ` · GI ${jc.dispatch_mat_doc_id}` : ""}
                   </p>
-                ) : caps.canNpd && jc.fg_sample_batch_id ? (
-                  <div className="mt-3">
-                    <button disabled={busy} onClick={dispatch}
-                      className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Issue / dispatch sample</button>
-                  </div>
-                ) : null}
+                )}
+                {/* Permanent gate pass — A4 Delivery Challan + Gate Pass for the FG sample. */}
+                <div className="mt-3">
+                  <button onClick={openGatePass}
+                    className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium hover:bg-[var(--aws-orange-hover)] inline-flex items-center gap-1.5">
+                    <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
+                    Download gate pass
+                  </button>
+                </div>
               </Card>
             )}
           </div>

@@ -140,8 +140,13 @@ export default function NpdDevJobCardsPage() {
                 </div>
                 <div className="text-[11px] text-[var(--text-muted)] font-mono">{r.dev_jc_number}</div>
                 <div className="mt-0.5 text-[13px] text-[var(--text-primary)] truncate">{r.title}</div>
-                <div className="mt-1 text-[12px] text-[var(--text-secondary)] flex flex-wrap gap-x-3">
+                {r.fg_sku_name && <div className="text-[12px] text-[var(--text-secondary)] truncate">Target: {r.fg_sku_name}</div>}
+                <div className="mt-1 text-[12px] text-[var(--text-secondary)] flex flex-wrap gap-x-3 gap-y-0.5">
+                  {r.customer_name && <span>{r.customer_name}</span>}
+                  {r.warehouse && <span>{r.warehouse}</span>}
+                  {r.target_qty != null && <span>{Number(r.target_qty).toLocaleString("en-IN")} {r.uom ?? "kg"}</span>}
                   <span>{r.line_count ?? 0} line(s)</span>
+                  {r.yield_pct != null && <span>{Number(r.yield_pct).toLocaleString("en-IN")}% yield</span>}
                   {r.promoted_bom_id != null && <span>→ BOM #{r.promoted_bom_id}</span>}
                   <span>{(r.created_at ?? "").slice(0, 10)}</span>
                 </div>
@@ -150,14 +155,18 @@ export default function NpdDevJobCardsPage() {
           </div>
 
           {/* Desktop table */}
-          <div className="hidden md:block bg-white border border-[var(--aws-border)] rounded-md overflow-hidden">
+          <div className="hidden md:block bg-white border border-[var(--aws-border)] rounded-md overflow-x-auto">
             <table className="w-full text-[13px]">
               <thead>
                 <tr className="bg-[var(--surface-subtle)] text-left text-[12px] text-[var(--text-secondary)]">
                   <th className="px-3 py-2 font-semibold">Job card</th>
                   <th className="px-3 py-2 font-semibold">Title</th>
+                  <th className="px-3 py-2 font-semibold">Target FG</th>
+                  <th className="px-3 py-2 font-semibold">Customer</th>
+                  <th className="px-3 py-2 font-semibold">Warehouse</th>
+                  <th className="px-3 py-2 font-semibold text-right">Target qty</th>
                   <th className="px-3 py-2 font-semibold">Status</th>
-                  <th className="px-3 py-2 font-semibold text-right">Lines</th>
+                  <th className="px-3 py-2 font-semibold text-right">Yield</th>
                   <th className="px-3 py-2 font-semibold">Promoted BOM</th>
                   <th className="px-3 py-2 font-semibold">Created</th>
                 </tr>
@@ -166,12 +175,16 @@ export default function NpdDevJobCardsPage() {
                 {rows.map((r) => (
                   <tr key={r.id} onClick={() => openRow(r.id)}
                     className="border-t border-[var(--surface-divider)] hover:bg-[var(--surface-subtle)] cursor-pointer">
-                    <td className="px-3 py-2 font-medium text-[var(--text-primary)] font-mono tabular-nums">{r.id}<div className="text-[11px] font-normal text-[var(--text-muted)]">{r.dev_jc_number}</div></td>
-                    <td className="px-3 py-2 max-w-[280px] truncate" title={r.title}>{r.title}</td>
+                    <td className="px-3 py-2 font-medium text-[var(--text-primary)] font-mono tabular-nums whitespace-nowrap">{r.id}<div className="text-[11px] font-normal text-[var(--text-muted)]">{r.dev_jc_number}</div></td>
+                    <td className="px-3 py-2 max-w-[200px] truncate" title={r.title}>{r.title}</td>
+                    <td className="px-3 py-2 max-w-[200px] truncate" title={r.fg_sku_name ?? ""}>{r.fg_sku_name ?? "—"}</td>
+                    <td className="px-3 py-2 max-w-[160px] truncate" title={r.customer_name ?? ""}>{r.customer_name ?? "—"}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">{r.warehouse ?? "—"}</td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap tabular-nums">{r.target_qty != null ? `${Number(r.target_qty).toLocaleString("en-IN")} ${r.uom ?? "kg"}` : "—"}</td>
                     <td className="px-3 py-2"><DevJcStatusPill status={r.status} /></td>
-                    <td className="px-3 py-2 text-right">{r.line_count ?? 0}</td>
-                    <td className="px-3 py-2 text-[var(--text-secondary)]">{r.promoted_bom_id != null ? `BOM #${r.promoted_bom_id}` : "—"}</td>
-                    <td className="px-3 py-2 text-[var(--text-secondary)]">{(r.created_at ?? "").slice(0, 10)}</td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap tabular-nums">{r.yield_pct != null ? `${Number(r.yield_pct).toLocaleString("en-IN")}%` : "—"}</td>
+                    <td className="px-3 py-2 text-[var(--text-secondary)] whitespace-nowrap">{r.promoted_bom_id != null ? `BOM #${r.promoted_bom_id}` : "—"}</td>
+                    <td className="px-3 py-2 text-[var(--text-secondary)] whitespace-nowrap">{(r.created_at ?? "").slice(0, 10)}</td>
                   </tr>
                 ))}
               </tbody>

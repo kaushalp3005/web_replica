@@ -113,6 +113,9 @@ export interface DevJobCard {
   phases?: DevPhase[];
   // Pending dual-approval promote gate (null when no live request).
   promote_gate?: PromoteGate | null;
+  // Gate-pass digital signatures — the promote approvers by name + decided date.
+  // Keyed by gate ('INV_MGR' = inventory manager, 'REQUESTOR_BH' = business head).
+  gate_signatures?: Record<string, { name?: string | null; status?: string | null; decided_at?: string | null }>;
 }
 
 export interface DevJobCardCreate {
