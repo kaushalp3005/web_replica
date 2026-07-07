@@ -237,3 +237,22 @@ export const MODULES: ModuleItem[] = [
     Icon: AdminIcon,
   },
 ];
+
+// ── Role scoping ────────────────────────────────────────────────────────────
+// Roles that are restricted to an explicit set of module routes. A non-admin
+// user holding a scoped role sees ONLY the listed routes on /modules — this
+// overrides the default adminOnly/allowedRoles visibility (so a scoped role can
+// see a tile that is otherwise adminOnly, e.g. Purchase). Admins are never
+// scoped. A user holding several scoped roles gets the union of their routes.
+export const ROLE_MODULE_SCOPE: Record<string, string[]> = {
+  purchase_manager: ["purchase"],
+};
+
+/** The routes a scoped user may see, or `null` when the user is not scoped (in
+ *  which case the caller applies the default adminOnly/allowedRoles rules).
+ *  Admins are never scoped. */
+export function scopedRoutesFor(roles: string[], isAdmin: boolean): string[] | null {
+  if (isAdmin) return null;
+  const routes = [...new Set(roles.flatMap((r) => ROLE_MODULE_SCOPE[r] ?? []))];
+  return routes.length > 0 ? routes : null;
+}
