@@ -4,7 +4,7 @@
 // PO Upload is the purchase entry point on the web.
 
 import { useRouter } from "next/navigation";
-import { useRequireAuth, useIsAdmin } from "@/lib/user";
+import { useRequireAuth, useHasRole } from "@/lib/user";
 import { BackLink } from "@/components/BackLink";
 import { PurchaseChrome } from "./_chrome";
 
@@ -19,7 +19,9 @@ const SUB_MODULES: SubModule[] = [
 export default function PurchaseLandingPage() {
   const router = useRouter();
   useRequireAuth(router.replace);
-  const isAdmin = useIsAdmin();
+  // Admins AND purchase managers may use the Purchase module. useHasRole
+  // returns true for admins too, so this covers both.
+  const canAccess = useHasRole("purchase_manager");
 
   return (
     <PurchaseChrome title="Purchase">
@@ -32,7 +34,7 @@ export default function PurchaseLandingPage() {
           Upload, review, filter, and export purchase orders.
         </p>
       </div>
-      {!isAdmin ? (
+      {!canAccess ? (
         <section className="bg-white border border-[var(--aws-border)] rounded-md p-6 text-[13px] text-[var(--text-secondary)]">
           You don&rsquo;t have access to the Purchase module. Ask an administrator to grant you access, or switch to a different account.
         </section>
