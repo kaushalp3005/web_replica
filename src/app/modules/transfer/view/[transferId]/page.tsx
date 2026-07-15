@@ -42,29 +42,11 @@ function statusTone(status?: string | null): string {
 
 type ConsolidatedLine = TransferLine & { _box_count: number };
 
-function InfoCard({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="bg-white border border-[var(--aws-border)] rounded-md p-3">
-      <div className="text-[11px] uppercase tracking-wide text-[var(--text-secondary)]">{label}</div>
-      <div className="text-[13px] font-medium text-[var(--text-primary)] mt-0.5 break-words">{children}</div>
-    </div>
-  );
-}
-
 function Tile({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="text-center">
       <div className="text-[18px] font-semibold text-[var(--text-primary)]">{value}</div>
       <div className="text-[11px] text-[var(--text-secondary)]">{label}</div>
-    </div>
-  );
-}
-
-function Detail({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div>
-      <div className="text-[11px] text-[var(--text-secondary)]">{label}</div>
-      <div className="text-[12px] text-[var(--text-primary)]">{value}</div>
     </div>
   );
 }
@@ -191,21 +173,37 @@ export default function TransferViewPage() {
           {/* Transfer information */}
           <div className="bg-white border border-[var(--aws-border)] rounded-md p-4 space-y-4">
             <div className="text-[13px] font-semibold text-[var(--text-primary)]">Transfer information</div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              <InfoCard label="Transfer Date">{formatDate(transfer.stock_trf_date)}</InfoCard>
-              <InfoCard label="From">{getDisplayWarehouseName(transfer.from_warehouse) || "N/A"}</InfoCard>
-              <InfoCard label="To">{getDisplayWarehouseName(transfer.to_warehouse) || "N/A"}</InfoCard>
-              {transfer.from_cold_unit && <InfoCard label="Cold Unit">{getDisplayWarehouseName(transfer.from_cold_unit) || transfer.from_cold_unit}</InfoCard>}
-              {transfer.request_no && <InfoCard label="Request No">{transfer.request_no}</InfoCard>}
-              <InfoCard label="Vehicle">{transfer.vehicle_no || "N/A"}</InfoCard>
-              {transfer.driver_name && <InfoCard label="Driver">{transfer.driver_name}</InfoCard>}
-              {transfer.approved_by && <InfoCard label="Approval Authority">{transfer.approved_by}</InfoCard>}
-              {transfer.created_by && <InfoCard label="Created By">{transfer.created_by}</InfoCard>}
-              {transfer.created_ts && <InfoCard label="Created">{formatDate(transfer.created_ts)}</InfoCard>}
-              {transfer.approved_ts && <InfoCard label="Approved">{formatDate(transfer.approved_ts)}</InfoCard>}
-              {transfer.reason_code && <InfoCard label="Reason">{transfer.reason_code}</InfoCard>}
-              {transfer.remark && <InfoCard label="Remark">{transfer.remark}</InfoCard>}
-            </div>
+            {(() => {
+              const infoRows = ([
+                { l: "Transfer Date", v: formatDate(transfer.stock_trf_date) },
+                { l: "From", v: getDisplayWarehouseName(transfer.from_warehouse) || "N/A" },
+                { l: "To", v: getDisplayWarehouseName(transfer.to_warehouse) || "N/A" },
+                transfer.from_cold_unit && { l: "Cold Unit", v: getDisplayWarehouseName(transfer.from_cold_unit) || transfer.from_cold_unit },
+                transfer.request_no && { l: "Request No", v: transfer.request_no },
+                { l: "Vehicle", v: transfer.vehicle_no || "N/A" },
+                transfer.driver_name && { l: "Driver", v: transfer.driver_name },
+                transfer.approved_by && { l: "Approval Authority", v: transfer.approved_by },
+                transfer.created_by && { l: "Created By", v: transfer.created_by },
+                transfer.created_ts && { l: "Created", v: formatDate(transfer.created_ts) },
+                transfer.approved_ts && { l: "Approved", v: formatDate(transfer.approved_ts) },
+                transfer.reason_code && { l: "Reason", v: transfer.reason_code },
+                transfer.remark && { l: "Remark", v: transfer.remark },
+              ].filter(Boolean)) as { l: string; v: React.ReactNode }[];
+              return (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[12px]">
+                    <tbody>
+                      {infoRows.map((r) => (
+                        <tr key={r.l} className="border-b border-[var(--aws-border)]/50">
+                          <td className="py-1.5 pr-4 text-[var(--text-secondary)] whitespace-nowrap align-top w-40">{r.l}</td>
+                          <td className="py-1.5 font-medium text-[var(--text-primary)] break-words">{r.v}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-w-md">
               <div className="bg-sky-50 border border-sky-100 rounded-md p-3 text-center">
                 <div className="text-[18px] font-semibold text-sky-700">{consolidatedLines.length}</div>
@@ -228,20 +226,23 @@ export default function TransferViewPage() {
               <div className="px-4 py-3 border-b border-[var(--aws-border)] text-[13px] font-semibold text-[var(--text-primary)]">
                 Receipts — Transfer IN ({grns.length})
               </div>
-              <div className="p-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {grns.map((g) => (
-                  <div key={g.id} className="border border-[var(--aws-border)] rounded-md p-3 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[12px] font-semibold text-[var(--text-primary)] font-mono">{g.grn_number}</span>
-                      <span className={`text-[11px] px-1.5 rounded ${statusTone(g.status)}`}>{g.status}</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
-                      <Detail label="Received By" value={g.received_by || "—"} />
-                      <Detail label="Received At" value={formatDate(g.received_at)} />
-                      <Detail label="Boxes Received" value={`${g.received_boxes} / ${boxes.length}`} />
-                    </div>
-                  </div>
-                ))}
+              <div className="p-3 overflow-x-auto">
+                <table className="w-full text-[12px] whitespace-nowrap">
+                  <thead><tr className="text-left text-[var(--text-secondary)] border-b border-[var(--aws-border)]">
+                    <th className="py-1.5 pr-3">GRN Number</th><th className="pr-3">Status</th><th className="pr-3">Received By</th><th className="pr-3">Received At</th><th className="text-right">Boxes Received</th>
+                  </tr></thead>
+                  <tbody>
+                    {grns.map((g) => (
+                      <tr key={g.id} className="border-b border-[var(--aws-border)]/50">
+                        <td className="py-1.5 pr-3 font-mono text-[var(--text-primary)]">{g.grn_number}</td>
+                        <td className="pr-3"><span className={`text-[11px] px-1.5 rounded ${statusTone(g.status)}`}>{g.status}</span></td>
+                        <td className="pr-3">{g.received_by || "—"}</td>
+                        <td className="pr-3">{formatDate(g.received_at)}</td>
+                        <td className="text-right">{g.received_boxes} / {boxes.length}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}
@@ -252,32 +253,35 @@ export default function TransferViewPage() {
               <div className="px-4 py-3 border-b border-[var(--aws-border)] text-[13px] font-semibold text-[var(--text-primary)]">
                 Items Details ({consolidatedLines.length})
               </div>
-              <div className="p-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {consolidatedLines.map((l, i) => {
-                  const isFG = (l.material_type || "").toUpperCase() === "FG";
-                  return (
-                    <div key={i} className="border border-[var(--aws-border)] rounded-md p-3 space-y-2">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-[11px] px-1.5 rounded bg-[var(--background)] text-[var(--text-secondary)]">Item #{i + 1}</span>
-                        <span className="text-[11px] px-1.5 rounded border border-[var(--aws-border)] text-[var(--text-secondary)]">{l.material_type || "—"}</span>
-                        {l._box_count > 1 && <span className="text-[11px] px-1.5 rounded bg-amber-100 text-amber-800">{l._box_count} boxes</span>}
-                      </div>
-                      <div className="text-[13px] font-medium text-[var(--text-primary)]">{l.item_description}</div>
-                      <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
-                        <Detail label="Category" value={l.item_category || "—"} />
-                        <Detail label="Sub Category" value={l.sub_category || "—"} />
-                        <Detail label="Quantity" value={l.quantity || "0"} />
-                        <Detail label="UOM" value={l.uom || "—"} />
-                        <Detail label={`Pack Size (${isFG ? "gm" : "Kg"})`} value={l.pack_size || "0"} />
-                        {l.unit_pack_size && l.unit_pack_size !== "0" && <Detail label="Unit Pack Size/Count" value={l.unit_pack_size} />}
-                        <Detail label="Net Weight" value={`${l.net_weight || "0"} kg`} />
-                        <Detail label="Total Weight" value={`${l.total_weight || "0"} kg`} />
-                        {l.batch_number && <Detail label="Batch Number" value={l.batch_number} />}
-                        {l.lot_number && <Detail label="Lot Number" value={l.lot_number} />}
-                      </div>
-                    </div>
-                  );
-                })}
+              <div className="p-3 overflow-x-auto">
+                <table className="w-full text-[12px] whitespace-nowrap">
+                  <thead><tr className="text-left text-[var(--text-secondary)] border-b border-[var(--aws-border)]">
+                    <th className="py-1.5 pr-3">#</th><th className="pr-3">Description</th><th className="pr-3">Type</th><th className="pr-3">Category</th><th className="pr-3">Sub Category</th><th className="pr-3 text-right">Qty</th><th className="pr-3">UOM</th><th className="pr-3 text-right">Pack Size</th><th className="pr-3 text-right">Unit Pack/Count</th><th className="pr-3 text-right">Net Wt</th><th className="pr-3 text-right">Total Wt</th><th className="pr-3">Batch</th><th className="pr-3">Lot</th><th className="text-right">Boxes</th>
+                  </tr></thead>
+                  <tbody>
+                    {consolidatedLines.map((l, i) => {
+                      const isFG = (l.material_type || "").toUpperCase() === "FG";
+                      return (
+                        <tr key={i} className="border-b border-[var(--aws-border)]/50">
+                          <td className="py-1.5 pr-3">{i + 1}</td>
+                          <td className="pr-3 font-medium text-[var(--text-primary)]">{l.item_description}</td>
+                          <td className="pr-3">{l.material_type || "—"}</td>
+                          <td className="pr-3">{l.item_category || "—"}</td>
+                          <td className="pr-3">{l.sub_category || "—"}</td>
+                          <td className="pr-3 text-right">{l.quantity || "0"}</td>
+                          <td className="pr-3">{l.uom || "—"}</td>
+                          <td className="pr-3 text-right">{l.pack_size || "0"} {isFG ? "gm" : "Kg"}</td>
+                          <td className="pr-3 text-right">{l.unit_pack_size && l.unit_pack_size !== "0" ? l.unit_pack_size : "—"}</td>
+                          <td className="pr-3 text-right">{l.net_weight || "0"} kg</td>
+                          <td className="pr-3 text-right">{l.total_weight || "0"} kg</td>
+                          <td className="pr-3">{l.batch_number || "—"}</td>
+                          <td className="pr-3">{l.lot_number || "—"}</td>
+                          <td className="text-right">{l._box_count}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}
@@ -288,28 +292,29 @@ export default function TransferViewPage() {
               <div className="px-4 py-3 border-b border-[var(--aws-border)] text-[13px] font-semibold text-[var(--text-primary)]">
                 Scanned Boxes Details ({boxes.length})
               </div>
-              <div className="p-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                {boxes.map((b) => (
-                  <div key={b.id} className="border border-[var(--aws-border)] rounded-md p-3 space-y-2 hover:shadow-md transition-shadow">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[12px] font-semibold text-[var(--text-primary)]">Box #{b.box_number}</span>
-                      <span className="text-[11px] px-1.5 rounded bg-emerald-100 text-emerald-800">Scanned</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
-                      <Detail label="Article" value={b.article || "N/A"} />
-                      <Detail label="Lot Number" value={b.lot_number || "N/A"} />
-                      <Detail label="Box ID" value={<span className="font-mono">{b.box_id || "N/A"}</span>} />
-                      <Detail label="Batch Number" value={b.batch_number || "N/A"} />
-                      <Detail label="Transaction No" value={<span className="font-mono">{b.transaction_no || "N/A"}</span>} />
-                      {b.source_unit && <Detail label="From (cold)" value={getDisplayWarehouseName(b.source_unit) || b.source_unit} />}
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 pt-1">
-                      <div className="bg-sky-50 rounded p-1.5 text-center"><div className="text-[13px] font-semibold text-sky-700">{b.net_weight} kg</div><div className="text-[10px] text-[var(--text-secondary)]">Net</div></div>
-                      <div className="bg-violet-50 rounded p-1.5 text-center"><div className="text-[13px] font-semibold text-violet-700">{b.gross_weight} kg</div><div className="text-[10px] text-[var(--text-secondary)]">Gross</div></div>
-                    </div>
-                    {b.created_at && <div className="text-[10px] text-[var(--text-secondary)] pt-1 border-t border-[var(--aws-border)]">Scanned: {formatDate(b.created_at)}</div>}
-                  </div>
-                ))}
+              <div className="p-3 overflow-x-auto">
+                <table className="w-full text-[12px] whitespace-nowrap">
+                  <thead><tr className="text-left text-[var(--text-secondary)] border-b border-[var(--aws-border)]">
+                    <th className="py-1.5 pr-3">Box #</th><th className="pr-3">Status</th><th className="pr-3">Article</th><th className="pr-3">Lot Number</th><th className="pr-3">Box ID</th><th className="pr-3">Batch Number</th><th className="pr-3">Transaction No</th><th className="pr-3">From (cold)</th><th className="pr-3 text-right">Net</th><th className="pr-3 text-right">Gross</th><th className="text-right">Scanned At</th>
+                  </tr></thead>
+                  <tbody>
+                    {boxes.map((b) => (
+                      <tr key={b.id} className="border-b border-[var(--aws-border)]/50 hover:bg-[var(--background)]">
+                        <td className="py-1.5 pr-3 font-semibold text-[var(--text-primary)]">{b.box_number}</td>
+                        <td className="pr-3"><span className="text-[11px] px-1.5 rounded bg-emerald-100 text-emerald-800">Scanned</span></td>
+                        <td className="pr-3">{b.article || "N/A"}</td>
+                        <td className="pr-3">{b.lot_number || "N/A"}</td>
+                        <td className="pr-3 font-mono">{b.box_id || "N/A"}</td>
+                        <td className="pr-3">{b.batch_number || "N/A"}</td>
+                        <td className="pr-3 font-mono">{b.transaction_no || "N/A"}</td>
+                        <td className="pr-3">{b.source_unit ? (getDisplayWarehouseName(b.source_unit) || b.source_unit) : "—"}</td>
+                        <td className="pr-3 text-right text-sky-700">{b.net_weight} kg</td>
+                        <td className="pr-3 text-right text-violet-700">{b.gross_weight} kg</td>
+                        <td className="text-right">{b.created_at ? formatDate(b.created_at) : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
               {/* Boxes summary */}
               <div className="px-4 py-3 border-t border-[var(--aws-border)] grid grid-cols-2 md:grid-cols-5 gap-3">

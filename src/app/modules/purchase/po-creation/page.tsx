@@ -69,6 +69,7 @@ export default function PoCreationPage(): React.JSX.Element {
     fileName: string;
     entity: string;
     preview: PreviewResponse;
+    requestId: string | null;
   } | null>(null);
 
   // ── Entity selector for upload zone ──────────────────────────────────────
@@ -223,10 +224,10 @@ export default function PoCreationPage(): React.JSX.Element {
 
     setUploading(true);
     try {
-      const preview = await previewPo(file, entity);
+      const { preview, requestId } = await previewPo(file, entity);
       // Bump nonce so PoPreview always remounts fresh
       setUploadNonce((n) => n + 1);
-      setPreviewData({ fileName: file.name, entity, preview });
+      setPreviewData({ fileName: file.name, entity, preview, requestId });
       setMode("preview");
       setCommitResult(null);
     } catch (err) {
@@ -296,6 +297,10 @@ export default function PoCreationPage(): React.JSX.Element {
           result={commitResult}
           hasErrors={hasErrors}
           onDismiss={() => setCommitResult(null)}
+          onUploadAnother={() => {
+            setCommitResult(null);
+            fileInputRef.current?.click();
+          }}
         />
       ) : null}
 
@@ -338,6 +343,7 @@ export default function PoCreationPage(): React.JSX.Element {
           fileName={previewData.fileName}
           entity={previewData.entity}
           preview={previewData.preview}
+          requestId={previewData.requestId}
           onCancel={handleCancel}
           onCommitted={handleCommitted}
         />
@@ -490,10 +496,12 @@ function CommitResultBanner({
   result,
   hasErrors,
   onDismiss,
+  onUploadAnother,
 }: {
   result: CommitResponse;
   hasErrors: boolean;
   onDismiss: () => void;
+  onUploadAnother: () => void;
 }): React.JSX.Element {
   const created = result.created?.length ?? 0;
   const updated = result.updated?.length ?? 0;
@@ -557,14 +565,22 @@ function CommitResultBanner({
         >
           {hasErrors ? "Commit completed with errors" : "Commit complete"}
         </span>
-        <button
-          type="button"
-          onClick={onDismiss}
-          aria-label="Dismiss"
-          className="h-7 px-3 text-[12px] rounded-[2px] border bg-white hover:border-[var(--aws-navy)] border-[var(--aws-border-strong)] text-[var(--text-secondary)]"
-        >
-          Dismiss
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onDismiss}
+            className="h-7 px-3 text-[12px] rounded-[2px] border bg-white hover:border-[var(--aws-navy)] border-[var(--aws-border-strong)] text-[var(--text-secondary)]"
+          >
+            Done
+          </button>
+          <button
+            type="button"
+            onClick={onUploadAnother}
+            className="h-7 px-3 text-[12px] rounded-[2px] border bg-[var(--aws-navy)] text-white border-[var(--aws-navy)] hover:bg-[#002244]"
+          >
+            Upload another
+          </button>
+        </div>
       </div>
 
       {/* KPI grid */}

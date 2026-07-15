@@ -13,11 +13,12 @@ import {
   type PoListItem,
   type PoLineOut,
   type PoListQuery,
-  type PoListResponse,
+  type ReceiptSummary,
   listPos,
   getPoLines,
+  getReceiptSummary,
   fetchAllPosForExport,
-  buildPoCsv,
+  buildPoXlsx,
   downloadBlob,
   fmtNum,
   PO_EXPORT_COLUMNS,
@@ -34,25 +35,49 @@ import { SendIntimationModal } from "./_SendIntimationModal";
 
 // ── QC status helpers ─────────────────────────────────────────────────────────
 
-// Per-transaction status filter values (mirrors QcTxnStatus + an "all" sentinel).
-type QcFilter = "all" | QcTxnStatus;
+// ── Section grouping (Today / Pending / Completed) ─────────────────────────────
+// The listing is split into three sections for the receiving desk:
+//   • Today's PO   — po_date is today (local), whatever its QC status
+//   • Pending PO   — not yet completed (pending arrival or arrived), not dated today
+//   • Completed PO — QC completed, not dated today
+// The partition is mutually exclusive with Today taking priority (a PO dated
+// today shows under Today regardless of status). It is decided SERVER-SIDE via
+// the `section` list param, and each section is fetched + paginated independently
+// (page_size 20), so counts and pages are accurate over the whole dataset.
 
-const QC_FILTER_CHIPS: { value: QcFilter; label: string }[] = [
-  { value: "all", label: "All" },
-  { value: "pending_arrival", label: "Pending arrival" },
-  { value: "arrived", label: "Arrived" },
-  { value: "completed", label: "Completed" },
+type GroupKey = "today" | "pending" | "completed";
+
+const GROUP_META: { key: GroupKey; label: string; accent: string; bg: string }[] = [
+  { key: "today",     label: "Today's PO",   accent: "var(--aws-orange)",   bg: "#fff5ec" },
+  { key: "pending",   label: "Pending PO",   accent: "#9a5b00",             bg: "#fbf3e7" },
+  { key: "completed", label: "Completed PO", accent: "var(--text-success)", bg: "#eef7f0" },
 ];
 
-// Resolve a row's per-transaction status from the summary map. A txn ABSENT
-// from the summary result means nothing has been sent yet → "pending_arrival".
-function txnStatus(
-  txn: string,
-  summary: Map<string, ArrivalSummaryItem>,
-): QcTxnStatus {
-  const s = summary.get(txn);
-  if (!s) return "pending_arrival";
-  return s.status; // "arrived" | "completed"
+// Backend page size for each section.
+const SECTION_PAGE_SIZE = 20;
+
+// Per-section fetch state (one backend page at a time).
+type SectionState = {
+  items: PoListItem[];
+  total: number;
+  page: number;
+  totalPages: number;
+  loading: boolean;
+  loaded: boolean; // has completed at least one fetch (success or error)
+  error: string | null;
+};
+
+function loadingSection(): SectionState {
+  return { items: [], total: 0, page: 1, totalPages: 1, loading: true, loaded: false, error: null };
+}
+
+// Local YYYY-MM-DD for "today" — built from local date parts so it doesn't drift
+// a day vs a naive UTC toISOString() near midnight.
+function todayYmd(): string {
+  const d = new Date();
+  const m = `${d.getMonth() + 1}`.padStart(2, "0");
+  const day = `${d.getDate()}`.padStart(2, "0");
+  return `${d.getFullYear()}-${m}-${day}`;
 }
 
 // Map a single arrival qc_state to its display label.
@@ -90,11 +115,16 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
   const { query, onQueryChange, search, onSearch, expanded, onToggleExpand } = props;
   const router = useRouter();
 
-  // ── Local state ────────────────────────────────────────────────────────────
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<PoListResponse | null>(null);
+  // ── Per-section state (each section fetched + paginated independently) ──────
+  const [sections, setSections] = useState<Record<GroupKey, SectionState>>(() => ({
+    today: loadingSection(),
+    pending: loadingSection(),
+    completed: loadingSection(),
+  }));
   const [refetchNonce, setRefetchNonce] = useState(0);
+  // "today" boundary — computed once (local date), sent to the backend so the
+  // today/pending/completed split matches the user's calendar day.
+  const [today] = useState(() => todayYmd());
 
   // ── Send intimation modal ──────────────────────────────────────────────────
   const [sendTxn, setSendTxn] = useState<string | null>(null);
@@ -116,39 +146,89 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
     Map<string, { arrivals?: ArrivalItem[]; loading: boolean; error?: string }>
   >(new Map());
 
-  // ── QC status filter chip (client-side, over the current page only) ────────
-  const [qcFilter, setQcFilter] = useState<QcFilter>("all");
+  // ── Receipt summary cache (received-vs-ordered per line, lazy on expand) ────
+  const [receiptCache, setReceiptCache] = useState<
+    Map<string, { summary?: ReceiptSummary; loading: boolean; error?: string }>
+  >(new Map());
 
-  // ── Fetch fingerprint ──────────────────────────────────────────────────────
-  const queryFp = JSON.stringify(
+  // ── Collapsed sections (Today / Pending / Completed) ───────────────────────
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<GroupKey>>(new Set());
+  function toggleGroup(k: GroupKey) {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k); else next.add(k);
+      return next;
+    });
+  }
+
+  // ── Fetch fingerprint (base filters + sort, excluding pagination) ──────────
+  // Section pages are independent, so the shared page/page_size are NOT part of
+  // the fingerprint that triggers a full three-section reload.
+  const baseQueryFp = JSON.stringify(
     Object.entries(query)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .filter(([, v]) => v !== "" && v != null),
+      .filter(([k, v]) => k !== "page" && k !== "page_size" && v !== "" && v != null)
+      .sort(([a], [b]) => a.localeCompare(b)),
   );
 
-  // ── Listing fetch ──────────────────────────────────────────────────────────
+  // Latest query in a ref so loadSectionPage (stable) can read the current
+  // filters without being recreated on every keystroke.
+  const queryRef = useRef(query);
+  queryRef.current = query;
+
+  // Fetch one section's page (page_size 20). Section membership (today / pending
+  // / completed) is decided server-side via the `section` + `today_date` params.
+  const loadSectionPage = useCallback(
+    async (key: GroupKey, page: number, signal?: AbortSignal) => {
+      setSections((prev) => ({ ...prev, [key]: { ...prev[key], loading: true, error: null } }));
+      // Carry the toolbar's filters + sort; drive pagination per section.
+      const base: PoListQuery = { ...queryRef.current };
+      delete base.page;
+      delete base.page_size;
+      try {
+        const resp = await listPos(
+          { ...base, section: key, today_date: today, page, page_size: SECTION_PAGE_SIZE },
+          signal,
+        );
+        if (signal?.aborted) return;
+        setSections((prev) => ({
+          ...prev,
+          [key]: {
+            items: resp.items,
+            total: resp.total,
+            page: resp.page,
+            totalPages: resp.total_pages,
+            loading: false,
+            loaded: true,
+            error: null,
+          },
+        }));
+      } catch (e) {
+        if (signal?.aborted || (e instanceof Error && e.name === "AbortError")) return;
+        setSections((prev) => ({
+          ...prev,
+          [key]: {
+            ...prev[key],
+            loading: false,
+            loaded: true,
+            error: e instanceof Error ? e.message : "Failed to load POs",
+          },
+        }));
+      }
+    },
+    [today],
+  );
+
+  // Reload all three sections (page 1) whenever the base filters/sort change.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const controller = new AbortController();
-    void (async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const resp = await listPos(query, controller.signal);
-        if (controller.signal.aborted) return;
-        setData(resp);
-      } catch (e) {
-        if (controller.signal.aborted) return;
-        if (e instanceof Error && e.name === "AbortError") return;
-        setError(e instanceof Error ? e.message : "Failed to load POs");
-        setData(null);
-      } finally {
-        if (!controller.signal.aborted) setLoading(false);
-      }
-    })();
+    setSections({ today: loadingSection(), pending: loadingSection(), completed: loadingSection() });
+    (["today", "pending", "completed"] as GroupKey[]).forEach((k) => {
+      void loadSectionPage(k, 1, controller.signal);
+    });
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queryFp, refetchNonce]);
+  }, [baseQueryFp, refetchNonce, loadSectionPage]);
 
   // ── Lazy line fetch ────────────────────────────────────────────────────────
   const fetchLines = useCallback(async (txn: string) => {
@@ -208,19 +288,50 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
     }
   }, []);
 
+  // ── Lazy receipt-summary fetch (received-vs-ordered for the expansion) ─────
+  const fetchReceipt = useCallback(async (txn: string) => {
+    await Promise.resolve();
+    setReceiptCache((prev) => {
+      const next = new Map(prev);
+      next.set(txn, { loading: true });
+      return next;
+    });
+    try {
+      const summary = await getReceiptSummary(txn);
+      setReceiptCache((prev) => {
+        const next = new Map(prev);
+        next.set(txn, { summary, loading: false });
+        return next;
+      });
+    } catch (e: unknown) {
+      setReceiptCache((prev) => {
+        const next = new Map(prev);
+        next.set(txn, {
+          loading: false,
+          error: e instanceof Error ? e.message : "Failed to load receipt summary",
+        });
+        return next;
+      });
+    }
+  }, []);
+
   // ── Fetch articles for visible rows (Articles column) ─────────────────────
-  // After data loads, kick off article fetches for every currently-visible row
-  // that hasn't been fetched yet. This populates the Articles summary column.
-  const rows = data?.items ?? [];
-  const rowKeysFp = rows.map((r) => r.transaction_no).join(",");
+  // All rows across the three section pages currently on screen — drives the
+  // per-row QC summary + article-line fetches.
+  const allVisible = [
+    ...sections.today.items,
+    ...sections.pending.items,
+    ...sections.completed.items,
+  ];
+  const rowKeysFp = allVisible.map((r) => r.transaction_no).join(",");
 
   // ── Per-transaction QC summary fetch (badge + filter) ─────────────────────
   // After the listing loads, fetch the QC rollup for ALL visible txns in one
   // call (mirrors the post-load linesCache effect). AbortController guards
   // setState; we defer with Promise.resolve() to dodge set-state-in-effect.
   useEffect(() => {
-    if (rows.length === 0) return;
-    const txns = rows.map((r) => r.transaction_no).filter((t): t is string => !!t);
+    if (allVisible.length === 0) return;
+    const txns = allVisible.map((r) => r.transaction_no).filter((t): t is string => !!t);
     if (txns.length === 0) return;
     const controller = new AbortController();
     void (async () => {
@@ -228,7 +339,11 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
       try {
         const items = await arrivalsSummary(txns, controller.signal);
         if (controller.signal.aborted) return;
-        setQcSummary(new Map(items.map((it) => [it.transaction_no, it])));
+        setQcSummary((prev) => {
+          const next = new Map(prev);
+          for (const it of items) next.set(it.transaction_no, it);
+          return next;
+        });
       } catch (e) {
         if (controller.signal.aborted) return;
         if (e instanceof Error && e.name === "AbortError") return;
@@ -241,8 +356,8 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rowKeysFp, refetchNonce]);
   useEffect(() => {
-    if (rows.length === 0) return;
-    for (const row of rows) {
+    if (allVisible.length === 0) return;
+    for (const row of allVisible) {
       const txn = row.transaction_no;
       if (!txn) continue;
       const entry = linesCache.get(txn);
@@ -263,6 +378,18 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
       const entry = linesCache.get(txn);
       if (!entry || (!entry.loading && entry.error && !entry.lines)) {
         void fetchLines(txn);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [Array.from(expanded).sort().join(",")]);
+
+  // ── Fetch receipt summary for expanded rows (received vs PO quantity) ─────
+  // Same retry-on-re-expand semantics as the lines/arrivals effects above.
+  useEffect(() => {
+    for (const txn of expanded) {
+      const entry = receiptCache.get(txn);
+      if (!entry || (!entry.loading && entry.error && !entry.summary)) {
+        void fetchReceipt(txn);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -305,16 +432,13 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
   }
 
   // Compute modal props when sendTxn is set
-  const sendRow = sendTxn ? (data?.items.find((r) => r.transaction_no === sendTxn) ?? null) : null;
+  const sendRow = sendTxn ? (allVisible.find((r) => r.transaction_no === sendTxn) ?? null) : null;
   const sendLinesState = sendTxn ? linesCache.get(sendTxn) : undefined;
 
-  // ── Apply QC status filter (client-side over the CURRENT page) ────────────
-  // NOTE: this filters only the currently-loaded page; it is NOT a server-side
-  // filter, so counts/pagination reflect the page, not the whole result set.
-  const visibleRows =
-    qcFilter === "all"
-      ? rows
-      : rows.filter((r) => txnStatus(r.transaction_no, qcSummary) === qcFilter);
+  // ── Aggregate load/error state across the three sections ───────────────────
+  const anyLoaded = sections.today.loaded || sections.pending.loaded || sections.completed.loaded;
+  const anyLoading = sections.today.loading || sections.pending.loading || sections.completed.loading;
+  const firstError = sections.today.error ?? sections.pending.error ?? sections.completed.error ?? null;
 
   return (
     <div>
@@ -324,134 +448,70 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
         search={search}
         onSearch={onSearch}
         onRefresh={() => setRefetchNonce((n) => n + 1)}
-        qcFilter={qcFilter}
-        onQcFilterChange={setQcFilter}
       />
 
-      {/* Desktop table */}
-      <div className="hidden md:block bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-[13px] border-collapse">
-            <thead className="bg-[var(--surface-subtle)] text-[var(--text-primary)]">
-              <tr className="border-b border-[var(--aws-border)]">
-                {(() => {
-                  const sort = currentSort();
-                  return (
-                    <>
-                      <Th width={32}>{null}</Th>
-                      <Th sortable col="transaction_no" sort={sort} onSort={handleSort}>Transaction No</Th>
-                      <Th>Entity</Th>
-                      <Th sortable col="po_number" sort={sort} onSort={handleSort}>PO Number</Th>
-                      <Th sortable col="vendor_supplier_name" sort={sort} onSort={handleSort}>Vendor</Th>
-                      <Th>Articles</Th>
-                      <Th>QC Status</Th>
-                      <Th width={72}>{null}</Th>
-                    </>
-                  );
-                })()}
-              </tr>
-            </thead>
-            <tbody>
-              {loading && rows.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="px-3 py-10 text-center text-[var(--text-secondary)]">
-                    <span className="inline-flex items-center gap-2">
-                      <span className="inline-block w-4 h-4 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" />
-                      Loading Purchase Orders…
-                    </span>
-                  </td>
-                </tr>
-              ) : error ? (
-                <tr>
-                  <td colSpan={8} className="px-3 py-8 text-center text-[var(--aws-error)] text-[13px]">{error}</td>
-                </tr>
-              ) : visibleRows.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="px-3 py-12 text-center text-[var(--text-secondary)]">
-                    <p className="font-semibold text-[14px] mb-1">No Purchase Orders</p>
-                    <p className="text-[12px]">
-                      {rows.length > 0 && qcFilter !== "all"
-                        ? "No POs on this page match the selected QC status."
-                        : "No POs match your current filters."}
-                    </p>
-                  </td>
-                </tr>
-              ) : (
-                visibleRows.map((row, i) => {
-                  const txn = row.transaction_no;
-                  const isOpen = expanded.has(txn);
-                  return (
-                    <MaterialInTableRow
-                      key={txn || `idx-${i}`}
-                      row={row}
-                      isOpen={isOpen}
-                      onToggle={() => onToggleExpand(txn)}
-                      onSend={() => handleSendClick(txn)}
-                      onInward={() => router.push(`/modules/purchase/material-in/${encodeURIComponent(txn)}`)}
-                      linesState={linesCache.get(txn)}
-                      qcSummaryItem={qcSummary.get(txn)}
-                      arrivalsState={arrivalsCache.get(txn)}
-                    />
-                  );
-                })
-              )}
-            </tbody>
-          </table>
+      {/* Dashboard sections (Today / Pending / Completed) */}
+      {!anyLoaded && anyLoading ? (
+        <div className="bg-white border border-[var(--aws-border)] rounded-md p-10 text-center text-[var(--text-secondary)]">
+          <span className="inline-flex items-center gap-2 text-[13px]">
+            <span className="inline-block w-4 h-4 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" />
+            Loading Purchase Orders…
+          </span>
         </div>
-      </div>
-
-      {/* Mobile cards */}
-      <div className="md:hidden space-y-2">
-        {loading && rows.length === 0 ? (
-          <div className="bg-white border border-[var(--aws-border)] rounded-md p-8 text-center text-[var(--text-secondary)]">
-            <span className="inline-flex items-center gap-2 text-[13px]">
-              <span className="inline-block w-4 h-4 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" />
-              Loading Purchase Orders…
-            </span>
+      ) : !anyLoaded && firstError ? (
+        <div className="bg-white border border-[var(--aws-border)] rounded-md p-6 text-center text-[var(--aws-error)] text-[13px]">{firstError}</div>
+      ) : (
+        <>
+          {/* KPI strip — one tile per section; click a tile to collapse/expand it */}
+          <div className="grid grid-cols-3 gap-2 sm:gap-3 mb-4">
+            {GROUP_META.map((g) => {
+              const sec = sections[g.key];
+              return (
+                <button
+                  key={g.key}
+                  type="button"
+                  onClick={() => toggleGroup(g.key)}
+                  title={collapsedGroups.has(g.key) ? `Expand ${g.label}` : `Collapse ${g.label}`}
+                  className="text-left bg-white border border-[var(--aws-border)] rounded-md p-3 shadow-[0_1px_1px_rgba(0,28,36,0.18)] hover:shadow-[0_2px_6px_rgba(0,28,36,0.14)] transition-shadow"
+                  style={{ borderTop: `3px solid ${g.accent}` }}
+                >
+                  <div className="text-[10px] sm:text-[11px] uppercase tracking-wide font-bold truncate" style={{ color: g.accent }}>{g.label}</div>
+                  <div className="text-[24px] sm:text-[28px] font-semibold text-[var(--text-primary)] leading-tight mt-0.5 tabular-nums">
+                    {sec.loading && !sec.loaded ? (
+                      <span className="inline-block w-4 h-4 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin align-middle" />
+                    ) : (
+                      sec.total
+                    )}
+                  </div>
+                </button>
+              );
+            })}
           </div>
-        ) : error ? (
-          <div className="bg-white border border-[var(--aws-border)] rounded-md p-6 text-center text-[var(--aws-error)] text-[13px]">{error}</div>
-        ) : visibleRows.length === 0 ? (
-          <div className="bg-white border border-[var(--aws-border)] rounded-md p-8 text-center text-[var(--text-secondary)]">
-            <p className="font-semibold text-[14px] mb-1">No Purchase Orders</p>
-            <p className="text-[12px]">
-              {rows.length > 0 && qcFilter !== "all"
-                ? "No POs on this page match the selected QC status."
-                : "No POs match your current filters."}
-            </p>
-          </div>
-        ) : (
-          visibleRows.map((row, i) => {
-            const txn = row.transaction_no;
-            const isOpen = expanded.has(txn);
-            return (
-              <MaterialInMobileCard
-                key={txn || `m-${i}`}
-                row={row}
-                isOpen={isOpen}
-                onToggle={() => onToggleExpand(txn)}
-                onSend={() => handleSendClick(txn)}
-                onInward={() => router.push(`/modules/purchase/material-in/${encodeURIComponent(txn)}`)}
-                linesState={linesCache.get(txn)}
-                qcSummaryItem={qcSummary.get(txn)}
-                arrivalsState={arrivalsCache.get(txn)}
-              />
-            );
-          })
-        )}
-      </div>
 
-      {/* Pagination */}
-      {data && data.total > 0 && data.total_pages > 1 ? (
-        <MiPagination
-          page={data.page}
-          totalPages={data.total_pages}
-          total={data.total}
-          pageSize={data.page_size}
-          onPage={(p) => onQueryChange({ page: p })}
-          loading={loading}
-        />
-      ) : null}
+          {/* Section panels */}
+          {GROUP_META.map((g) => (
+            <SectionPanel
+              key={g.key}
+              meta={g}
+              section={sections[g.key]}
+              sort={currentSort()}
+              onSort={handleSort}
+              collapsed={collapsedGroups.has(g.key)}
+              onToggle={() => toggleGroup(g.key)}
+              onPage={(p) => void loadSectionPage(g.key, p)}
+              onRetry={() => void loadSectionPage(g.key, sections[g.key].page)}
+              expanded={expanded}
+              onToggleExpand={onToggleExpand}
+              onSendClick={handleSendClick}
+              onInward={(txn) => router.push(`/modules/purchase/material-in/${encodeURIComponent(txn)}`)}
+              linesCache={linesCache}
+              qcSummary={qcSummary}
+              arrivalsCache={arrivalsCache}
+              receiptCache={receiptCache}
+            />
+          ))}
+        </>
+      )}
 
       {/* Send intimation modal */}
       {sendTxn && sendRow ? (
@@ -500,15 +560,13 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
 // ── Toolbar ───────────────────────────────────────────────────────────────────
 
 function MaterialInToolbar({
-  query, onQueryChange, search, onSearch, onRefresh, qcFilter, onQcFilterChange,
+  query, onQueryChange, search, onSearch, onRefresh,
 }: {
   query: PoListQuery;
   onQueryChange: (patch: Partial<PoListQuery>) => void;
   search: string;
   onSearch: (v: string) => void;
   onRefresh: () => void;
-  qcFilter: QcFilter;
-  onQcFilterChange: (f: QcFilter) => void;
 }) {
   const [dateOpen, setDateOpen] = useState(false);
   const [advOpen, setAdvOpen] = useState(false);
@@ -555,24 +613,6 @@ function MaterialInToolbar({
           className={[
             "h-8 px-3 text-[12px] rounded-full border transition-colors",
             entity === c.value
-              ? "bg-[var(--aws-navy)] text-white border-[var(--aws-navy)]"
-              : "bg-white text-[var(--text-primary)] border-[var(--aws-border-strong)] hover:border-[var(--aws-navy)]",
-          ].join(" ")}
-        >
-          {c.label}
-        </button>
-      ))}
-
-      {/* QC status filter chips — client-side over the current page */}
-      <span className="mx-0.5 h-5 w-px bg-[var(--aws-border)]" aria-hidden />
-      {QC_FILTER_CHIPS.map((c) => (
-        <button
-          key={c.value}
-          type="button"
-          onClick={() => onQcFilterChange(c.value)}
-          className={[
-            "h-8 px-3 text-[12px] rounded-full border transition-colors",
-            qcFilter === c.value
               ? "bg-[var(--aws-navy)] text-white border-[var(--aws-navy)]"
               : "bg-white text-[var(--text-primary)] border-[var(--aws-border-strong)] hover:border-[var(--aws-navy)]",
           ].join(" ")}
@@ -852,11 +892,8 @@ function ExportMenu({ query, onClose }: { query: PoListQuery; onClose: () => voi
         setExportState({ kind: "err", text: "No data to export." });
         return;
       }
-      const csv = buildPoCsv(items, cols);
-      downloadBlob(
-        new Blob([csv], { type: "text/csv;charset=utf-8;" }),
-        `material-in-export-${new Date().toISOString().slice(0, 10)}.csv`,
-      );
+      const blob = buildPoXlsx(items, cols);
+      downloadBlob(blob, `material-in-export-${new Date().toISOString().slice(0, 10)}.xlsx`);
       setExportState({ kind: "ok", text: `Exported ${items.length} PO${items.length === 1 ? "" : "s"}.` });
     } catch (e) {
       setExportState({ kind: "err", text: e instanceof Error ? e.message : "Export failed" });
@@ -1196,10 +1233,160 @@ function ActionBtns({
   );
 }
 
+// ── Section panel (dashboard card: Today / Pending / Completed) ───────────────
+// A self-contained card: a coloured header bar (title + count + collapse toggle)
+// over its own responsive body — a desktop table and a mobile card stack for the
+// rows in that section. Empty sections still render (with a hint) so the three
+// dashboard cards stay put.
+
+type GroupMeta = { key: GroupKey; label: string; accent: string; bg: string };
+
+type LinesState = { lines?: PoLineOut[]; loading: boolean; error?: string };
+type ArrivalsState = { arrivals?: ArrivalItem[]; loading: boolean; error?: string };
+type ReceiptState = { summary?: ReceiptSummary; loading: boolean; error?: string };
+
+function SectionPanel({
+  meta, section, sort, onSort, collapsed, onToggle, onPage, onRetry,
+  expanded, onToggleExpand, onSendClick, onInward,
+  linesCache, qcSummary, arrivalsCache, receiptCache,
+}: {
+  meta: GroupMeta;
+  section: SectionState;
+  sort: { col: string; dir: "asc" | "desc" };
+  onSort: (col: string) => void;
+  collapsed: boolean;
+  onToggle: () => void;
+  onPage: (page: number) => void;
+  onRetry: () => void;
+  expanded: Set<string>;
+  onToggleExpand: (txn: string) => void;
+  onSendClick: (txn: string) => void;
+  onInward: (txn: string) => void;
+  linesCache: Map<string, LinesState>;
+  qcSummary: Map<string, ArrivalSummaryItem>;
+  arrivalsCache: Map<string, ArrivalsState>;
+  receiptCache: Map<string, ReceiptState>;
+}) {
+  const rows = section.items;
+  return (
+    <section className="mb-4 bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
+      {/* Header bar */}
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left"
+        style={{ background: meta.bg, borderLeft: `4px solid ${meta.accent}` }}
+      >
+        <span className="inline-flex items-center gap-2">
+          <span className={["text-[10px] text-[var(--text-muted)] transition-transform inline-block", collapsed ? "" : "rotate-90"].join(" ")} aria-hidden>▸</span>
+          <span className="w-2 h-2 rounded-full inline-block" style={{ background: meta.accent }} aria-hidden />
+          <span className="text-[13px] font-bold uppercase tracking-wide" style={{ color: meta.accent }}>{meta.label}</span>
+          {section.loading ? (
+            <span className="inline-block w-3 h-3 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" aria-hidden />
+          ) : null}
+        </span>
+        <span className="inline-flex items-center justify-center min-w-[24px] h-[20px] px-2 text-[11px] rounded-full font-bold text-white" style={{ background: meta.accent }}>{section.total}</span>
+      </button>
+
+      {collapsed ? null : section.error ? (
+        <div className="px-3 py-6 text-center border-t border-[var(--aws-border)]">
+          <p className="text-[12px] text-[var(--aws-error)] mb-2">{section.error}</p>
+          <button type="button" onClick={onRetry} className="h-7 px-3 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)]">Retry</button>
+        </div>
+      ) : section.loading && rows.length === 0 ? (
+        <div className="px-3 py-6 text-center text-[12px] text-[var(--text-secondary)] border-t border-[var(--aws-border)]">
+          <span className="inline-flex items-center gap-2">
+            <span className="inline-block w-3.5 h-3.5 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" />
+            Loading…
+          </span>
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="px-3 py-6 text-center text-[12px] text-[var(--text-muted)] border-t border-[var(--aws-border)]">
+          No POs in this section.
+        </div>
+      ) : (
+        <>
+          {/* Desktop table */}
+          <div className="hidden md:block overflow-x-auto border-t border-[var(--aws-border)]">
+            <table className="w-full text-[13px] border-collapse">
+              <thead className="bg-[var(--surface-subtle)] text-[var(--text-primary)]">
+                <tr className="border-b border-[var(--aws-border)]">
+                  <Th width={32}>{null}</Th>
+                  <Th sortable col="transaction_no" sort={sort} onSort={onSort}>Transaction No</Th>
+                  <Th>Entity</Th>
+                  <Th sortable col="po_number" sort={sort} onSort={onSort}>PO Number</Th>
+                  <Th sortable col="vendor_supplier_name" sort={sort} onSort={onSort}>Vendor</Th>
+                  <Th>Articles</Th>
+                  <Th>QC Status</Th>
+                  <Th width={72}>{null}</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, i) => {
+                  const txn = row.transaction_no;
+                  return (
+                    <MaterialInTableRow
+                      key={txn || `idx-${meta.key}-${i}`}
+                      row={row}
+                      isOpen={expanded.has(txn)}
+                      onToggle={() => onToggleExpand(txn)}
+                      onSend={() => onSendClick(txn)}
+                      onInward={() => onInward(txn)}
+                      linesState={linesCache.get(txn)}
+                      qcSummaryItem={qcSummary.get(txn)}
+                      arrivalsState={arrivalsCache.get(txn)}
+                      receiptState={receiptCache.get(txn)}
+                    />
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Mobile cards */}
+          <div className="md:hidden p-2 space-y-2 border-t border-[var(--aws-border)]">
+            {rows.map((row, i) => {
+              const txn = row.transaction_no;
+              return (
+                <MaterialInMobileCard
+                  key={txn || `m-${meta.key}-${i}`}
+                  row={row}
+                  isOpen={expanded.has(txn)}
+                  onToggle={() => onToggleExpand(txn)}
+                  onSend={() => onSendClick(txn)}
+                  onInward={() => onInward(txn)}
+                  linesState={linesCache.get(txn)}
+                  qcSummaryItem={qcSummary.get(txn)}
+                  arrivalsState={arrivalsCache.get(txn)}
+                  receiptState={receiptCache.get(txn)}
+                />
+              );
+            })}
+          </div>
+
+          {/* Per-section pagination (page_size 20, backend-driven) */}
+          {section.totalPages > 1 ? (
+            <div className="px-3 pb-3 border-t border-[var(--aws-border)]">
+              <MiPagination
+                page={section.page}
+                totalPages={section.totalPages}
+                total={section.total}
+                pageSize={SECTION_PAGE_SIZE}
+                onPage={onPage}
+                loading={section.loading}
+              />
+            </div>
+          ) : null}
+        </>
+      )}
+    </section>
+  );
+}
+
 // ── Table Row + Detail ─────────────────────────────────────────────────────────
 
 function MaterialInTableRow({
-  row, isOpen, onToggle, onSend, onInward, linesState, qcSummaryItem, arrivalsState,
+  row, isOpen, onToggle, onSend, onInward, linesState, qcSummaryItem, arrivalsState, receiptState,
 }: {
   row: PoListItem;
   isOpen: boolean;
@@ -1209,6 +1396,7 @@ function MaterialInTableRow({
   linesState?: { lines?: PoLineOut[]; loading: boolean; error?: string };
   qcSummaryItem?: ArrivalSummaryItem;
   arrivalsState?: { arrivals?: ArrivalItem[]; loading: boolean; error?: string };
+  receiptState?: ReceiptState;
 }) {
   return (
     <>
@@ -1242,7 +1430,7 @@ function MaterialInTableRow({
       {isOpen ? (
         <tr className="border-b border-[var(--aws-border)] bg-[var(--surface-subtle)]">
           <td colSpan={8} className="px-3 py-3" style={{ borderLeft: "3px solid var(--aws-orange)" }}>
-            <MaterialInDetailPanel key={row.transaction_no} linesState={linesState} arrivalsState={arrivalsState} />
+            <MaterialInDetailPanel key={row.transaction_no} linesState={linesState} arrivalsState={arrivalsState} receiptState={receiptState} />
           </td>
         </tr>
       ) : null}
@@ -1253,7 +1441,7 @@ function MaterialInTableRow({
 // ── Mobile Card ───────────────────────────────────────────────────────────────
 
 function MaterialInMobileCard({
-  row, isOpen, onToggle, onSend, onInward, linesState, qcSummaryItem, arrivalsState,
+  row, isOpen, onToggle, onSend, onInward, linesState, qcSummaryItem, arrivalsState, receiptState,
 }: {
   row: PoListItem;
   isOpen: boolean;
@@ -1263,6 +1451,7 @@ function MaterialInMobileCard({
   linesState?: { lines?: PoLineOut[]; loading: boolean; error?: string };
   qcSummaryItem?: ArrivalSummaryItem;
   arrivalsState?: { arrivals?: ArrivalItem[]; loading: boolean; error?: string };
+  receiptState?: ReceiptState;
 }) {
   return (
     <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
@@ -1310,81 +1499,163 @@ function MaterialInMobileCard({
       {/* Expanded detail */}
       {isOpen ? (
         <div className="border-t border-[var(--aws-border)] p-3 bg-[var(--surface-subtle)]">
-          <MaterialInDetailPanel key={row.transaction_no} linesState={linesState} arrivalsState={arrivalsState} />
+          <MaterialInDetailPanel key={row.transaction_no} linesState={linesState} arrivalsState={arrivalsState} receiptState={receiptState} />
         </div>
       ) : null}
     </div>
   );
 }
 
-// ── Detail Panel — simplified, Article / Pack / Weight only ──────────────────
+// ── Detail Panel — Articles + Received-vs-PO quantity breakdown ───────────────
 
 function MaterialInDetailPanel({
-  linesState, arrivalsState,
+  linesState, arrivalsState, receiptState,
 }: {
   linesState?: { lines?: PoLineOut[]; loading: boolean; error?: string };
   arrivalsState?: { arrivals?: ArrivalItem[]; loading: boolean; error?: string };
+  receiptState?: ReceiptState;
 }) {
-  if (linesState?.loading) {
-    return (
-      <div className="py-3 text-center text-[var(--text-secondary)] flex items-center justify-center gap-2 text-[12px]">
-        <span className="inline-block w-3 h-3 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" />
-        Loading articles…
-      </div>
-    );
-  }
-  if (linesState?.error) {
-    return <p className="text-[var(--aws-error)] text-[12px] py-2">{linesState.error}</p>;
-  }
-  if (!linesState) {
-    return <p className="text-[var(--text-muted)] italic text-[12px] py-2">Articles will appear here once loaded.</p>;
-  }
-  const lines = linesState.lines ?? [];
-  if (lines.length === 0) {
-    return <p className="text-[var(--text-muted)] italic text-[12px] py-2">No articles on this PO.</p>;
-  }
+  const lines = linesState?.lines ?? [];
 
   return (
-    <div className="space-y-2 text-[12px]">
-      <div className="text-[11px] uppercase tracking-wide font-bold text-[var(--text-muted)] mb-1">
-        Articles ({lines.length})
+    <div className="space-y-3 text-[12px]">
+      {/* Articles (ordered) + per-article QC status */}
+      <div className="space-y-1">
+        <div className="text-[11px] uppercase tracking-wide font-bold text-[var(--text-muted)]">
+          Articles{lines.length ? ` (${lines.length})` : ""}
+        </div>
+        {linesState?.loading ? (
+          <div className="py-2 text-[var(--text-secondary)] flex items-center gap-2">
+            <span className="inline-block w-3 h-3 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" />
+            Loading articles…
+          </div>
+        ) : linesState?.error ? (
+          <p className="text-[var(--aws-error)] py-1">{linesState.error}</p>
+        ) : !linesState ? (
+          <p className="text-[var(--text-muted)] italic py-1">Articles will appear here once loaded.</p>
+        ) : lines.length === 0 ? (
+          <p className="text-[var(--text-muted)] italic py-1">No articles on this PO.</p>
+        ) : (
+          <div className="overflow-x-auto rounded-[2px] border border-[var(--aws-border)]">
+            <table className="w-auto text-[12px] border-collapse">
+              <thead className="bg-[var(--surface-subtle)]">
+                <tr className="border-b border-[var(--aws-border)]">
+                  <th className="px-3 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] w-8">#</th>
+                  <th className="px-3 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Article</th>
+                  <th className="px-3 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">Pack</th>
+                  <th className="px-3 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">Weight</th>
+                  <th className="px-3 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">QC Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map((l, i) => (
+                  <tr key={l.line_number ?? i} className="border-b border-[var(--aws-border)] last:border-b-0 hover:bg-[var(--surface-subtle)]">
+                    <td className="px-3 py-1 text-[var(--text-muted)]">{l.line_number ?? i + 1}</td>
+                    <td className="px-3 py-1 max-w-[420px] truncate" title={l.sku_name || l.particulars || ""}>
+                      {l.sku_name || l.particulars || "—"}
+                    </td>
+                    <td className="px-3 py-1 text-right font-mono tabular-nums whitespace-nowrap">{fmtNum(l.pack_count)}</td>
+                    <td className="px-3 py-1 text-right font-mono tabular-nums whitespace-nowrap">{fmtNum(l.po_weight)}</td>
+                    <td className="px-3 py-1 whitespace-nowrap">
+                      {arrivalsState?.loading ? (
+                        <span className="text-[var(--text-muted)] text-[11px]">…</span>
+                      ) : arrivalsState?.error ? (
+                        <span className="text-[var(--text-muted)] text-[11px]">—</span>
+                      ) : (
+                        <QcArticleBadge states={arrivalsForLine(l, arrivalsState?.arrivals ?? [])} />
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
-      {/* Content-width table (not w-full) so the few columns sit together
-          instead of being stretched edge-to-edge across the panel. */}
-      <div className="overflow-x-auto rounded-[2px] border border-[var(--aws-border)]">
-        <table className="w-auto text-[12px] border-collapse">
-          <thead className="bg-[var(--surface-subtle)]">
-            <tr className="border-b border-[var(--aws-border)]">
-              <th className="px-3 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] w-8">#</th>
-              <th className="px-3 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Article</th>
-              <th className="px-3 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">Pack</th>
-              <th className="px-3 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">Weight</th>
-              <th className="px-3 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">QC Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {lines.map((l, i) => (
-              <tr key={l.line_number ?? i} className="border-b border-[var(--aws-border)] last:border-b-0 hover:bg-[var(--surface-subtle)]">
-                <td className="px-3 py-1 text-[var(--text-muted)]">{l.line_number ?? i + 1}</td>
-                <td className="px-3 py-1 max-w-[420px] truncate" title={l.sku_name || l.particulars || ""}>
-                  {l.sku_name || l.particulars || "—"}
-                </td>
-                <td className="px-3 py-1 text-right font-mono tabular-nums whitespace-nowrap">{fmtNum(l.pack_count)}</td>
-                <td className="px-3 py-1 text-right font-mono tabular-nums whitespace-nowrap">{fmtNum(l.po_weight)}</td>
-                <td className="px-3 py-1 whitespace-nowrap">
-                  {arrivalsState?.loading ? (
-                    <span className="text-[var(--text-muted)] text-[11px]">…</span>
-                  ) : arrivalsState?.error ? (
-                    <span className="text-[var(--text-muted)] text-[11px]">—</span>
-                  ) : (
-                    <QcArticleBadge states={arrivalsForLine(l, arrivalsState?.arrivals ?? [])} />
-                  )}
-                </td>
+
+      {/* Received vs PO quantity — drives the Completed status */}
+      <ReceiptBreakdown receiptState={receiptState} />
+    </div>
+  );
+}
+
+// ── Received vs PO quantity breakdown ─────────────────────────────────────────
+// Per line: received (net weight / count from weighed boxes) vs the ordered PO
+// quantity, with a Matched/Short badge. A PO is "Completed" when every line
+// matches on both weight and count — the same rule the backend section filter
+// applies (po_query._FULLY_RECEIVED_PREDICATE).
+
+function ReceiptBreakdown({ receiptState }: { receiptState?: ReceiptState }) {
+  const summary = receiptState?.summary;
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="text-[11px] uppercase tracking-wide font-bold text-[var(--text-muted)]">
+          Received vs PO Quantity
+        </div>
+        {summary ? (
+          summary.completed ? (
+            <span className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-sm" style={{ background: "#eaf6ed", color: "var(--text-success)", border: "1px solid #b6dbb1" }}>
+              Completed · fully received
+            </span>
+          ) : (
+            <span className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-sm" style={{ background: "#fbf3e7", color: "#9a5b00", border: "1px solid #f0cfa0" }}>
+              Not fully received
+            </span>
+          )
+        ) : null}
+      </div>
+      {receiptState?.loading ? (
+        <div className="py-2 text-[var(--text-secondary)] flex items-center gap-2">
+          <span className="inline-block w-3 h-3 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" />
+          Loading receipt…
+        </div>
+      ) : receiptState?.error ? (
+        <p className="text-[var(--aws-error)] py-1">{receiptState.error}</p>
+      ) : !summary ? (
+        <p className="text-[var(--text-muted)] italic py-1">Receipt details will appear here once loaded.</p>
+      ) : summary.lines.length === 0 ? (
+        <p className="text-[var(--text-muted)] italic py-1">No article lines on this PO.</p>
+      ) : (
+        <div className="overflow-x-auto rounded-[2px] border border-[var(--aws-border)]">
+          <table className="w-auto text-[12px] border-collapse">
+            <thead className="bg-[var(--surface-subtle)]">
+              <tr className="border-b border-[var(--aws-border)]">
+                <th className="px-3 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] w-8">#</th>
+                <th className="px-3 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Article</th>
+                <th className="px-3 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">Recv Wt / PO Wt</th>
+                <th className="px-3 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">Recv Cnt / PO Cnt</th>
+                <th className="px-3 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">Boxes</th>
+                <th className="px-3 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">Match</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {summary.lines.map((l, i) => (
+                <tr key={l.line_number ?? i} className="border-b border-[var(--aws-border)] last:border-b-0 hover:bg-[var(--surface-subtle)]">
+                  <td className="px-3 py-1 text-[var(--text-muted)]">{l.line_number ?? i + 1}</td>
+                  <td className="px-3 py-1 max-w-[360px] truncate" title={l.sku_name || l.particulars || ""}>
+                    {l.sku_name || l.particulars || "—"}
+                  </td>
+                  <td className={["px-3 py-1 text-right font-mono tabular-nums whitespace-nowrap", l.weight_matched ? "" : "text-[var(--aws-error)] font-semibold"].join(" ")}>
+                    {fmtNum(l.received_weight)} / {l.ordered_weight != null ? fmtNum(l.ordered_weight) : "—"}
+                  </td>
+                  <td className={["px-3 py-1 text-right font-mono tabular-nums whitespace-nowrap", l.count_matched ? "" : "text-[var(--aws-error)] font-semibold"].join(" ")}>
+                    {fmtNum(l.received_count)} / {l.ordered_count != null ? fmtNum(l.ordered_count) : "—"}
+                  </td>
+                  <td className="px-3 py-1 text-right font-mono tabular-nums whitespace-nowrap text-[var(--text-secondary)]">{fmtNum(l.received_boxes)}</td>
+                  <td className="px-3 py-1 whitespace-nowrap">
+                    {l.matched ? (
+                      <span className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-sm" style={{ background: "#eaf6ed", color: "var(--text-success)", border: "1px solid #b6dbb1" }}>Matched</span>
+                    ) : (
+                      <span className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-sm" style={{ background: "#fbeced", color: "var(--aws-error)", border: "1px solid #f0c0c4" }}>Short</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

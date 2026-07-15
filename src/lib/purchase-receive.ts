@@ -20,6 +20,9 @@ export interface PurchaseSection {
   section_number: number;
   lot_number?: string | null;
   box_count?: number | null;
+  // Actual box count for the section (accurate even in lazy mode, where `boxes`
+  // is empty). Set by the backend build_po_detail.
+  total_boxes?: number | null;
   manufacturing_date?: string | null;
   expiry_date?: string | null;
   boxes: PurchaseBox[];
@@ -104,6 +107,9 @@ export interface BoxInputPayload {
 }
 export interface AddSectionPayload {
   line_number: number;
+  // When set, the backend APPENDS these boxes to this existing section instead
+  // of creating a new one (the per-section "+ Add Boxes" panel).
+  section_number?: number | null;
   box_count?: number | null;
   lot_number?: string | null;
   manufacturing_date?: string | null;
@@ -150,9 +156,69 @@ async function readError(res: Response, fallback: string): Promise<string> {
 }
 
 // ── Endpoints ─────────────────────────────────────────────────────────────────
-export async function getPurchasePo(txn: string, signal?: AbortSignal): Promise<PurchasePoDetail> {
-  const res = await apiFetch(`/api/v1/purchase/${encodeURIComponent(txn)}`, { signal });
+export async function getPurchasePo(
+  txn: string,
+  signal?: AbortSignal,
+  includeBoxes = true,
+): Promise<PurchasePoDetail> {
+  // includeBoxes=false → sections come back with counts only (empty box arrays);
+  // box rows are then loaded lazily per expanded section via listSectionBoxes.
+  const qs = includeBoxes ? "" : "?include_boxes=false";
+  const res = await apiFetch(`/api/v1/purchase/${encodeURIComponent(txn)}${qs}`, { signal });
   if (!res.ok) throw new Error(await readError(res, "Failed to load Purchase Order"));
+  return res.json();
+}
+
+// ── Lazy per-section box loading (GET /{txn}/boxes) ───────────────────────────
+export interface SectionBoxListResponse {
+  boxes: PurchaseBox[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+/** Paginated boxes for ONE section — fetched when a section is expanded. */
+export async function listSectionBoxes(
+  txn: string,
+  lineNumber: number,
+  sectionNumber: number,
+  opts: { page?: number; pageSize?: number; signal?: AbortSignal } = {},
+): Promise<SectionBoxListResponse> {
+  const qs = new URLSearchParams({
+    line_number: String(lineNumber),
+    section_number: String(sectionNumber),
+    page: String(opts.page ?? 1),
+    page_size: String(opts.pageSize ?? 200),
+  });
+  const res = await apiFetch(`/api/v1/purchase/${encodeURIComponent(txn)}/boxes?${qs.toString()}`, {
+    signal: opts.signal,
+  });
+  if (!res.ok) throw new Error(await readError(res, "Failed to load boxes"));
+  return res.json();
+}
+
+// ── Boxes for printing (GET /{txn}/boxes/print) — all, or a box_number range ──
+export interface SectionBoxPrintResponse {
+  boxes: PurchaseBox[];
+  total: number;
+}
+
+export async function listSectionBoxesForPrint(
+  txn: string,
+  lineNumber: number,
+  sectionNumber: number,
+  opts: { fromBox?: number; toBox?: number; signal?: AbortSignal } = {},
+): Promise<SectionBoxPrintResponse> {
+  const qs = new URLSearchParams({
+    line_number: String(lineNumber),
+    section_number: String(sectionNumber),
+  });
+  if (opts.fromBox != null) qs.set("from_box", String(opts.fromBox));
+  if (opts.toBox != null) qs.set("to_box", String(opts.toBox));
+  const res = await apiFetch(`/api/v1/purchase/${encodeURIComponent(txn)}/boxes/print?${qs.toString()}`, {
+    signal: opts.signal,
+  });
+  if (!res.ok) throw new Error(await readError(res, "Failed to load boxes for printing"));
   return res.json();
 }
 

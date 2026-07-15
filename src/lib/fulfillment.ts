@@ -298,6 +298,43 @@ export async function createPlan(body: CreatePlanBody): Promise<CreatePlanRespon
   return (await res.json()) as CreatePlanResponse;
 }
 
+// ── Create a master BOM for one FG SKU (plan-builder inline "Add BOM") ─────
+export interface CreateBomLineInput {
+  material_sku_name: string;
+  item_type: "rm" | "pm";
+  quantity_per_unit: number;
+  uom?: string | null;
+  loss_pct?: number | null;
+}
+export interface CreateBomBody {
+  fg_sku_name: string;
+  entity: string;
+  customer_name?: string | null;
+  pack_size_kg?: number | null;
+  lines: CreateBomLineInput[];
+}
+export interface CreateBomResponse { bom_id?: number; [k: string]: unknown }
+
+export async function createBomMaster(body: CreateBomBody): Promise<CreateBomResponse> {
+  const res = await apiFetch(`/api/v1/production/plans-v2/bom`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const j = (await res.json()) as { detail?: unknown };
+      // The endpoint returns {detail: {error, message}} or {detail: "..."}.
+      if (typeof j.detail === "string") detail = j.detail;
+      else if (j.detail && typeof j.detail === "object" && "message" in j.detail) {
+        detail = String((j.detail as { message?: unknown }).message ?? detail);
+      }
+    } catch { /* non-JSON */ }
+    throw new Error(detail);
+  }
+  return (await res.json()) as CreateBomResponse;
+}
+
 // ── Resolve SO lines → fulfillment rows ──────────────────────────────────
 //
 // Backs the SO-Creation "Selected for Plan" panel: the operator checks SO

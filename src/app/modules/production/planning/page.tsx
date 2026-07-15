@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
-import { useRequireAuth, useUserInitial, useUserScope } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useUserScope, useRequireModuleAccess } from "@/lib/user";
 import { friendlyApiError } from "@/lib/apiErrors";
 import { usePlanBuilder, SelectedArticlesPanel } from "@/lib/planBuilder";
 import { BackLink } from "@/components/BackLink";
@@ -52,6 +52,7 @@ type Entity = "" | "cfpl" | "cdpl";
 export default function PlanningPage() {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
+  useRequireModuleAccess("production/planning", router.replace);
   const initial = useUserInitial();
   const scope = useUserScope();
 
@@ -336,6 +337,7 @@ export default function PlanningPage() {
           onAddStep={pb.addCardStep}
           onRemoveStep={pb.removeCardStep}
           onRefreshSteps={pb.refreshCardSteps}
+          onCreateBom={pb.createCardBom}
         />
 
         {toast ? (

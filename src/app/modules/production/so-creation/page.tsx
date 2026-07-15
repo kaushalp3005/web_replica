@@ -10,7 +10,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useRequireAuth, useUserScope } from "@/lib/user";
+import { useRequireAuth, useUserScope, useRequireModuleAccess } from "@/lib/user";
 import { useSeesCost } from "@/lib/cost-gate";
 import { friendlyApiError } from "@/lib/apiErrors";
 import {
@@ -233,6 +233,7 @@ const STATUS_PALETTE: Record<string, { fg: string; bg: string; ring: string }> =
 export default function SoCreationPage() {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
+  useRequireModuleAccess("production/so-creation", router.replace);
   // C12 cost-metric UI gate. Threaded into the export, the per-line
   // card, and the per-line section components below. Deny-list roles
   // (team_leader, qc_inspector, floor_manager, viewer) get no ₹ chrome
@@ -926,6 +927,7 @@ export default function SoCreationPage() {
         onAddStep={pb.addCardStep}
         onRemoveStep={pb.removeCardStep}
         onRefreshSteps={pb.refreshCardSteps}
+        onCreateBom={pb.createCardBom}
         // SFG stage drives routing here — no hand-edited process route.
         showSteps={false}
       />

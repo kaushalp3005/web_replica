@@ -3,6 +3,7 @@
 // under /api/v1/po except manual create (/api/v1/purchase/create, pending).
 
 import { apiFetch } from "./auth";
+import * as XLSX from "xlsx-js-style";
 
 // ── Listing / detail types (schemas/po_api.py: PoListItem, PoLineOut) ──
 export interface PoListItem {
@@ -156,6 +157,9 @@ export interface PoListQuery {
   voucher_type?: string;
   po_date_from?: string;
   po_date_to?: string;
+  // Material In dashboard section partition (server-side today/pending/completed).
+  section?: "today" | "pending" | "completed";
+  today_date?: string; // client local YYYY-MM-DD, defines the "today" boundary
 }
 
 function toQuery(q: PoListQuery): string {
@@ -178,12 +182,22 @@ async function readError(res: Response, fallback: string): Promise<string> {
 }
 
 // ── Endpoints ──
-export async function previewPo(file: File, entity: string): Promise<PreviewResponse> {
+// Preview result carries the server's x-request-id (stamped on every response by
+// the request_context middleware and CORS-exposed) so the review screen can show
+// it for traceability — mirrors the Electron client's reqId capture.
+export interface PreviewResult {
+  preview: PreviewResponse;
+  requestId: string | null;
+}
+
+export async function previewPo(file: File, entity: string): Promise<PreviewResult> {
   const fd = new FormData();
   fd.append("file", file);
   const res = await apiFetch(`/api/v1/po/preview?entity=${encodeURIComponent(entity)}`, { method: "POST", body: fd });
   if (!res.ok) throw new Error(await readError(res, "Preview failed"));
-  return res.json();
+  const requestId = res.headers.get("x-request-id");
+  const preview = (await res.json()) as PreviewResponse;
+  return { preview, requestId };
 }
 
 export async function commitPo(body: { entity: string; mode: CommitMode; pos: CommitPo[] }): Promise<CommitResponse> {
@@ -205,6 +219,37 @@ export async function listPos(q: PoListQuery, signal?: AbortSignal): Promise<PoL
 export async function getPoLines(transactionNo: string): Promise<PoLinesResponse> {
   const res = await apiFetch(`/api/v1/po/${encodeURIComponent(transactionNo)}/lines`);
   if (!res.ok) throw new Error(await readError(res, "Failed to load articles"));
+  return res.json();
+}
+
+// ── Receipt summary (received-vs-ordered per line + matched flags) ──────────
+export interface ReceiptLine {
+  line_number: number;
+  sku_name?: string | null;
+  particulars?: string | null;
+  ordered_weight?: number | null;
+  received_weight: number;
+  ordered_count?: number | null;
+  received_count: number;
+  received_boxes: number;
+  weight_matched: boolean;
+  count_matched: boolean;
+  matched: boolean;
+}
+export interface ReceiptSummary {
+  transaction_no: string;
+  entity?: string | null;
+  completed: boolean; // received qty fully matches ordered on weight + count
+  total_lines: number;
+  lines: ReceiptLine[];
+}
+export async function getReceiptSummary(
+  transactionNo: string,
+  signal?: AbortSignal,
+): Promise<ReceiptSummary> {
+  const res = await apiFetch(`/api/v1/po/${encodeURIComponent(transactionNo)}/receipt-summary`, { signal });
+  if (res.status === 404) throw new Error("Receipt summary isn't available on this backend yet.");
+  if (!res.ok) throw new Error(await readError(res, "Failed to load receipt summary"));
   return res.json();
 }
 
@@ -296,16 +341,58 @@ export const PO_EXPORT_COLUMNS: { key: keyof PoListItem; label: string }[] = [
   { key: "other_charges_non_gst", label: "Other Non-GST" },
 ];
 
-function csvCell(v: unknown): string {
-  if (v == null) return "";
-  let s = String(v);
-  if (/[",\r\n]/.test(s)) s = `"${s.replace(/"/g, '""')}"`;
-  return s;
+// Styled .xlsx export — ports the Electron client's `_buildAndDownloadExcel`
+// (xlsx-js-style): dark-navy/gold header, zebra body rows, autosized columns, a
+// frozen header row, and an autofilter. Same 21 columns as PO_EXPORT_COLUMNS.
+// `xlsx-js-style` (a SheetJS fork) carries the cell `.s` style + the `!freeze`/
+// `!autofilter` sheet props the base SheetJS types don't declare, so those
+// non-standard props are assigned through a plain-record cast.
+type XlsxStyle = Record<string, unknown>;
+interface StyledCell {
+  v: string | number;
+  s: XlsxStyle;
 }
-export function buildPoCsv(items: PoListItem[], cols: { key: keyof PoListItem; label: string }[]): string {
-  const rows = [cols.map((c) => csvCell(c.label)).join(",")];
-  for (const it of items) rows.push(cols.map((c) => csvCell(it[c.key])).join(","));
-  return "﻿" + rows.join("\r\n");
+
+export function buildPoXlsx(items: PoListItem[], cols: { key: keyof PoListItem; label: string }[]): Blob {
+  const headerStyle: XlsxStyle = {
+    fill: { fgColor: { rgb: "1A1A25" } },
+    font: { bold: true, color: { rgb: "C8AA6E" }, sz: 11 },
+    alignment: { horizontal: "center", vertical: "center" },
+    border: { bottom: { style: "thin", color: { rgb: "3A3A4A" } } },
+  };
+  const cellStyle: XlsxStyle = { alignment: { horizontal: "center", vertical: "center" }, font: { sz: 10 } };
+  const altRowStyle: XlsxStyle = { ...cellStyle, fill: { fgColor: { rgb: "F2F2F2" } } };
+
+  const data: StyledCell[][] = [];
+  data.push(cols.map((c) => ({ v: c.label, s: headerStyle })));
+  items.forEach((po, rowIdx) => {
+    const base = rowIdx % 2 === 1 ? altRowStyle : cellStyle;
+    data.push(
+      cols.map((c) => {
+        const raw = po[c.key];
+        const v: string | number = raw == null ? "" : typeof raw === "number" ? raw : String(raw);
+        return { v, s: base };
+      }),
+    );
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(data as unknown as unknown[][]);
+  const wsAny = ws as Record<string, unknown>;
+  wsAny["!cols"] = cols.map((c, i) => {
+    let maxLen = c.label.length;
+    for (const row of data) {
+      const len = String(row[i]?.v ?? "").length;
+      if (len > maxLen) maxLen = len;
+    }
+    return { wch: Math.min(maxLen + 4, 40) };
+  });
+  wsAny["!freeze"] = { xSplit: 0, ySplit: 1 };
+  wsAny["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: 0, c: cols.length - 1 } }) };
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Purchase Orders");
+  const out = XLSX.write(wb, { bookType: "xlsx", type: "array" }) as ArrayBuffer;
+  return new Blob([out], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 }
 export function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);

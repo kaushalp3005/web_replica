@@ -47,3 +47,6 @@ next-env.d.ts
 # Stray backend content — server_replica is a SEPARATE sibling repo and must
 # never be nested inside the frontend. Guards against accidental copies.
 /server_replica/
+
+# build artifacts (may embed .env) — never commit
+*.zip

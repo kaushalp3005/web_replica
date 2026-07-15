@@ -57,9 +57,10 @@ type BatchOutputRow = {
   cartons?: number | string | null;
 };
 
-// One FG carton (sfg_box item_type='fg'). carton_id is the 8-digit QR payload.
+// One FG carton (sfg_box item_type='fg'). carton_id is the "<8-digit>-<counter>"
+// TEXT QR payload (mig 070).
 type CartonRowT = {
-  carton_id: number;
+  carton_id: string;
   batch_id?: number | null;
   batch_code?: string | null;
   net_weight_kg?: number | string | null;
@@ -72,8 +73,8 @@ type CartonRowT = {
 // One node of a carton's upstream trace (carton → batch → JC → RM lot).
 type TraceNode = {
   level: number;
-  carton_id?: number | null;
-  box_id?: number | null;
+  carton_id?: string | null;
+  box_id?: string | null;
   sfg_code?: string | null;
   lot_number?: string | null;
   batch_id?: number | null;
@@ -588,7 +589,7 @@ function CartonRow({ carton }: { carton: CartonRowT }) {
   );
 }
 
-function CartonTrace({ cartonId }: { cartonId: number }) {
+function CartonTrace({ cartonId }: { cartonId: string }) {
   const [chain, setChain] = useState<TraceNode[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [unavailable, setUnavailable] = useState(false);

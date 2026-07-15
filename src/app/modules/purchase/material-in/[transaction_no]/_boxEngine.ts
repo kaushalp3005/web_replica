@@ -13,6 +13,7 @@
 import type {
   PurchasePoDetail,
   PurchaseLine,
+  PurchaseBox,
   ReceiveRequest,
   AddSectionPayload,
   UpdateSectionPayload,
@@ -59,6 +60,11 @@ export interface PrintBox {
   section_number: number | null;
   sku_name: string;
 }
+
+// Print handlers save first, then resolve the box set — so labels reflect the
+// just-persisted boxes (real box_id in the QR). The parent runs the full save
+// before calling the resolver.
+export type PrintResolver = () => Promise<PrintBox[]>;
 export interface NewSection {
   id: string;
   line_number: number;
@@ -98,7 +104,12 @@ export function existingKey(line: number, section: number): string {
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 export function countExistingBoxes(line: PurchaseLine): number {
-  return (line.sections ?? []).reduce((sum, s) => sum + (s.boxes?.length ?? 0), 0);
+  // Use the section counts (total_boxes / box_count) so this is correct even in
+  // lazy mode where the box rows aren't loaded into s.boxes.
+  return (line.sections ?? []).reduce(
+    (sum, s) => sum + (s.total_boxes ?? s.box_count ?? s.boxes?.length ?? 0),
+    0,
+  );
 }
 
 // Cap a numeric string to 3 decimal places (reference lines 1408-1420).
@@ -224,6 +235,7 @@ export type InwardAction =
   | { type: "setExistingBoxField"; key: string; boxId: string; field: keyof ExistingBoxEdit; value: string; carton: string }
   | { type: "genAddBoxes"; key: string; line: PurchaseLine; sectionNumber: number; count: number }
   | { type: "setAddBoxField"; key: string; boxIndex: number; field: keyof DraftBox; value: string; carton: string }
+  | { type: "hydrateSectionBoxes"; key: string; boxes: PurchaseBox[] }
   | { type: "clearAddBoxes"; key: string }
   | { type: "reset"; po: PurchasePoDetail; prefill?: Partial<Record<LogisticsField, string>>; seeds?: SectionSeed[] };
 
@@ -352,7 +364,13 @@ export function inwardReducer(state: DraftState, action: InwardAction): DraftSta
       const { key, line, sectionNumber, count } = action;
       if (count < 1) return state;
       const sec = (line.sections ?? []).find((s) => s.section_number === sectionNumber);
-      const lastBoxNum = sec && sec.boxes.length ? Math.max(...sec.boxes.map((b) => b.box_number || 0)) : 0;
+      // Prefer the max of loaded boxes; fall back to the section count (lazy mode,
+      // where sec.boxes isn't loaded). The backend also regenerates box_id
+      // server-side, so a provisional box_number here is only for the draft preview.
+      const lastBoxNum =
+        sec && sec.boxes && sec.boxes.length
+          ? Math.max(...sec.boxes.map((b) => b.box_number || 0))
+          : sec?.total_boxes ?? sec?.box_count ?? 0;
       const lotNumber = sec?.lot_number ?? "";
       const boxes: DraftBox[] = Array.from({ length: count }, (_, i) => ({
         box_number: lastBoxNum + i + 1,
@@ -375,6 +393,26 @@ export function inwardReducer(state: DraftState, action: InwardAction): DraftSta
         return field === "gross_weight" ? { ...next, net_weight: computeNet(clamped, carton) } : next;
       });
       return { ...state, addBoxes: { ...state.addBoxes, [key]: { boxes } } };
+    }
+
+    case "hydrateSectionBoxes": {
+      // Seed the box-edit state for a lazily-loaded (expanded/paged) section from
+      // the fetched DB boxes. Boxes already in the edit map keep their in-progress
+      // edits (so paging away and back doesn't lose typed values).
+      const { key, boxes } = action;
+      const sec = state.existing[key];
+      if (!sec) return state;
+      const merged: Record<string, ExistingBoxEdit> = { ...sec.boxes };
+      for (const b of boxes) {
+        if (merged[b.box_id]) continue;
+        merged[b.box_id] = {
+          gross_weight: b.gross_weight != null ? String(b.gross_weight) : "",
+          net_weight: b.net_weight != null ? String(b.net_weight) : "",
+          lot_number: b.lot_number ?? "",
+          count: b.count != null ? String(b.count) : "",
+        };
+      }
+      return { ...state, existing: { ...state.existing, [key]: { ...sec, boxes: merged } } };
     }
 
     case "clearAddBoxes": {
@@ -472,16 +510,16 @@ export function buildUpdateSections(state: DraftState, po: PurchasePoDetail): Up
       const key = existingKey(line.line_number, sec.section_number);
       const edit = state.existing[key];
       if (!edit) continue;
-      const boxes = (sec.boxes ?? []).map((b) => {
-        const be = edit.boxes[b.box_id];
-        return {
-          box_id: b.box_id,
-          net_weight: be?.net_weight ? parseFloat(be.net_weight) : null,
-          gross_weight: be?.gross_weight ? parseFloat(be.gross_weight) : null,
-          lot_number: be?.lot_number || null,
-          count: be?.count ? parseInt(be.count, 10) : null,
-        };
-      });
+      // In lazy mode sec.boxes isn't loaded — build updates from the box-edit
+      // state, which is hydrated per expanded/paged section. Only boxes the user
+      // actually loaded are sent; untouched boxes stay unchanged server-side.
+      const boxes = Object.entries(edit.boxes).map(([boxId, be]) => ({
+        box_id: boxId,
+        net_weight: be.net_weight ? parseFloat(be.net_weight) : null,
+        gross_weight: be.gross_weight ? parseFloat(be.gross_weight) : null,
+        lot_number: be.lot_number || null,
+        count: be.count ? parseInt(be.count, 10) : null,
+      }));
       out.push({
         line_number: line.line_number,
         section_number: sec.section_number,
@@ -508,6 +546,8 @@ export function buildAddBoxesPayload(
   const sec = (line.sections ?? []).find((s) => s.section_number === sectionNumber);
   return {
     line_number: line.line_number,
+    // Target the existing section so the backend appends (not create a new one).
+    section_number: sectionNumber,
     box_count: boxes.length,
     lot_number: sec?.lot_number ?? null,
     manufacturing_date: sec?.manufacturing_date ?? null,

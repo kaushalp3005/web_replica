@@ -38,6 +38,7 @@ import { ActionButton, LockableButton } from "../_ActionButton";
 import { AmendmentsTab } from "../_AmendmentsTab";
 import { RawMaterialTab } from "./_RawMaterialTab";
 import { OutputTab } from "./_OutputTab";
+import { SfgProducedBoxes, type BatchOpt } from "./_SfgProducedBoxes";
 // W4-MED-3/M10 — single subscription via context (see _UserContext.tsx).
 import { UserProvider } from "../_UserContext";
 
@@ -309,7 +310,7 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "quality",    label: "Quality" },
   { key: "signoffs",   label: "Sign-offs" },
   { key: "remarks",    label: "Remarks" },
-  { key: "sfgboxes",   label: "SFG Boxes" },
+  { key: "sfgboxes",   label: "Boxes printing" },
   // Amendments tab hidden per operator request. The 'amendments' route
   // case is kept below so a stale ?tab=amendments URL doesn't 404, and
   // AmendmentsTab + the backend endpoints remain untouched — only the
@@ -727,6 +728,16 @@ function JobCardDetailPageBody() {
   const [reloadKey, setReloadKey] = useState(0);
   const reload = () => setReloadKey((k) => k + 1);
 
+  // Cross-tab jump: the Accounting batch table's "Print QR" button switches to
+  // the Boxes-printing tab and asks it to open+scroll to that batch's section.
+  // Cleared by the Boxes tab once it's consumed the focus (one-shot).
+  const [focusBatchId, setFocusBatchId] = useState<number | null>(null);
+  const jumpToBoxes = useCallback((batchId: number) => {
+    setFocusBatchId(batchId);
+    setTab("sfgboxes");
+  }, []);
+  const clearFocusBatch = useCallback(() => setFocusBatchId(null), []);
+
   // Boot-time auth gate — drops the inline tokenStore check that used to
   // live at the top of the fetch effect.
   const authed = useRequireAuth(router.replace);
@@ -910,6 +921,9 @@ function JobCardDetailPageBody() {
               tab={tab}
               onReload={reload}
               onJumpJc={(id) => router.push(`/modules/job-card/${id}`)}
+              onJumpToBoxes={jumpToBoxes}
+              focusBatchId={focusBatchId}
+              onFocusConsumed={clearFocusBatch}
             />
           </>
         ) : null}
@@ -935,6 +949,9 @@ function PageHeader({
   onReload: () => void;
 }) {
   const style = STATUS_STYLES[detail.status ?? ""] ?? STATUS_STYLES.unlocked;
+  // Edited header fields (per the JC edit log) render light red; re-read when
+  // `detail` reloads after an edit.
+  const changedKeys = useJcEditLog(detail.job_card_id, detail);
   // Show the 8-digit JC number (job_card_id). The long PLAN-… job_card_number
   // reference stays on the tooltip for traceability.
   const jcNum = String(detail.job_card_id);
@@ -955,9 +972,11 @@ function PageHeader({
         <div className="min-w-0">
           <div className="font-mono text-[12px] text-[var(--aws-link)] font-semibold mb-1" title={jcRef || jcNum}>{jcNum}</div>
           <h1 className="text-[22px] leading-[26px] font-semibold text-[var(--text-primary)]" title={detail.fg_sku_name ?? ""}>
-            {detail.fg_sku_name || "—"}
+            <span className={changedKeys.has("fg_sku_name") ? "bg-[#fbeced] rounded-sm px-1" : ""}>{detail.fg_sku_name || "—"}</span>
           </h1>
-          <p className="text-[13px] text-[var(--text-secondary)] mt-1">{detail.customer_name || "—"}</p>
+          <p className="text-[13px] text-[var(--text-secondary)] mt-1">
+            <span className={changedKeys.has("customer_name") ? "bg-[#fbeced] rounded-sm px-1" : ""}>{detail.customer_name || "—"}</span>
+          </p>
 
           {/* G4 — Bar-Line Process override. Renders only when the backend
               surfaces a bar_line_process string (fields are additive/optional
@@ -1010,10 +1029,10 @@ function PageHeader({
       </div>
       <dl className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-x-4 gap-y-2 text-[12px]">
         <HeaderMeta label="SO" value={soDisplay} title={sos.join(", ")} />
-        <HeaderMeta label="Batch" value={detail.batch_number || "—"} />
-        <HeaderMeta label="Qty" value={fmtKg(detail.planned_qty_kg)} />
+        <HeaderMeta label="Batch" value={detail.batch_number || "—"} highlight={changedKeys.has("batch_number")} />
+        <HeaderMeta label="Qty" value={fmtKg(detail.planned_qty_kg)} highlight={changedKeys.has("planned_qty_kg")} />
         <HeaderMeta label="Plant" value={detail.factory || "—"} />
-        <HeaderMeta label="Floor" value={detail.floor || "—"} />
+        <HeaderMeta label="Floor" value={detail.floor || "—"} highlight={changedKeys.has("floor")} />
         <HeaderMeta label="Plan" value={detail.plan_id ? `#${detail.plan_id}` : "—"} />
       </dl>
     </div>
@@ -1049,13 +1068,33 @@ function BarLineBadge({ detail }: { detail: JobCardDetail }) {
   );
 }
 
-function HeaderMeta({ label, value, title }: { label: string; value: string; title?: string }) {
+function HeaderMeta({ label, value, title, highlight }: { label: string; value: string; title?: string; highlight?: boolean }) {
   return (
     <div className="min-w-0">
       <dt className="uppercase tracking-wide font-semibold text-[var(--text-muted)] text-[10px]">{label}</dt>
-      <dd className="text-[13px] text-[var(--text-primary)] truncate" title={title ?? value}>{value}</dd>
+      <dd className={`text-[13px] text-[var(--text-primary)] truncate ${highlight ? "bg-[#fbeced] rounded-sm px-1" : ""}`} title={title ?? value}>{value}</dd>
     </div>
   );
+}
+
+// Shared JC edit-log reader → the Set of field keys ever changed (so an edited
+// value renders light red). Keys: header cols verbatim (e.g. "batch_number"),
+// "box:<id>.<field>", "batch:<id>.batch_label". `dep` re-fetches after a reload.
+function useJcEditLog(jcId: number, dep?: unknown): Set<string> {
+  const [keys, setKeys] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(async () => {
+      try {
+        const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/edit-log`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { changes?: { field_name: string }[] };
+        if (!cancelled) setKeys(new Set((data.changes ?? []).map((c) => c.field_name)));
+      } catch { /* non-fatal */ }
+    });
+    return () => { cancelled = true; };
+  }, [jcId, dep]);
+  return keys;
 }
 
 // ── Action bar ───────────────────────────────────────────────────────────
@@ -1228,6 +1267,7 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
 type BatchRow = {
   batch_id: number;
   batch_number: number;
+  batch_label?: string | null;   // 072: operator-typed free-text name; null → "Batch N"
   batch_date: string | null;
   status: string;
   planned_qty_kg: number | string | null;
@@ -1255,6 +1295,12 @@ type BatchRow = {
   balance_difference_qty: number | string | null;
   closure_remarks: string | null;
 };
+
+// Display name for a batch: the operator-typed label (072) when present,
+// else the system "Batch <number>". One helper so every accounting spot agrees.
+function batchLabel(b: { batch_label?: string | null; batch_number: number }): string {
+  return b.batch_label?.trim() || `Batch ${b.batch_number}`;
+}
 
 function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () => void }) {
   const [batches, setBatches] = useState<BatchRow[]>([]);
@@ -1373,7 +1419,7 @@ function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
             </div>
           ) : openBatch ? (
             <div className="text-[13px] text-[var(--text-primary)]">
-              <span className="font-semibold">Batch {openBatch.batch_number}</span>
+              <span className="font-semibold">{batchLabel(openBatch)}</span>
               {openBatch.batch_date ? (
                 <span className="ml-2 text-[var(--text-secondary)]">· {openBatch.batch_date}</span>
               ) : null}
@@ -2281,24 +2327,27 @@ function TabStrip({ value, onChange }: { value: TabKey; onChange: (t: TabKey) =>
 }
 
 function TabPanel({
-  detail, chain, tab, onReload, onJumpJc,
+  detail, chain, tab, onReload, onJumpJc, onJumpToBoxes, focusBatchId, onFocusConsumed,
 }: {
   detail: JobCardDetail;
   chain: ChainStep[];
   tab: TabKey;
   onReload: () => void;
   onJumpJc: (id: number) => void;
+  onJumpToBoxes: (batchId: number) => void;
+  focusBatchId: number | null;
+  onFocusConsumed: () => void;
 }) {
   switch (tab) {
     case "chain":      return <StageChainTab chain={chain} detail={detail} onJump={onJumpJc} />;
     case "rawmaterial": return <RawMaterialTab jcId={detail.job_card_id} />;
     case "overview":   return <OverviewTab detail={detail} chain={chain} onReload={onReload} />;
-    case "accounting": return <AccountingTab detail={detail} onReload={onReload} />;
+    case "accounting": return <AccountingTab detail={detail} onReload={onReload} onJumpToBoxes={onJumpToBoxes} />;
     case "output":     return <OutputTab detail={detail} onReload={onReload} />;
     case "quality":    return <QualityTab detail={detail} onReload={onReload} />;
     case "signoffs":   return <SignOffsTab detail={detail} onReload={onReload} />;
     case "remarks":    return <RemarksTab detail={detail} onReload={onReload} />;
-    case "sfgboxes":   return <SfgBoxesTab detail={detail} />;
+    case "sfgboxes":   return <SfgBoxesTab detail={detail} focusBatchId={focusBatchId} onFocusConsumed={onFocusConsumed} />;
     case "amendments": return <AmendmentsTab jcId={detail.job_card_id} />;
   }
 }
@@ -2307,13 +2356,17 @@ function TabPanel({
 // Producer stages (output_kind SFG/WIP) split their net SFG into weighed boxes
 // and print one QR label per box; consumer stages (input_kind SFG) scan those
 // QRs to receive the SFG, with wrong-SFG / wrong-source / already-received boxes
-// rejected. box_id is the 8-digit numeric QR payload.
+// rejected. box_id is the "<8-digit-time-base>-<counter>" TEXT QR payload (mig 070).
 
 type SfgBoxRow = {
-  box_id: number;            // carton_id aliased AS box_id by the backend (mig 067)
+  box_id: string;            // carton_id aliased AS box_id; TEXT "<base>-<counter>" (mig 070)
   sfg_code: string | null;
+  fg_sku_name?: string | null;  // SFG name, now stamped on the box at creation
   net_weight: number;
   gross_weight: number | null;
+  batch_code?: string | null;
+  batch_id?: number | null;     // linked job_card_batch_v2.batch_id (8-digit bigint)
+  units?: number | null;
   status: string;
   received_into_job_card_id: number | null;
   // Optional / phase-7 genealogy additions. box_number/total_boxes/lot_number
@@ -2321,44 +2374,7 @@ type SfgBoxRow = {
   box_number?: number;
   total_boxes?: number;
   lot_number?: string | null;
-  parent_box_id?: number | null;
-};
-
-// ── SFG genealogy (Phase 7) ───────────────────────────────────────────────
-// Fixed contract from the backend agent — these endpoints may not exist yet at
-// runtime, so every fetch is fully defensive (404 / empty ⇒ quiet "no data").
-type GenealogyBox = {
-  box_id: number;
-  sfg_code: string;
-  lot_number: string | null;
-  parent_box_id: number | null;
-  net_weight: number;
-  status: string;
-  source_inventory_batch_id: string | null;
-  job_card_id: number;
-  received_into_job_card_id: number | null;
-  source_job_card_id?: number | null;
-};
-
-type JcGenealogy = {
-  job_card_id: number;
-  produced: GenealogyBox[];
-  consumed: GenealogyBox[];
-};
-
-type ChainNode = {
-  level: number;
-  box_id: number | null;
-  sfg_code: string | null;
-  lot_number: string | null;
-  parent_box_id: number | null;
-  producer_job_card_id?: number | null;
-  source_inventory_batch_id: string | null;
-};
-
-type BoxGenealogy = {
-  box_id: number;
-  chain: ChainNode[];
+  parent_box_id?: string | null;
 };
 
 type SfgScanResult = {
@@ -2366,20 +2382,19 @@ type SfgScanResult = {
   boxes_accepted: number;
   boxes_rejected: number;
   total_received_kg: number;
-  accepted_boxes: { box_id: number; sfg_code: string | null; net_weight: number }[];
-  rejected_boxes: { box_id: number | string; reason: string }[];
+  accepted_boxes: { box_id: string; sfg_code: string | null; net_weight: number }[];
+  rejected_boxes: { box_id: string; reason: string }[];
 };
 
-function SfgBoxesTab({ detail }: { detail: JobCardDetail }) {
+function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCardDetail; focusBatchId?: number | null; onFocusConsumed?: () => void }) {
   const jcId = detail.job_card_id;
   const isProducer = ["SFG", "WIP"].includes((detail.output_kind ?? "").toUpperCase());
   const isConsumer = (detail.input_kind ?? "").toUpperCase() === "SFG";
 
   const [boxes, setBoxes] = useState<SfgBoxRow[]>([]);
-  const [weights, setWeights] = useState<string[]>([""]);
-  const [creating, setCreating] = useState(false);
-  const [createErr, setCreateErr] = useState<string | null>(null);
+  const [batches, setBatches] = useState<BatchOpt[]>([]);
 
+  const [loading, setLoading] = useState(true);   // mirrors Material-In's box fetch
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [scanText, setScanText] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -2387,6 +2402,8 @@ function SfgBoxesTab({ detail }: { detail: JobCardDetail }) {
   const [scanErr, setScanErr] = useState<string | null>(null);
 
   const loadBoxes = useCallback(async () => {
+    setLoading(true);
+    setLoadErr(null);   // clear a prior error so a Retry shows the loading state
     try {
       const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/wip-boxes`);
       if (!res.ok) { setLoadErr(await readApiErrorMessage(res, "Could not load boxes")); return; }
@@ -2395,6 +2412,8 @@ function SfgBoxesTab({ detail }: { detail: JobCardDetail }) {
       setLoadErr(null);
     } catch (e) {
       setLoadErr(friendlyJobCardError(e));
+    } finally {
+      setLoading(false);
     }
   }, [jcId]);
 
@@ -2404,53 +2423,32 @@ function SfgBoxesTab({ detail }: { detail: JobCardDetail }) {
     queueMicrotask(() => { void loadBoxes(); });
   }, [loadBoxes]);
 
-  const plannedNet = useMemo(
-    () => weights.reduce((s, w) => (Number(w) > 0 ? s + Number(w) : s), 0),
-    [weights],
-  );
+  // Job-card batches for the produced-boxes batch dropdowns (edit + add flows).
+  useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(async () => {
+      try {
+        const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/batches`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { batches?: BatchOpt[] };
+        if (!cancelled) setBatches(Array.isArray(data.batches) ? data.batches : []);
+      } catch { /* non-fatal */ }
+    });
+    return () => { cancelled = true; };
+  }, [jcId]);
 
-  async function openLabels() {
-    try {
-      const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/wip-boxes/labels.pdf`);
-      if (!res.ok) { setCreateErr(await readApiErrorMessage(res, "Could not open labels PDF")); return; }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      // noopener (matches the rest of the codebase). Popup blockers may stop a
-      // deferred open — the "Re-print labels" button is the direct-gesture path.
-      window.open(url, "_blank", "noopener");
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    } catch (e) {
-      setCreateErr(friendlyJobCardError(e));
-    }
-  }
-
-  async function createBoxes() {
-    const parsed = weights.map((w) => Number(w)).filter((n) => Number.isFinite(n) && n > 0);
-    if (parsed.length === 0) { setCreateErr("Enter at least one box weight (> 0)."); return; }
-    setCreating(true);
-    setCreateErr(null);
-    try {
-      const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/wip-boxes`, {
-        method: "POST",
-        body: JSON.stringify({ boxes: parsed.map((n) => ({ net_weight: n })) }),
-      });
-      if (!res.ok) { setCreateErr(await readApiErrorMessage(res, "Could not create boxes")); return; }
-      await loadBoxes();
-      setWeights([""]);
-      await openLabels();
-    } catch (e) {
-      setCreateErr(friendlyJobCardError(e));
-    } finally {
-      setCreating(false);
-    }
-  }
+  // Edit log → field keys ever changed, so edited box values render light red.
+  // Re-read whenever boxes reload (after a save) so a fresh edit lights up.
+  const changedKeys = useJcEditLog(jcId, boxes);
 
   async function scanBoxes() {
+    // Box ids are now "<8-digit>-<counter>" TEXT — split on whitespace/comma and
+    // keep the raw strings (no numeric coercion).
     const ids = scanText
       .split(/[\s,]+/)
-      .map((t) => Number(t.trim()))
-      .filter((n) => Number.isFinite(n) && n > 0);
-    if (ids.length === 0) { setScanErr("Enter one or more numeric box ids."); return; }
+      .map((t) => t.trim())
+      .filter(Boolean);
+    if (ids.length === 0) { setScanErr("Enter one or more box ids."); return; }
     setScanning(true);
     setScanErr(null);
     setScanResult(null);
@@ -2480,85 +2478,35 @@ function SfgBoxesTab({ detail }: { detail: JobCardDetail }) {
         <EmptyHint>This stage neither produces nor consumes SFG — no boxes apply.</EmptyHint>
       )}
 
-      {loadErr && (
+      {/* Non-producer box-load errors (consumer stages scan; they don't view the
+          list) still surface here; the producer panel shows its own error+Retry. */}
+      {loadErr && !isProducer && (
         <div className="text-[12px] text-[var(--aws-error)]">{loadErr}</div>
       )}
 
       {isProducer && (
-        <Panel title="Produce boxes & print QR labels">
-          <p className="text-[12px] text-[var(--text-secondary)] mb-3">
-            Split this stage&apos;s net SFG into weighed boxes. Each box gets an 8-digit QR id;
-            labels open as a PDF to print. Σ box weights should match the net SFG produced.
-          </p>
-          {boxes.length > 0 ? (
-            <div className="text-[13px] text-[var(--text-primary)] space-y-1">
-              <div className="font-semibold">
+        <Panel title="Boxes by batch">
+          {/* Fetch UX mirrors the Material-In box loader: error → message + Retry;
+              first load → "Loading boxes…"; otherwise the batch sections. A reload
+              (after a save) keeps the content since boxes are already present. */}
+          {loadErr ? (
+            <p className="text-[12px] text-[var(--aws-error)]">
+              {loadErr}{" "}
+              <button type="button" onClick={() => void loadBoxes()} className="underline">Retry</button>
+            </p>
+          ) : loading && boxes.length === 0 ? (
+            <p className="text-[12px] text-[var(--text-muted)] italic">Loading boxes…</p>
+          ) : (
+            <>
+              <div className="text-[12px] text-[var(--text-muted)] font-semibold mb-2">
                 {boxes.length} box(es) · Σ {boxes.reduce((s, b) => s + Number(b.net_weight), 0).toFixed(3)} kg
               </div>
-              <div className="grid grid-cols-12 gap-2 text-[11px] text-[var(--text-muted)] font-semibold">
-                <div className="col-span-4">Box ID</div>
-                <div className="col-span-3">Net kg</div>
-                <div className="col-span-2">Parent</div>
-                <div className="col-span-3">Status</div>
-              </div>
-              {boxes.map((b) => (
-                <div key={b.box_id} className="grid grid-cols-12 gap-2 text-[12px] items-center">
-                  <div className="col-span-4 font-mono">{b.box_id}</div>
-                  <div className="col-span-3">{Number(b.net_weight).toFixed(3)}</div>
-                  <div className="col-span-2 font-mono">
-                    {b.parent_box_id != null ? b.parent_box_id : <span className="text-[var(--text-muted)]">—</span>}
-                  </div>
-                  <div className="col-span-3 truncate">{b.status}</div>
-                </div>
-              ))}
-              <button type="button" className={`${btnCls} mt-2`} onClick={() => void openLabels()}>
-                Re-print labels
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {weights.map((w, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <span className="text-[12px] text-[var(--text-muted)] w-14">Box {i + 1}</span>
-                  <input
-                    type="number"
-                    step="any"
-                    inputMode="decimal"
-                    placeholder="net kg"
-                    className={`${inputCls} w-32`}
-                    value={w}
-                    onChange={(e) =>
-                      setWeights((prev) => prev.map((x, j) => (j === i ? e.target.value : x)))
-                    }
-                  />
-                  {weights.length > 1 && (
-                    <button
-                      type="button"
-                      className="text-[12px] text-[var(--aws-error)] hover:underline"
-                      onClick={() => setWeights((prev) => prev.filter((_, j) => j !== i))}
-                    >
-                      remove
-                    </button>
-                  )}
-                </div>
-              ))}
-              <div className="flex items-center gap-3 pt-1">
-                <button
-                  type="button"
-                  className="text-[12px] text-[var(--aws-link)] hover:underline"
-                  onClick={() => setWeights((prev) => [...prev, ""])}
-                >
-                  + add box
-                </button>
-                <span className="text-[12px] text-[var(--text-muted)]">
-                  Σ {plannedNet.toFixed(3)} kg
-                </span>
-              </div>
-              {createErr && <div className="text-[12px] text-[var(--aws-error)]">{createErr}</div>}
-              <button type="button" className={btnCls} disabled={creating} onClick={() => void createBoxes()}>
-                {creating ? "Creating…" : "Create boxes & print labels"}
-              </button>
-            </div>
+              {/* One expandable section per accounting batch. Each is editable (Update),
+                  appendable (+ Add Boxes), and printable (per-box / all / range) with
+                  pagination; a blank batch shows an add-boxes prompt. Print QR from the
+                  Accounting tab expands+opens that batch's add panel. */}
+              <SfgProducedBoxes jcId={jcId} boxes={boxes} batches={batches} changedKeys={changedKeys} onReload={() => void loadBoxes()} focusBatchId={focusBatchId} onFocusConsumed={onFocusConsumed} />
+            </>
           )}
         </Panel>
       )}
@@ -2599,193 +2547,7 @@ function SfgBoxesTab({ detail }: { detail: JobCardDetail }) {
           )}
         </Panel>
       )}
-
-      <SfgGenealogyPanel jcId={jcId} />
     </div>
-  );
-}
-
-// ── SFG genealogy panel (Phase 7) ─────────────────────────────────────────
-// Box→box→lot traceability for WIP SFG boxes. Two groups ("Produced here" /
-// "Consumed here") plus a per-box "Trace" expander that walks the upstream
-// chain. Fully defensive: a missing/empty endpoint shows a quiet hint, never
-// throws — the backend endpoints land in parallel and may 404 at runtime.
-
-function LotChip({ lot }: { lot: string }) {
-  return (
-    <span className="font-mono text-[11px] font-semibold text-[var(--aws-navy)] bg-[var(--surface-divider)] rounded-sm px-1.5 py-0.5">
-      {lot}
-    </span>
-  );
-}
-
-function SfgGenealogyPanel({ jcId }: { jcId: number }) {
-  const [data, setData] = useState<JcGenealogy | null>(null);
-  const [loading, setLoading] = useState(true);
-  // No visible error UI: a 404/parse failure simply resolves to the "no
-  // genealogy yet" empty state (the endpoint may not exist yet).
-  const [unavailable, setUnavailable] = useState(false);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/sfg-genealogy`);
-      if (!res.ok) { setUnavailable(true); setData(null); return; }
-      const json = (await res.json()) as Partial<JcGenealogy> | null;
-      setData({
-        job_card_id: jcId,
-        produced: Array.isArray(json?.produced) ? json!.produced : [],
-        consumed: Array.isArray(json?.consumed) ? json!.consumed : [],
-      });
-      setUnavailable(false);
-    } catch {
-      setUnavailable(true);
-      setData(null);
-    } finally {
-      setLoading(false);
-    }
-  }, [jcId]);
-
-  useEffect(() => {
-    queueMicrotask(() => { void load(); });
-  }, [load]);
-
-  const produced = data?.produced ?? [];
-  const consumed = data?.consumed ?? [];
-  const empty = !loading && (unavailable || (produced.length === 0 && consumed.length === 0));
-
-  return (
-    <Panel title="Lot & box genealogy">
-      <p className="text-[12px] text-[var(--text-secondary)] mb-3">
-        Traceability for SFG boxes flowing through this job card — boxes produced
-        here and boxes consumed here, each traceable upstream box → lot → source
-        batch → producing job card.
-      </p>
-
-      {loading && <EmptyHint>Loading genealogy…</EmptyHint>}
-
-      {empty && <EmptyHint>No genealogy yet.</EmptyHint>}
-
-      {!loading && !empty && (
-        <div className="space-y-4">
-          <GenealogyGroup title="Produced here" boxes={produced} showSource={false} />
-          <GenealogyGroup title="Consumed here" boxes={consumed} showSource />
-        </div>
-      )}
-    </Panel>
-  );
-}
-
-function GenealogyGroup({
-  title, boxes, showSource,
-}: { title: string; boxes: GenealogyBox[]; showSource: boolean }) {
-  return (
-    <div>
-      <div className="text-[11px] uppercase tracking-wide font-semibold text-[var(--text-muted)] mb-1">
-        {title} · {boxes.length}
-      </div>
-      {boxes.length === 0 ? (
-        <EmptyHint>None.</EmptyHint>
-      ) : (
-        <div className="space-y-1">
-          {boxes.map((b) => (
-            <GenealogyBoxRow key={b.box_id} box={b} showSource={showSource} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function GenealogyBoxRow({ box, showSource }: { box: GenealogyBox; showSource: boolean }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="border border-[var(--aws-border)] rounded-md p-2 bg-white">
-      <div className="flex items-center gap-2 flex-wrap text-[12px]">
-        <span className="font-mono text-[var(--aws-link)] font-semibold">{box.box_id}</span>
-        <SfgCodeChip code={box.sfg_code} />
-        {box.lot_number ? <LotChip lot={box.lot_number} /> : null}
-        <span className="text-[var(--text-secondary)]">{Number(box.net_weight).toFixed(3)} kg</span>
-        <span className="text-[var(--text-muted)]">· {box.status}</span>
-        {showSource && box.source_job_card_id != null && (
-          <span className="text-[var(--text-muted)]">· from JC {box.source_job_card_id}</span>
-        )}
-        <button
-          type="button"
-          className="ml-auto text-[12px] text-[var(--aws-link)] hover:underline"
-          onClick={() => setOpen((v) => !v)}
-        >
-          {open ? "Hide trace" : "Trace"}
-        </button>
-      </div>
-      {open && <BoxTrace boxId={box.box_id} />}
-    </div>
-  );
-}
-
-function SfgCodeChip({ code }: { code: string | null }) {
-  if (!code) return <span className="text-[var(--text-muted)]">—</span>;
-  return <span className="font-mono font-semibold text-[var(--aws-navy)]">{code}</span>;
-}
-
-function BoxTrace({ boxId }: { boxId: number }) {
-  const [chain, setChain] = useState<ChainNode[] | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [unavailable, setUnavailable] = useState(false);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await apiFetch(`/api/v1/production/sfg-boxes/${boxId}/genealogy`);
-      if (!res.ok) { setUnavailable(true); setChain(null); return; }
-      const json = (await res.json()) as { chain?: ChainNode[] } | null;
-      setChain(Array.isArray(json?.chain) ? json!.chain : []);
-      setUnavailable(false);
-    } catch {
-      setUnavailable(true);
-      setChain(null);
-    } finally {
-      setLoading(false);
-    }
-  }, [boxId]);
-
-  useEffect(() => {
-    queueMicrotask(() => { void load(); });
-  }, [load]);
-
-  if (loading) {
-    return <div className="mt-2 pl-2 text-[12px] text-[var(--text-muted)] italic">Tracing…</div>;
-  }
-  if (unavailable || !chain || chain.length === 0) {
-    return <div className="mt-2 pl-2 text-[12px] text-[var(--text-muted)] italic">No upstream lineage yet.</div>;
-  }
-
-  return (
-    <ol className="mt-2 border-t border-[var(--surface-divider)] pt-2 space-y-1">
-      {chain.map((node, i) => (
-        <li
-          key={`${node.level}-${node.box_id ?? "x"}-${i}`}
-          className="text-[12px] flex items-center gap-2 flex-wrap"
-          // Level-based indent: each step upstream nests one notch deeper.
-          style={{ paddingLeft: `${Math.max(0, node.level) * 14}px` }}
-        >
-          <span className="text-[var(--text-muted)]">{node.level === 0 ? "•" : "↳"}</span>
-          {node.box_id != null && (
-            <span className="font-mono text-[var(--aws-link)] font-semibold">{node.box_id}</span>
-          )}
-          <SfgCodeChip code={node.sfg_code} />
-          {node.lot_number ? <LotChip lot={node.lot_number} /> : null}
-          {node.source_inventory_batch_id && (
-            <span className="font-mono text-[11px] text-[var(--text-muted)]">
-              batch {node.source_inventory_batch_id}
-            </span>
-          )}
-          {node.producer_job_card_id != null && (
-            <span className="text-[var(--text-muted)]">· JC {node.producer_job_card_id}</span>
-          )}
-        </li>
-      ))}
-    </ol>
   );
 }
 
@@ -3339,7 +3101,10 @@ function SignOffsTab({ detail, onReload }: { detail: JobCardDetail; onReload: ()
 //    Card 3 (Accounting Summary) — read-only reconciliation.
 // ═════════════════════════════════════════════════════════════════════════════
 
-function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: () => void }) {
+function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDetail; onReload: () => void; onJumpToBoxes: (batchId: number) => void }) {
+  // Producer stages (SFG/WIP) are the ones whose batches have printable boxes,
+  // so the per-batch "Print QR" jump only shows there.
+  const isProducerStage = ["SFG", "WIP"].includes((detail.output_kind ?? "").toUpperCase());
   // C3: lock gate. When isLocked, every operational input + the SAVE OUTPUT
   // button below take `disabled = submitting || lock.isLocked`. The save
   // path remains untouched — if a stale form is somehow submitted, the
@@ -3437,6 +3202,19 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
   // Stage 3: form is read-only when no batch picked, or the picked
   // batch is closed/cancelled.  Operator opens a fresh batch to record.
   const batchIsOpen = selectedBatch?.status === "open";
+
+  // Edit-log red markers: a figure whose accounting field ever changed shows a
+  // red tint. Backend logs the field as `accounting:{batch_id}.{col}` (per-batch)
+  // or `accounting.{col}` (legacy JC-level), so check both for the picked batch.
+  const changedKeys = useJcEditLog(detail.job_card_id, detail);
+  const acctRed = (col: string): boolean =>
+    changedKeys.has(`accounting:${selectedBatchId}.${col}`) ||
+    changedKeys.has(`accounting.${col}`);
+  // A material's consumed qty was edited (per the JC edit log) → red input. Backend
+  // keys it 'consumption:<batch>:<material>.actual_consumed_qty' (or no-batch form).
+  const consRed = (material: string): boolean =>
+    changedKeys.has(`consumption:${selectedBatchId}:${material}.actual_consumed_qty`) ||
+    changedKeys.has(`consumption:${material}.actual_consumed_qty`);
 
   // ── Stage 3 final: across-batches rollup ────────────────────────
   // Sums the per-batch summary columns from every batch row.  Read-
@@ -3702,20 +3480,32 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
     { kind: "ok" | "err"; msg: string } | null
   >(null);
   const [closeBatchModal, setCloseBatchModal] = useState<BatchRow | null>(null);
+  // 072: operator-typed batch name for the next Open Batch. Blank → server
+  // keeps NULL and the batch shows as "Batch <number>".
+  const [newBatchLabel, setNewBatchLabel] = useState("");
 
   const doOpenBatch = useCallback(async () => {
+    const label = newBatchLabel.trim();
+    // Batch name is mandatory — operator must name every batch.
+    if (!label) {
+      setBatchActionMsg({ kind: "err", msg: "Enter a batch name before opening a batch." });
+      return;
+    }
+    // Confirm before creating — a new batch is not trivially undoable.
+    if (!window.confirm(`Open a new batch named "${label}"?`)) return;
     setBatchActionMsg(null);
     setBatchActionBusy(true);
     try {
       const res = await apiFetch(
         `/api/v1/production/job-cards-v2/${detail.job_card_id}/batches/open`,
-        { method: "POST", body: JSON.stringify({}) },
+        { method: "POST", body: JSON.stringify({ batch_label: label }) },
       );
       if (!res.ok) {
         throw new Error(
           await readApiErrorMessage(res, `HTTP ${res.status}`),
         );
       }
+      setNewBatchLabel("");
       setBatchActionMsg({ kind: "ok", msg: "Batch opened." });
       // R10 — explicit refresh; the [detail.job_card_id]-only batches
       // effect won't pick up the new batch otherwise. Run both: the
@@ -3729,7 +3519,35 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
     } finally {
       setBatchActionBusy(false);
     }
-  }, [detail.job_card_id, onReload, refetchBatches]);
+  }, [detail.job_card_id, onReload, refetchBatches, newBatchLabel]);
+
+  // 072: rename a batch (so a batch — including legacy ones — can be given the
+  // free-text name shown in the batch table). Acts on the passed row.
+  const doRenameBatch = useCallback(async (batch: BatchRow) => {
+    const input = window.prompt("Batch name:", batch.batch_label ?? "");
+    if (input === null) return; // cancelled
+    const label = input.trim();
+    // Batch name is mandatory — a rename cannot blank it out.
+    if (!label) {
+      setBatchActionMsg({ kind: "err", msg: "Batch name cannot be empty." });
+      return;
+    }
+    setBatchActionMsg(null);
+    setBatchActionBusy(true);
+    try {
+      const res = await apiFetch(
+        `/api/v1/production/job-cards-v2/${detail.job_card_id}/batches/${batch.batch_id}/rename`,
+        { method: "POST", body: JSON.stringify({ batch_label: label }) },
+      );
+      if (!res.ok) throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
+      setBatchActionMsg({ kind: "ok", msg: "Batch renamed." });
+      await refetchBatches();
+    } catch (e) {
+      setBatchActionMsg({ kind: "err", msg: friendlyJobCardError(e) });
+    } finally {
+      setBatchActionBusy(false);
+    }
+  }, [detail.job_card_id, refetchBatches]);
 
   // Re-sync on detail reload. Skipped when the operator has unsaved
   // input (formDirty.current === true) so an auto-poll doesn't wipe the
@@ -4986,74 +4804,142 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
             />
           </dl>
         ) : null}
-        <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-2 flex-wrap">
-          <label className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)] sm:w-[110px]">
-            Recording for
-          </label>
-          {batchesLoading && batches.length === 0 ? (
-            <span className="text-[12px] text-[var(--text-muted)] italic">
-              loading batches…
-            </span>
-          ) : batches.length === 0 ? (
-            <span className="text-[12px] text-[var(--text-secondary)]">
-              No batches yet — click <strong>Open Batch</strong> to create the first one.
-            </span>
-          ) : (
-            <select
-              value={selectedBatchId ?? ""}
-              onChange={(e) => {
-                const raw = e.target.value;
-                changeBatch(raw === "" ? null : parseInt(raw, 10));
-              }}
-              disabled={submitting || lock.isLocked}
-              className={`${inputCls} max-w-full sm:max-w-[420px] flex-1 min-w-[200px]`}
-              aria-label="Select batch for recording"
+        {/* Open a new batch — name is mandatory. */}
+        {detail.status !== "completed" || isAdmin ? (
+          <div className="flex items-center gap-2 mb-3 flex-wrap">
+            <label className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)] sm:w-[110px]">
+              New batch
+            </label>
+            <input
+              type="text"
+              value={newBatchLabel}
+              onChange={(e) => setNewBatchLabel(e.target.value)}
+              disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked}
+              placeholder="Batch name (required)"
+              maxLength={120}
+              required
+              aria-label="Batch name for the new batch"
+              className={`${inputCls} h-7 w-[220px] text-[12px]`}
+            />
+            <button
+              type="button"
+              onClick={() => void doOpenBatch()}
+              disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked || !newBatchLabel.trim()}
+              title={lifecycleLocked ? "Start the job card first" : !newBatchLabel.trim() ? "Enter a batch name first" : undefined}
+              className="h-7 px-3 text-[11px] font-semibold rounded-[2px] border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {[...batches]
-                .sort((a, b) => b.batch_number - a.batch_number)
-                .map((b) => {
-                  const status = b.status === "open"
-                    ? "open"
-                    : b.status === "closed" ? "closed" : "cancelled";
-                  const istHint = b.status === "open"
-                    ? (b.opened_at_ist ? ` · opened ${b.opened_at_ist}` : "")
-                    : (b.closed_at_ist ? ` · closed ${b.closed_at_ist}` : "");
-                  return (
-                    <option key={b.batch_id} value={b.batch_id}>
-                      Batch {b.batch_number} ({status}){istHint}
-                    </option>
-                  );
-                })}
-            </select>
-          )}
-          {/* Open / Close buttons — single source of truth for batch
-              lifecycle.  BatchBand below still shows the history table
-              but its inline Open/Close buttons are suppressed when these
-              are visible (avoiding duplicate controls).
-              R10 — once the JC is marked completed, non-admin operators
-              can no longer open new batches or close existing ones; only
-              admin keeps the affordance for post-complete corrections.
-              Admin override checkbox below (visible only on closed
-              batches) is unaffected — it remains the canonical way to
-              edit a sealed batch's data. */}
-          {detail.status !== "completed" || isAdmin ? (
-            <div className="flex items-center gap-2 sm:ml-auto">
-              <button
-                type="button"
-                onClick={() => void doOpenBatch()}
-                disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked}
-                title={lifecycleLocked ? "Start the job card first" : undefined}
-                className="h-7 px-3 text-[11px] font-semibold rounded-[2px] border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {batchActionBusy ? "…" : "Open Batch"}
-              </button>
-              {/* Close Batch moved to sit next to the Save/Edit Batch
-                  submit at the bottom of the form (FormFooter extraActions)
-                  so the "save then close" flow lives in one row instead of
-                  scrolling up to the Batch Context panel. */}
-            </div>
-          ) : null}
-        </div>
+              {batchActionBusy ? "…" : "Open Batch"}
+            </button>
+          </div>
+        ) : null}
+
+        {/* Batch list — open + closed (+ cancelled), each row with Load then
+            Close actions. Load hydrates the form with that batch's data
+            (replaces the old "Recording for" dropdown); Close closes an open
+            batch. Rename kept as a tertiary action. */}
+        {batchesLoading && batches.length === 0 ? (
+          <div className="text-[12px] text-[var(--text-muted)] italic mb-2">loading batches…</div>
+        ) : batches.length === 0 ? (
+          <div className="text-[12px] text-[var(--text-secondary)] mb-2">
+            No batches yet — enter a name and click <strong>Open Batch</strong> to create the first one.
+          </div>
+        ) : (
+          <div className="overflow-x-auto rounded-[2px] border border-[var(--aws-border)] bg-white mb-2">
+            <table className="w-full text-[12px] border-collapse">
+              <thead className="bg-[var(--surface-subtle)]">
+                <tr className="border-b border-[var(--aws-border)]">
+                  {["Batch", "Status", "Produced (kg)", "Input (kg)", "Process Loss (kg)", "Opened", "Closed", "Actions"].map((h) => (
+                    <th key={h} className="px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {[...batches]
+                  .sort((a, b) => b.batch_number - a.batch_number)
+                  .map((b) => {
+                    const isLoaded = b.batch_id === selectedBatchId;
+                    const isOpen = b.status === "open";
+                    const canManage = detail.status !== "completed" || isAdmin;
+                    const busy = batchActionBusy || submitting || lock.isLocked || lifecycleLocked;
+                    const numCell = (v: number | string | null | undefined) =>
+                      v == null || v === "" ? "—" : fmtNum(Number(v));
+                    const statusColor = isOpen
+                      ? "bg-[#eaf6ed] text-[#1d8102]"
+                      : b.status === "closed" ? "bg-[#eef2f8] text-[#33507a]" : "bg-[#f4eaea] text-[#8a3d3d]";
+                    return (
+                      <tr key={b.batch_id} className={`border-b border-[var(--aws-border)] last:border-b-0 ${isLoaded ? "bg-[#eaf0fb]" : ""}`}>
+                        <td className="px-2 py-1 font-semibold text-[var(--text-primary)] whitespace-nowrap">
+                          {batchLabel(b)}{isLoaded ? <span className="ml-1 text-[10px] font-normal text-[var(--aws-link)]">· loaded</span> : null}
+                        </td>
+                        <td className="px-2 py-1">
+                          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${statusColor}`}>{b.status}</span>
+                        </td>
+                        <td className="px-2 py-1 font-mono">{numCell(b.produced_qty_kg)}</td>
+                        <td className="px-2 py-1 font-mono">{numCell(b.input_qty_kg)}</td>
+                        <td className="px-2 py-1 font-mono">{numCell(b.process_loss_kg)}</td>
+                        <td className="px-2 py-1 whitespace-nowrap text-[var(--text-secondary)]">{b.opened_at_ist || "—"}</td>
+                        <td className="px-2 py-1 whitespace-nowrap text-[var(--text-secondary)]">{b.closed_at_ist || "—"}</td>
+                        <td className="px-2 py-1">
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => changeBatch(b.batch_id)}
+                              disabled={isLoaded || submitting || lock.isLocked}
+                              title={isLoaded ? "Already loaded" : "Load this batch's data"}
+                              className="h-7 px-2 text-[11px] font-semibold rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[#2c5fa8] hover:text-[#2c5fa8] disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {isLoaded ? "Loaded" : "Load"}
+                            </button>
+                            {canManage ? (
+                              <button
+                                type="button"
+                                onClick={() => setCloseBatchModal(b)}
+                                // Gate to the LOADED batch: the close modal pre-fills its
+                                // produced/RM/EGA figures from THIS form's live state (scoped
+                                // to selectedBatchId). Closing a non-loaded batch would seed it
+                                // with the wrong batch's numbers → corrupt close. Load first.
+                                disabled={busy || !isOpen || !isLoaded}
+                                title={
+                                  !isOpen ? `Batch is ${b.status}`
+                                  : !isLoaded ? "Load this batch first"
+                                  : lifecycleLocked ? "Start the job card first"
+                                  : "Close this batch"
+                                }
+                                className="h-7 px-2 text-[11px] font-semibold rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-orange)] disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                Close
+                              </button>
+                            ) : null}
+                            {canManage ? (
+                              <button
+                                type="button"
+                                onClick={() => void doRenameBatch(b)}
+                                disabled={busy}
+                                title="Rename this batch"
+                                className="h-7 px-2 text-[11px] rounded-[2px] border border-transparent text-[var(--aws-link)] hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                Rename
+                              </button>
+                            ) : null}
+                            {isProducerStage ? (
+                              <button
+                                type="button"
+                                onClick={() => onJumpToBoxes(b.batch_id)}
+                                title="Open this batch's box section in Boxes printing"
+                                className="h-7 px-2 text-[11px] font-semibold rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[#2c5fa8] hover:text-[#2c5fa8]"
+                              >
+                                Print QR
+                              </button>
+                            ) : null}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+              </tbody>
+            </table>
+          </div>
+        )}
         {batchActionMsg ? (
           <div
             role="status"
@@ -5078,7 +4964,7 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
               className="text-[12px] px-2 py-1.5 rounded border bg-[#fff7e6] border-[#f0d099] text-[#8a5e10] flex flex-col sm:flex-row sm:items-center gap-2"
             >
               <span className="flex-1">
-                Batch {selectedBatch.batch_number} is {selectedBatch.status}.{" "}
+                {batchLabel(selectedBatch)} is {selectedBatch.status}.{" "}
                 {adminOverrideActive ? (
                   <strong>Admin override active</strong>
                 ) : (
@@ -5102,7 +4988,7 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
               role="status"
               className="text-[12px] px-2 py-1.5 rounded border bg-[#fff7e6] border-[#f0d099] text-[#8a5e10]"
             >
-              Batch {selectedBatch.batch_number} is {selectedBatch.status}. The form below is read-only — only admins can edit closed batches.
+              {batchLabel(selectedBatch)} is {selectedBatch.status}. The form below is read-only — only admins can edit closed batches.
             </div>
           )
         ) : selectedBatch == null && batches.length > 0 ? (
@@ -5110,7 +4996,7 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
             role="status"
             className="text-[12px] px-2 py-1.5 rounded border bg-[#fff7e6] border-[#f0d099] text-[#8a5e10]"
           >
-            Pick a batch above to load its recorded output.
+            Load a batch from the table above to view or record its output.
           </div>
         ) : null}
       </Panel>
@@ -5136,8 +5022,8 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
           <KV label="RM Issued (kg)"    value={fmtKg(rmIssuedKg)} />
         </dl>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-          <FormNumber label="FG Actual Units" value={fgActualUnits} onChange={onChangeUnits} disabled={inputsDisabled} />
-          <FormNumber label="FG Actual Kg"    value={fgActualKg}    onChange={onChangeFgActualKg}    disabled={inputsDisabled} />
+          <FormNumber label="FG Actual Units" value={fgActualUnits} onChange={onChangeUnits} disabled={inputsDisabled} highlight={acctRed("output_qty_units")} />
+          <FormNumber label="FG Actual Kg"    value={fgActualKg}    onChange={onChangeFgActualKg}    disabled={inputsDisabled} highlight={acctRed("output_qty")} />
         </div>
 
         {/* Slice 5: SFG inventory picker — only on a consuming stage (this JC
@@ -5178,7 +5064,7 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
                   </div>
                   <input
                     type="number" step="any" placeholder={`Qty (${a.uom})`}
-                    className={`${inputCls} col-span-3 lg:col-span-2`}
+                    className={`${inputCls} col-span-3 lg:col-span-2${consRed(a.material_sku_name) ? " bg-[#fbeced]" : ""}`}
                     value={consumption[key] ?? ""}
                     onChange={(e) => { markSectionDirty("consumption"); setConsumption((c) => ({ ...c, [key]: e.target.value })); }}
                     onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
@@ -5420,7 +5306,7 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
 
         {/* Process Loss + computed % */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2">
-          <FormNumber label="Process Loss (kg)" value={processLoss} onChange={onChangeProcessLoss} disabled={inputsDisabled} />
+          <FormNumber label="Process Loss (kg)" value={processLoss} onChange={onChangeProcessLoss} disabled={inputsDisabled} highlight={acctRed("process_loss_qty")} />
           <div>
             <FormLabel>Process Loss %</FormLabel>
             <div className={`${inputCls} bg-[var(--surface-subtle)] flex items-center`}>
@@ -5437,7 +5323,7 @@ function AccountingTab({ detail, onReload }: { detail: JobCardDetail; onReload: 
           <>
             <SubsectionLabel className="mt-4">Extra Giveaway (EGA)</SubsectionLabel>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <FormNumber label="Qty (kg)" value={extraGiveawayQty} onChange={setExtraGiveawayQty} disabled={inputsDisabled} />
+              <FormNumber label="Qty (kg)" value={extraGiveawayQty} onChange={setExtraGiveawayQty} disabled={inputsDisabled} highlight={acctRed("extra_give_away_qty")} />
             </div>
             <p className="mt-1 text-[10px] text-[var(--text-muted)] italic">
               Consolidated across RM articles — per-material attribution isn&apos;t captured.
@@ -5947,7 +5833,7 @@ function AccountingSummaryCard({
             className="mb-2 border border-[var(--aws-border)] rounded-md"
           >
             <summary className="cursor-pointer select-none px-3 py-2 text-[12px] font-semibold text-[var(--text-primary)] flex items-center gap-2 hover:bg-[var(--aws-bg-tint)]">
-              <span>Batch {batch.batch_number}</span>
+              <span>{batchLabel(batch)}</span>
               <span className="text-[10px] font-normal text-[var(--text-muted)]">
                 · {batch.status}
                 {batch.opened_at_ist ? ` · opened ${batch.opened_at_ist}` : ""}
@@ -6830,19 +6716,20 @@ function FormText({ label, value, onChange, disabled, placeholder }: { label: st
     </label>
   );
 }
-function FormNumber({ label, value, onChange, disabled, placeholder }: { label: string; value: string; onChange: (v: string) => void; disabled?: boolean; placeholder?: string }) {
+function FormNumber({ label, value, onChange, disabled, placeholder, highlight }: { label: string; value: string; onChange: (v: string) => void; disabled?: boolean; placeholder?: string; highlight?: boolean }) {
   // onWheel→blur: <input type="number"> increments on mouse-wheel by
   // default, so scrolling past a row of inputs randomly mutates values.
   // Blurring the focused field on wheel disables that behaviour without
   // breaking explicit click-then-scroll editing — the operator can
   // re-focus to nudge a value if they truly want to.
+  // highlight: field was edited at least once (per the JC edit log) → red tint.
   return (
     <label className="block">
       <FormLabel>{label}</FormLabel>
       <input
         type="number"
         step="any"
-        className={inputCls}
+        className={highlight ? `${inputCls} bg-[#fbeced]` : inputCls}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}

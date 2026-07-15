@@ -72,7 +72,9 @@ export default function ModulesPage() {
     const visible = me?.is_admin
       ? MODULES
       : scoped
-        ? MODULES.filter((m) => scoped.includes(m.route))
+        // A tile is visible if a scope entry IS the tile route or lives UNDER it
+        // (e.g. scope "production/so-creation" keeps the "production" tile shown).
+        ? MODULES.filter((m) => scoped.some((k) => k === m.route || k.startsWith(m.route + "/")))
         : MODULES.filter((m) =>
             !m.adminOnly &&
             (!m.allowedRoles || m.allowedRoles.some((r) => myRoles.includes(r))));

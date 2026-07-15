@@ -782,6 +782,12 @@ export default function VendorNewPage(): React.JSX.Element {
             onDrag={setDrag} onAddFiles={addFiles} onRemoveFile={removeFile} onSetDocType={setFileDocType}
             onRun={runExtract} onCancel={cancelExtract}
             onSkip={() => { setSkipped(true); setError(null); setStep(2); }}
+            onPickConflict={(field, value) => {
+              // Write the picked value, then re-add the key to autoFilled so the
+              // Step 2/3 field shows it with the "auto" badge (setField clears it).
+              setField(field as FormKey, value);
+              setAutoFilled((a) => { const n = new Set(a); n.add(field); return n; });
+            }}
           />
         )}
         {step === 2 && (
@@ -976,15 +982,19 @@ const SECTION_TITLE = "text-[10px] uppercase tracking-wide font-bold text-[var(-
 // ── Step 1: Upload + Extract ───────────────────────────────────────────────
 function Step1({
   filesQueue, extraction, extracting, drag, fileInputRef,
-  onDrag, onAddFiles, onRemoveFile, onSetDocType, onRun, onCancel, onSkip,
+  onDrag, onAddFiles, onRemoveFile, onSetDocType, onRun, onCancel, onSkip, onPickConflict,
 }: {
   filesQueue: QueuedFile[]; extraction: ExtractBulkResult | null; extracting: boolean; drag: boolean;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   onDrag: (v: boolean) => void; onAddFiles: (f: FileList | File[]) => void;
   onRemoveFile: (id: string) => void; onSetDocType: (id: string, dt: string) => void;
   onRun: () => void; onCancel: () => void; onSkip: () => void;
+  onPickConflict: (field: string, value: string) => void;
 }): React.JSX.Element {
   const conflicts = extraction?.conflicts ?? [];
+  // Which candidate the user picked per conflicting field — drives the selected/
+  // sibling-disabled styling (mirrors the Electron picker's btn.disabled lock-in).
+  const [picked, setPicked] = useState<Record<string, string>>({});
   const locked = extraction != null || extracting; // queue is read-only while/after extraction
   const okCount = filesQueue.filter((f) => f.status === "ok").length;
   const failCount = filesQueue.filter((f) => f.status === "failed").length;
@@ -1113,9 +1123,49 @@ function Step1({
             ))}
           </ul>
           {conflicts.length > 0 && (
-            <p className="text-[12px] text-[var(--text-secondary)] mt-2">
-              {conflicts.length} field{conflicts.length === 1 ? "" : "s"} had conflicting values across documents — double-check the badged fields.
-            </p>
+            <div className="mt-3 border-t border-[var(--aws-border)] pt-3">
+              <p className="text-[12px] font-semibold text-[var(--text-primary)]">
+                {conflicts.length} field{conflicts.length === 1 ? "" : "s"} need your choice
+              </p>
+              <p className="text-[11px] text-[var(--text-secondary)] mb-2">
+                Documents disagreed — pick the value to keep. Your choice is written to the form and badged{" "}
+                <span className="text-[var(--aws-link)] font-semibold">auto</span>.
+              </p>
+              <ul className="space-y-2">
+                {conflicts.map((c) => (
+                  <li key={c.field} className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] font-semibold text-[var(--text-primary)] mr-1">{c.field}</span>
+                    {(c.values_seen ?? []).map((v, vi) => {
+                      const isPicked = picked[c.field] === v;
+                      const hasPick = picked[c.field] !== undefined;
+                      return (
+                        <button
+                          key={`${c.field}:${vi}`}
+                          type="button"
+                          disabled={hasPick && !isPicked}
+                          onClick={() => {
+                            setPicked((p) => ({ ...p, [c.field]: v }));
+                            onPickConflict(c.field, v);
+                          }}
+                          className={[
+                            "h-6 px-2 text-[11px] rounded-[2px] border transition-colors",
+                            isPicked
+                              ? "border-[var(--aws-link)] bg-[#eef3ff] text-[var(--aws-link)] font-semibold"
+                              : "border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)]",
+                            hasPick && !isPicked ? "opacity-40 cursor-not-allowed" : "",
+                          ].join(" ")}
+                        >
+                          {v}
+                          {c.sources?.[vi] ? (
+                            <span className="ml-1 text-[9px] text-[var(--text-muted)]">({c.sources[vi]})</span>
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </div>
       )}

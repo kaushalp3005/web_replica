@@ -97,17 +97,6 @@ function TransferIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
-function PackingDetailsIcon(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <path d="M21 8l-9-5-9 5 9 5 9-5z" />
-      <path d="M3 8v8l9 5 9-5V8" />
-      <path d="M12 13v8" />
-      <path d="M7.5 5.5l9 5" />
-    </svg>
-  );
-}
-
 function AdminIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
@@ -119,12 +108,23 @@ function AdminIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
-function SfgIcon(props: SVGProps<SVGSVGElement>) {
+function CustomerReturnsIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-      <path d="M3.27 6.96 12 12l8.73-5.04" />
-      <path d="M12 22V12" />
+      <path d="M3 7l9-4 9 4v10l-9 4-9-4z" />
+      <path d="M3 7l9 4 9-4" />
+      <path d="M12 21V11" />
+      <path d="M8 13l-2-1M8 13l2 1M8 13v3" />
+    </svg>
+  );
+}
+
+function InventoryLedgerIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M4 4h13a2 2 0 0 1 2 2v13a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2z" />
+      <path d="M4 7h15M4 11h15M4 15h9" />
+      <path d="M8 4v16" />
     </svg>
   );
 }
@@ -173,16 +173,6 @@ export const MODULES: ModuleItem[] = [
     Icon: JobCardIcon,
   },
   {
-    title: "SFG / WIP",
-    description:
-      "Semi-finished goods catalogue — browse the SFG master, reverse-lookup where each SFG is used across finished goods, and view work-in-progress stock on hand.",
-    badge: "Shop floor",
-    stat: "Master · Where-Used · WIP Stock",
-    route: "sfg",
-    implemented: true,
-    Icon: SfgIcon,
-  },
-  {
     title: "Sample",
     description:
       "Raise and track sample requisitions (Basis RM, Basis FG, NPD, Internal), run approvals, issue outward & gate passes, and convert internal samples to external dispatch.",
@@ -216,14 +206,26 @@ export const MODULES: ModuleItem[] = [
     Icon: TransferIcon,
   },
   {
-    title: "Packing Details",
+    title: "Customer Returns",
     description:
-      "Record batch-level packing details with a free-form, block-built JSON body. Full CRUD plus an encrypted-batch lookup (mint a token, fetch by token).",
+      "Log customer return (CR) documents — header + line items, box-wise weights with QR labels, business-head review, and Excel export across CFPL/CDPL.",
     badge: "Logistics",
-    stat: "Create · Edit · Blocks · Encrypted lookup",
-    route: "packing-details",
+    stat: "CR entry · Boxes · Review · Export",
+    route: "customer-returns",
     implemented: true,
-    Icon: PackingDetailsIcon,
+    adminOnly: true,
+    Icon: CustomerReturnsIcon,
+  },
+  {
+    title: "Inventory Ledger",
+    description:
+      "Tally-style, quantity-first stock ledger — Stock Summary, group/sub-group drill, item vouchers & monthly summary, batch/lots, ageing, FIFO compliance and reconciliation across CFPL/CDPL, with Excel/CSV export.",
+    badge: "Inventory",
+    stat: "Stock Summary · Vouchers · Batches · FIFO",
+    route: "inventory-ledger",
+    implemented: true,
+    adminOnly: true,
+    Icon: InventoryLedgerIcon,
   },
   {
     title: "Admin",
@@ -246,6 +248,13 @@ export const MODULES: ModuleItem[] = [
 // scoped. A user holding several scoped roles gets the union of their routes.
 export const ROLE_MODULE_SCOPE: Record<string, string[]> = {
   purchase_manager: ["purchase"],
+  // Scoped production roles. Keys are either a top-level module route
+  // ("job-card") or a "<module>/<sub>" sub-route for finer gating WITHIN a
+  // landing page — SO Creation / Planning / Plan List all live under the one
+  // "production" tile, so they need sub-route keys. See scopeAllowsRoute.
+  so_creator:    ["production/so-creation"],
+  planner:       ["production/planning", "production/plan-list", "job-card"],
+  floor_manager: ["job-card"],
 };
 
 /** The routes a scoped user may see, or `null` when the user is not scoped (in
@@ -255,4 +264,16 @@ export function scopedRoutesFor(roles: string[], isAdmin: boolean): string[] | n
   if (isAdmin) return null;
   const routes = [...new Set(roles.flatMap((r) => ROLE_MODULE_SCOPE[r] ?? []))];
   return routes.length > 0 ? routes : null;
+}
+
+/** Whether a user may see/enter route `key` — a top-level tile route
+ *  ("production", "job-card") or a sub-route ("production/so-creation"). Admins
+ *  and unscoped users (null scope) are always allowed. For a scoped user a scope
+ *  entry matches: its exact route; any ANCESTOR of `key` (scope "job-card"
+ *  allows "job-card"); or the PARENT tile of a scoped sub-route (scope
+ *  "production/planning" keeps the "production" tile visible). */
+export function scopeAllowsRoute(roles: string[], isAdmin: boolean, key: string): boolean {
+  const scoped = scopedRoutesFor(roles, isAdmin);
+  if (scoped === null) return true;
+  return scoped.some((k) => k === key || k.startsWith(key + "/") || key.startsWith(k + "/"));
 }

@@ -11,23 +11,25 @@
 // box) with a synthetic LINE-<lineId>-<n> box_id so per-entry acknowledge still works.
 //
 // ───────────────────────── FUNCTION BLOCKS ─────────────────────────
-// WIRED:  doSearch · ensurePending · onAck/onAckAll/onUnack · openIssue/submitIssue · onConfirm(finalize)
+// WIRED:  doSearch · ensurePending · onAck/onAckAll/onUnack · openIssue/submitIssue ·
+//         onConfirm(finalize) · handleReopen · handleCloseWithShortage · handleEditReceipt ·
+//         onScanDetected (camera QR → match+acknowledge, else /production/scan-identify —
+//         built to mirror the job-card RM tab _RawMaterialTab.tsx scan pattern).
 // STUBBED (UI present, build later — route through notWired(), tagged FUNCTION BLOCK (TODO)):
-//   • handleScan / camera QR          ref:1078–1211, 2091–2148   (QR scanner component)
 //   • handleGenerateQRs               ref:1369–1394              (TR-/box-id generation)
 //   • handlePrintQR / Bulk / Range    ref:1214–1525              (4"×2" thermal labels, qrcode)
-//   • handleCloseWithShortage         ref:1913–1931              (NEEDS backend)
-//   • handleReopen / handleEditReceipt ref:511–530, 2996–3134    (NEEDS backend)
 //   • STBR reconciliation             ref:2839–2871              (NEEDS backend)
 // ────────────────────────────────────────────────────────────────────
 
-import { Fragment, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useRequireAuth, useMe } from "@/lib/user";
 import { TransferChrome } from "../_chrome";
 import { TransferApi, type TransferDetail, type AcknowledgeBoxInput } from "@/lib/transfer";
 import { getDisplayWarehouseName } from "@/lib/transferBuildSummary";
 import { QRScanner } from "../_QRScanner";
+import { apiFetch, readApiErrorMessage } from "@/lib/auth";
+import { friendlyApiError } from "@/lib/apiErrors";
 
 function num(v: unknown): number {
   const n = typeof v === "number" ? v : parseFloat(String(v ?? ""));
@@ -104,6 +106,33 @@ function Chip({ tone, children }: { tone: string; children: React.ReactNode }) {
   return <span className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${tone}`}>{children}</span>;
 }
 
+// POST /api/v1/production/scan-identify response — shared shape with the job-card RM tab.
+type IdentifyBox = {
+  box_id: string | null; transaction_no: string | null; item_description: string | null;
+  lot_number: string | null; net_weight: number | null; gross_weight: number | null;
+  count: number | string | null; status: string | null; job_card_number: string | null;
+};
+type IdentifyFound = { found: true; table: string; company: string | null; matched_by: string; box: IdentifyBox };
+type IdentifyResult = IdentifyFound | { found: false; box_id: string | null; transaction_no?: string | null };
+
+// Outcome of one camera scan in the receive flow (drives the "Scanned QR" result card).
+type ScanOutcome =
+  | { status: "loading"; value: string }
+  | { status: "matched"; value: string; entry: Entry }        // expected on this transfer → acknowledged
+  | { status: "already"; value: string; entry: Entry }        // expected here → already acknowledged
+  | { status: "foreign"; value: string; identify: IdentifyFound } // real box, not on this transfer
+  | { status: "unknown"; value: string; box_id: string }      // not found in any box table
+  | { status: "err"; value: string; error: string };
+
+// Pull a box_id (and optional txn) out of a scanned QR: JSON {tx,bi|box_id} or plain sticker text.
+function parseScan(text: string): { box_id: string; transaction_no: string } {
+  const raw = text.trim();
+  try {
+    const o = JSON.parse(raw);
+    return { box_id: String(o.bi ?? o.box_id ?? o.boxId ?? raw), transaction_no: String(o.tx ?? o.transaction_no ?? "") };
+  } catch { return { box_id: raw, transaction_no: "" }; }
+}
+
 function ReceiveInner() {
   const router = useRouter();
   const allowed = useRequireAuth(router.replace);
@@ -137,6 +166,9 @@ function ReceiveInner() {
   const [showEdit, setShowEdit] = useState(false);
   const [editForm, setEditForm] = useState({ grn_number: "", box_condition: "Good", condition_remarks: "" });
   const [showScanner, setShowScanner] = useState(false);
+  const [scan, setScan] = useState<ScanOutcome | null>(null);
+  // Monotonic id per scan: a slow identify response is dropped once a newer scan supersedes it.
+  const scanReqRef = useRef(0);
 
   const notWired = (what: string) => setNotice(`${what} — function block, to be built later.`);
   const resetReceiveState = () => {
@@ -220,14 +252,15 @@ function ReceiveInner() {
   }, [pendingHeaderId, transferData, receivedBy, boxCondition, conditionRemarks]);
 
   // ── FUNCTION BLOCK: onAck / onAckAll / onUnack (WIRED) ──
-  const onAck = async (e: Entry) => {
+  const onAck = async (e: Entry): Promise<boolean> => {
     setBusy(true); setError(null);
     try {
       const hid = await ensurePending();
       await TransferApi.acknowledgeBox(hid, toAck(e, true));
       setAcked((p) => new Set(p).add(e.box_id));
       setIssues((p) => { const n = new Map(p); n.delete(e.box_id); return n; });
-    } catch (err) { setError(err instanceof Error ? err.message : "Acknowledge failed."); }
+      return true;
+    } catch (err) { setError(err instanceof Error ? err.message : "Acknowledge failed."); return false; }
     finally { setBusy(false); }
   };
   const onAckAll = async () => {
@@ -336,17 +369,39 @@ function ReceiveInner() {
     finally { setBusy(false); }
   };
 
-  // ── FUNCTION BLOCK: handleScan (camera QR) ── in-memory match → acknowledge.
-  // Parses a box_id out of the QR (JSON {bi|box_id} or plain text), matches an expected
-  // scanned box, and acknowledges it. Returns true → green bar, false → red bar.
-  // (Matching/parsing rules are the part to refine per your "further" note.)
+  // ── FUNCTION BLOCK: onScanDetected (camera QR) — BUILT (mirrors job-card RM _RawMaterialTab) ──
+  // 1) Parse a box_id (+ optional txn) from the QR — JSON {tx,bi|box_id} or a plain sticker.
+  // 2) If it's a box EXPECTED on this transfer → acknowledge it (green bar), show its details.
+  // 3) Otherwise call /production/scan-identify (the universal box-identify used by the RM tab)
+  //    so the operator sees WHAT they scanned and why it isn't here (red bar).
+  // A monotonic scanReqRef drops a stale identify response once a newer scan supersedes it.
   const onScanDetected = async (text: string): Promise<boolean> => {
-    let id = text.trim();
-    try { const o = JSON.parse(text); id = String(o.bi ?? o.box_id ?? o.boxId ?? id); } catch { /* plain text */ }
-    const entry = entries.find((e) => !e.synthetic && e.box_id === id);
-    if (!entry) return false;
-    if (!acked.has(entry.box_id)) await onAck(entry);
-    return true;
+    const { box_id } = parseScan(text);
+    const reqId = ++scanReqRef.current;
+    setScan({ status: "loading", value: box_id });
+
+    // Expected on this transfer? (real, non-synthetic boxes only — synthetic line units have no QR)
+    const entry = entries.find((e) => !e.synthetic && e.box_id === box_id);
+    if (entry) {
+      if (acked.has(entry.box_id)) { setScan({ status: "already", value: box_id, entry }); return true; }
+      const ok = await onAck(entry);
+      if (scanReqRef.current === reqId) setScan(ok ? { status: "matched", value: box_id, entry } : { status: "err", value: box_id, error: "Acknowledge failed." });
+      return ok;
+    }
+
+    // Not on this transfer — identify what it actually is (job-card RM scan-identify pattern).
+    try {
+      const res = await apiFetch("/api/v1/production/scan-identify", { method: "POST", body: JSON.stringify({ value: text }) });
+      if (scanReqRef.current !== reqId) return false;
+      if (!res.ok) { setScan({ status: "err", value: box_id, error: await readApiErrorMessage(res, "Lookup failed") }); return false; }
+      const data = (await res.json()) as IdentifyResult;
+      if (scanReqRef.current !== reqId) return false;
+      setScan(data.found ? { status: "foreign", value: box_id, identify: data } : { status: "unknown", value: box_id, box_id });
+      return false;
+    } catch (e) {
+      if (scanReqRef.current === reqId) setScan({ status: "err", value: box_id, error: friendlyApiError(e) });
+      return false;
+    }
   };
 
   // No `if (!allowed) return null` gate: useRequireAuth returns true on the server but
@@ -443,6 +498,9 @@ function ReceiveInner() {
               className="px-5 py-2 text-[13px] rounded bg-blue-600 text-white hover:opacity-90 disabled:opacity-40">📷 Start Camera Scan</button>
             <div className="text-[11px] text-[var(--text-secondary)] mt-2">Scan QR codes to auto-acknowledge boxes</div>
           </div>
+
+          {/* Last-scan result — mirrors the job-card RM tab's "Scanned QR" card. */}
+          {scan && <ScanReceiptResult scan={scan} onDismiss={() => setScan(null)} />}
 
           {/* Article Entries */}
           <div className="bg-white border border-[var(--aws-border)] rounded-md">
@@ -671,6 +729,52 @@ function parseIssueObj(issue: unknown): Record<string, unknown> | null {
   if (!issue) return null;
   if (typeof issue === "string") { try { return JSON.parse(issue); } catch { return null; } }
   return issue as Record<string, unknown>;
+}
+
+// Renders one scan outcome (mirrors job-card RM _RawMaterialTab.tsx ScanResult): the box was
+// on this transfer and got acknowledged / was already done, or it's a real box from elsewhere
+// (identify), an unknown code, or an error. Overwritten by the next scan; ✕ dismisses it.
+function ScanReceiptResult({ scan, onDismiss }: { scan: ScanOutcome; onDismiss: () => void }) {
+  const head = (tone: string, label: string) => (
+    <div className="flex items-center justify-between gap-2">
+      <span className={`text-[12px] px-2 py-0.5 rounded font-semibold ${tone}`}>{label}</span>
+      <button onClick={onDismiss} aria-label="Dismiss" className="text-[13px] leading-none text-[var(--text-secondary)] hover:text-[var(--text-primary)]">✕</button>
+    </div>
+  );
+  const kv = (rows: [string, React.ReactNode][]) => (
+    <dl className="grid grid-cols-[minmax(84px,auto)_1fr] gap-x-4 gap-y-1 text-[12px] mt-2">
+      {rows.filter(([, v]) => v !== null && v !== undefined && v !== "").map(([k, v]) => (
+        <div key={k} className="contents">
+          <dt className="text-[var(--text-secondary)]">{k}</dt>
+          <dd className="text-[var(--text-primary)] font-mono break-all">{v}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+
+  let body: React.ReactNode;
+  if (scan.status === "loading") {
+    body = <div className="text-[12px] text-[var(--text-secondary)]">Looking up {scan.value}…</div>;
+  } else if (scan.status === "matched") {
+    const e = scan.entry;
+    body = <>{head("bg-emerald-100 text-emerald-800", "✓ Acknowledged")}
+      {kv([["Box ID", e.box_id], ["Article", e.article], ["Txn", e.transaction_no || "—"], ["Lot", e.lot_number || "—"], ["Net", e.net_weight.toFixed(3)], ["Gross", e.gross_weight.toFixed(3)]])}</>;
+  } else if (scan.status === "already") {
+    const e = scan.entry;
+    body = <>{head("bg-sky-100 text-sky-800", "Already acknowledged")}{kv([["Box ID", e.box_id], ["Article", e.article]])}</>;
+  } else if (scan.status === "foreign") {
+    const b = scan.identify.box;
+    body = <>{head("bg-amber-100 text-amber-800", "Not part of this transfer")}
+      <div className="text-[11px] text-[var(--text-secondary)] mt-1">Real box, but not dispatched on this transfer — found in {scan.identify.table}{scan.identify.company ? ` (${scan.identify.company})` : ""}.</div>
+      {kv([["Box ID", b.box_id], ["Item", b.item_description], ["Txn", b.transaction_no], ["Lot", b.lot_number], ["Net", b.net_weight], ["Gross", b.gross_weight], ["Status", b.status], ["Job card", b.job_card_number]])}</>;
+  } else if (scan.status === "unknown") {
+    body = <>{head("bg-rose-100 text-rose-800", "Unknown box")}
+      <div className="text-[12px] text-rose-700 mt-1">Not found in any box table ({scan.box_id}).</div></>;
+  } else {
+    body = <>{head("bg-rose-100 text-rose-800", "Scan error")}
+      <div className="text-[12px] text-rose-700 mt-1">{scan.error}</div></>;
+  }
+  return <div className="bg-white border border-[var(--aws-border)] rounded-md p-3">{body}</div>;
 }
 
 function IssueForm({ draft, setDraft, busy, onCancel, onSubmit }: {

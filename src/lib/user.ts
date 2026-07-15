@@ -19,6 +19,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { tokenStore, userStore, type MeResponse, type MeRoleEnvelope } from "./auth";
 import { userMayForceUnlock } from "@/app/modules/job-card/_useLockState";
+import { scopeAllowsRoute } from "./modules";
+import { roleNamesOf } from "./sample-roles";
 
 // Type-safe accessor for the warehouses + floors aliases the backend uses
 // on /me (aliases of allowed_warehouses / allowed_floors). Kept here so
@@ -124,6 +126,23 @@ export function useHasRole(roleName: string): boolean {
 // post-approval readings edit/add/delete actions in the QC module.
 export function useIsQcManager(): boolean {
   return useHasRole("qc_manager");
+}
+
+// Module-scope PAGE guard. A scoped role (see ROLE_MODULE_SCOPE) that is not
+// permitted to see `key` gets bounced to /modules — the deep-link counterpart
+// to the tile/sub-tile filtering. Admins + unscoped roles pass through. Mirrors
+// useRequireAuth's redirect style; returns false only once a denial is known.
+export function useRequireModuleAccess(
+  key: string,
+  redirect: (path: string) => void,
+): boolean {
+  const me = useMe();
+  const isAdmin = useIsAdmin();
+  const allowed = me === null ? null : scopeAllowsRoute(roleNamesOf(me), isAdmin, key);
+  useEffect(() => {
+    if (allowed === false) redirect("/modules");
+  }, [allowed, redirect]);
+  return allowed !== false;
 }
 
 // C1 (Wave 4): extracted helper used by the JC list page row actions and

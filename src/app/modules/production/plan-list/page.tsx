@@ -16,7 +16,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
-import { useRequireAuth, useUserInitial } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useRequireModuleAccess } from "@/lib/user";
 import { friendlyApiError } from "@/lib/apiErrors";
 import { BackLink } from "@/components/BackLink";
 import {
@@ -80,6 +80,7 @@ const TYPE_OPTS: { v: PlanTypeKey; label: string }[] = [
 export default function PlanListPage() {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
+  useRequireModuleAccess("production/plan-list", router.replace);
   const initial = useUserInitial();
 
   // Filter state
@@ -1918,6 +1919,11 @@ function WipProcessList({
       <datalist id="sfg-canon-options">
         {sfgSuggestions.map((name) => <option key={name} value={name} />)}
       </datalist>
+      {/* Standard process suggestions — the Process field is type-or-pick, so
+          these are hints only; a free-typed process name is allowed. */}
+      <datalist id="process-options">
+        {PROCESS_OPTIONS.map((p) => <option key={p} value={p} />)}
+      </datalist>
       {/* Process checklist toolbar — a checkbox per process (below) plus
           Select-all + Merge here. Merge stays disabled until 2+ processes are
           checked. Hidden during live edit (started rows must keep their order /
@@ -2002,16 +2008,16 @@ function WipProcessList({
                 {/* Process + floor stacked in one aligned column; the process
                     name truncates with … and shows full on hover (title). */}
                 <div className="flex-1 min-w-0 space-y-1">
-                  <select
+                  <input
+                    list="process-options"
                     value={s.process}
                     onChange={(e) => setField(i, { process: e.target.value })}
                     disabled={rowStarted}
+                    placeholder="— Process —"
+                    autoComplete="off"
                     title={rowStarted ? "Process can't change once started — remove it to replace" : (s.process || undefined)}
                     className="w-full truncate h-7 px-1.5 text-[12px] font-semibold rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] disabled:bg-[var(--surface-subtle)] disabled:text-[var(--text-secondary)]"
-                  >
-                    <option value="">— Process —</option>
-                    {PROCESS_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
-                  </select>
+                  />
                   {floors.length > 0 ? (
                     <select
                       value={s.floor}

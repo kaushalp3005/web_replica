@@ -25,6 +25,7 @@ export interface PreviewProps {
   fileName: string;
   entity: string; // "cfpl" | "cdpl"
   preview: PreviewResponse;
+  requestId?: string | null; // server x-request-id from /po/preview — shown for traceability
   onCancel: () => void; // re-upload / cancel → parent returns to upload zone
   onCommitted: (r: CommitResponse) => void; // parent shows result banner + refreshes listing
 }
@@ -124,7 +125,7 @@ function stripMeta(po: WorkPo): CommitPo {
 // ── Root component ────────────────────────────────────────────────────────────
 
 export function PoPreview(props: PreviewProps): React.JSX.Element {
-  const { fileName, entity, preview, onCancel, onCommitted } = props;
+  const { fileName, entity, preview, requestId, onCancel, onCommitted } = props;
 
   // Cloned once on mount. The parent remounts PoPreview with key={fileName} per upload,
   // so a new parse always gets a fresh instance (no prop-driven reset needed here).
@@ -254,6 +255,11 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
             {" · "}entity{" "}
             <span className="font-mono text-[var(--text-primary)] uppercase">{entity}</span>
           </p>
+          {requestId ? (
+            <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
+              Request ID <span className="font-mono">{requestId}</span>
+            </p>
+          ) : null}
         </div>
         <button
           type="button"

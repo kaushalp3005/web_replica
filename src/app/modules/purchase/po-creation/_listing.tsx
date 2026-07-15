@@ -14,7 +14,7 @@ import {
   getPoLines,
   deletePo,
   fetchAllPosForExport,
-  buildPoCsv,
+  buildPoXlsx,
   downloadBlob,
   fmtDate,
   fmtCur,
@@ -221,9 +221,9 @@ export function PoListing(props: PoListingProps): React.JSX.Element {
                 <Th sortable col="po_number" sort={sort} onSort={handleSort}>PO Number</Th>
                 <Th sortable col="po_date" sort={sort} onSort={handleSort}>Date</Th>
                 <Th sortable col="vendor_supplier_name" sort={sort} onSort={handleSort}>Vendor</Th>
-                <Th>Voucher</Th>
-                <Th>Order Ref</Th>
-                <Th>Entity</Th>
+                <Th sortable col="voucher_type" sort={sort} onSort={handleSort}>Voucher</Th>
+                <Th sortable col="order_reference_no" sort={sort} onSort={handleSort}>Order Ref</Th>
+                <Th sortable col="entity" sort={sort} onSort={handleSort}>Entity</Th>
                 <Th sortable col="gross_total" sort={sort} onSort={handleSort}>Amount</Th>
                 <Th width={72}>{null}</Th>
                 </>); })()}
@@ -489,7 +489,15 @@ function PoToolbar({
 
 // ── Advanced Filter Panel ─────────────────────────────────────────────────────
 
-const SORTABLE_COLS = ["po_number", "po_date", "vendor_supplier_name", "gross_total"] as const;
+const SORTABLE_COLS = [
+  "po_number",
+  "po_date",
+  "vendor_supplier_name",
+  "voucher_type",
+  "order_reference_no",
+  "entity",
+  "gross_total",
+] as const;
 
 const ADV_FIELDS: { key: keyof PoListQuery; label: string; placeholder: string }[] = [
   { key: "vendor_supplier_name_contains", label: "Vendor name contains", placeholder: "e.g. acme" },
@@ -667,11 +675,8 @@ function ExportMenu({ query, onClose }: { query: PoListQuery; onClose: () => voi
         setExportState({ kind: "err", text: "No data to export." });
         return;
       }
-      const csv = buildPoCsv(items, cols);
-      downloadBlob(
-        new Blob([csv], { type: "text/csv;charset=utf-8;" }),
-        `po-export-${new Date().toISOString().slice(0, 10)}.csv`,
-      );
+      const blob = buildPoXlsx(items, cols);
+      downloadBlob(blob, `po-export-${new Date().toISOString().slice(0, 10)}.xlsx`);
       setExportState({ kind: "ok", text: `Exported ${items.length} PO${items.length === 1 ? "" : "s"}.` });
     } catch (e) {
       setExportState({ kind: "err", text: e instanceof Error ? e.message : "Export failed" });

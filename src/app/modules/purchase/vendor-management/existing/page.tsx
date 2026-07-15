@@ -198,13 +198,12 @@ export default function ExistingVendorsPage(): React.JSX.Element {
 
   // Stable callbacks so the memoized rows below aren't re-rendered on every
   // keystroke into the search box (which only changes `searchInput`).
-  const onView = useCallback((vendorId: string) => {
-    // Detail drill-in is the next page to be ported; keep the action discoverable
-    // without a dead 404 link.
-    void vendorId;
-    setActionError(null);
-    setInfo("Vendor detail view is the next page to be ported — this page covers browse, approve and delete.");
-  }, []);
+  const onView = useCallback(
+    (vendorId: string) => {
+      router.push(`/modules/purchase/vendor-management/${encodeURIComponent(vendorId)}`);
+    },
+    [router],
+  );
 
   const handleApprove = useCallback(async (vendorId: string) => {
     if (!window.confirm("Approve this vendor for purchase?")) return;

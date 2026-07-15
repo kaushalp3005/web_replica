@@ -666,3 +666,423 @@ export function resolveLookupLabel(rows: LookupRow[], label: string | null | und
   }
   return contains;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Vendor Detail — read/mutate surface (port of vendor-api.js the detail screen
+// uses). All under /api/v1/vendors; same apiFetch + readVendorError style as
+// above. GET /{id} returns the NESTED VendorDetailResponse (vendor + child
+// arrays), NOT a bare vendor row.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// GET /vendors/{id} → nested payload. Mirrors backend VendorDetailResponse.
+export interface VendorDetailResponse {
+  vendor: VendorResponse;
+  banking: BankingResponse[];
+  documents: DocumentResponse[];
+  contracts: ContractResponse[];
+}
+
+// PATCH /vendors/{id}. `_reason` (attached by patchVendor when a reason is
+// passed) is stripped off the column patch by the backend and persisted on the
+// history row. Everything is a partial column update.
+export type VendorPatchBody = Partial<VendorBody> & { _reason?: string | null };
+
+// PATCH /{id}/banking/{bankId} — any subset of the banking columns.
+export type BankingPatchBody = Partial<StagedBankingItem>;
+
+// POST /{id}/documents — manual create (JSON, no file). `s3_urls` is a CSV on the wire.
+export interface DocumentCreateBody {
+  doc_type: string;
+  doc_number?: string | null;
+  s3_urls?: string;
+  issued_on?: string | null;
+  valid_from?: string | null;
+  valid_to?: string | null;
+  status_id?: string | null;
+}
+export type DocumentPatchBody = Partial<DocumentCreateBody>;
+
+// PATCH /{id}/contracts/{contractId} — reuses the contract column set.
+export type ContractPatchBody = Partial<ContractCreateBody>;
+
+// Extracted-contract row from /contracts/extract + upload-and-save (mirrors ExtractedDocRow).
+export interface ExtractedContractRow {
+  contract_type?: string | null;
+  signed_date?: string | null;
+  effective_from?: string | null;
+  effective_to?: string | null;
+  value_inr?: number | null;
+  s3_url?: string | null;
+  extraction_status?: string | null;
+  extraction_error?: string | null;
+  [k: string]: unknown;
+}
+
+// upload-and-save result = saved row + extracted fields (mirrors DocumentUploadResponse).
+export interface ContractUploadResponse {
+  contract: ContractResponse;
+  extracted: ExtractedContractRow;
+}
+
+// dry-run extract result shapes (backend DocExtractResponse / ContractExtractResponse).
+export interface DocExtractResponse {
+  s3_url?: string | null;
+  doc_type?: string | null;
+  extracted: ExtractedDocRow;
+}
+export interface ContractExtractResponse {
+  s3_url?: string | null;
+  extracted: ExtractedContractRow;
+}
+
+// ── History (authoritative shape — backend HistoryEntry, extra="allow") ──
+// history_id is an INT; the wire wraps entries in { entries, total, page, page_size }.
+// `diff` is a per-field map whose cells carry { from, to } (the source renders
+// diff[k].from / diff[k].to).
+export interface VendorHistoryDiffCell {
+  from?: unknown;
+  to?: unknown;
+  [k: string]: unknown;
+}
+export interface VendorHistoryEntry {
+  history_id: number;
+  operation: string; // create | update | approve | delete | restore | revert | set_primary | append_file
+  changed_by?: string | null;
+  changed_at: string;
+  previous_state?: Record<string, unknown> | null;
+  new_state?: Record<string, unknown> | null;
+  diff?: Record<string, VendorHistoryDiffCell>;
+  source?: string;
+  reason?: string | null;
+  [k: string]: unknown;
+}
+export interface VendorHistoryListResponse {
+  entries: VendorHistoryEntry[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+// ── S3 URL helpers (s3_urls is a comma-separated CSV on the wire) ──
+
+/** Split the CSV into a trimmed, empty-dropped array (read paths). */
+export function s3UrlsToArray(s: string | null | undefined): string[] {
+  return String(s || "")
+    .split(",")
+    .map((u) => u.trim())
+    .filter(Boolean);
+}
+
+/** Join an array back to the CSV the backend expects (empties/null dropped). */
+export function s3UrlsToCsv(arr: (string | null | undefined)[]): string {
+  return (arr || []).filter(Boolean).join(",");
+}
+
+/** Friendly chip label from an S3 URL: last path segment, de-querystringed,
+ *  URL-decoded, truncated to 40 chars. Falls back to `fallback`. */
+export function s3UrlBasename(url: string | null | undefined, fallback = "file"): string {
+  try {
+    const path = String(url || "").split("?")[0];
+    const tail = path.split("/").filter(Boolean).pop() || "";
+    const decoded = decodeURIComponent(tail);
+    if (!decoded) return fallback;
+    return decoded.length > 40 ? decoded.slice(0, 37) + "…" : decoded;
+  } catch {
+    return fallback;
+  }
+}
+
+// ── Vendor master (detail) ──
+
+// GET /vendors/{id} → { vendor, banking[], documents[], contracts[] }.
+export async function getVendor(vendorId: string): Promise<VendorDetailResponse> {
+  const res = await apiFetch(`${VENDORS_PATH}/${encodeURIComponent(vendorId)}`);
+  if (!res.ok) throw await readVendorError(res, "Failed to load vendor");
+  return res.json();
+}
+
+// PATCH /vendors/{id} — partial column update; `reason` rides as `_reason`.
+export async function patchVendor(
+  vendorId: string,
+  patch: VendorPatchBody,
+  reason?: string | null,
+): Promise<VendorResponse> {
+  const payload = reason ? { ...patch, _reason: reason } : patch;
+  const res = await apiFetch(`${VENDORS_PATH}/${encodeURIComponent(vendorId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw await readVendorError(res, "Couldn't save vendor");
+  return res.json();
+}
+
+// ── Banking ──
+
+// GET /{id}/banking?active_only=…
+export async function listBanking(vendorId: string, activeOnly = false): Promise<BankingResponse[]> {
+  const res = await apiFetch(
+    `${VENDORS_PATH}/${encodeURIComponent(vendorId)}/banking?active_only=${activeOnly ? "true" : "false"}`,
+  );
+  if (!res.ok) throw await readVendorError(res, "Failed to load banking");
+  return res.json();
+}
+
+// PATCH /{id}/banking/{bankId}
+export async function patchBanking(
+  vendorId: string,
+  bankId: string,
+  patch: BankingPatchBody,
+): Promise<BankingResponse> {
+  const res = await apiFetch(
+    `${VENDORS_PATH}/${encodeURIComponent(vendorId)}/banking/${encodeURIComponent(bankId)}`,
+    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) },
+  );
+  if (!res.ok) throw await readVendorError(res, "Couldn't save banking row");
+  return res.json();
+}
+
+// POST /{id}/banking/{bankId}/set-primary — atomically flips is_primary.
+export async function setPrimaryBanking(vendorId: string, bankId: string): Promise<BankingResponse> {
+  const res = await apiFetch(
+    `${VENDORS_PATH}/${encodeURIComponent(vendorId)}/banking/${encodeURIComponent(bankId)}/set-primary`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw await readVendorError(res, "Couldn't set primary bank");
+  return res.json();
+}
+
+// DELETE /{id}/banking/{bankId} — 204.
+export async function deleteBanking(vendorId: string, bankId: string): Promise<void> {
+  const res = await apiFetch(
+    `${VENDORS_PATH}/${encodeURIComponent(vendorId)}/banking/${encodeURIComponent(bankId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) throw await readVendorError(res, "Couldn't delete banking row");
+}
+
+// ── Documents ──
+
+// GET /{id}/documents?doc_type=…
+export async function listDocuments(vendorId: string, docType?: string): Promise<DocumentResponse[]> {
+  const qs = docType ? `?doc_type=${encodeURIComponent(docType)}` : "";
+  const res = await apiFetch(`${VENDORS_PATH}/${encodeURIComponent(vendorId)}/documents${qs}`);
+  if (!res.ok) throw await readVendorError(res, "Failed to load documents");
+  return res.json();
+}
+
+// POST /{id}/documents — manual create (JSON, no file).
+export async function addDocument(vendorId: string, body: DocumentCreateBody): Promise<DocumentResponse> {
+  const res = await apiFetch(`${VENDORS_PATH}/${encodeURIComponent(vendorId)}/documents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await readVendorError(res, "Couldn't add document");
+  return res.json();
+}
+
+// POST /{id}/documents/extract — upload one file, get extracted fields (nothing persisted).
+export async function extractDocument(vendorId: string, file: File, docType: string): Promise<DocExtractResponse> {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  fd.append("doc_type", docType);
+  const res = await apiFetch(`${VENDORS_PATH}/${encodeURIComponent(vendorId)}/documents/extract`, {
+    method: "POST",
+    body: fd,
+  });
+  if (!res.ok) throw await readVendorError(res, "Extraction failed");
+  return res.json();
+}
+
+// POST /{id}/documents/upload-and-save — upload + extract + persist in one call.
+export async function uploadAndSaveDocument(
+  vendorId: string,
+  file: File,
+  docType: string,
+  opts: { docNumber?: string; statusId?: string } = {},
+): Promise<DocumentUploadResponse> {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  fd.append("doc_type", docType);
+  if (opts.docNumber) fd.append("doc_number", opts.docNumber);
+  if (opts.statusId) fd.append("status_id", opts.statusId);
+  const res = await apiFetch(`${VENDORS_PATH}/${encodeURIComponent(vendorId)}/documents/upload-and-save`, {
+    method: "POST",
+    body: fd,
+  });
+  if (!res.ok) throw await readVendorError(res, "Couldn't save document");
+  return res.json();
+}
+
+// POST /{id}/documents/{docId}/append-file — attach another file (appends to s3_urls CSV).
+export async function appendDocumentFile(vendorId: string, docId: string, file: File): Promise<DocumentResponse> {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  const res = await apiFetch(
+    `${VENDORS_PATH}/${encodeURIComponent(vendorId)}/documents/${encodeURIComponent(docId)}/append-file`,
+    { method: "POST", body: fd },
+  );
+  if (!res.ok) throw await readVendorError(res, "Couldn't attach file");
+  return res.json();
+}
+
+// PATCH /{id}/documents/{docId}
+export async function patchDocument(
+  vendorId: string,
+  docId: string,
+  patch: DocumentPatchBody,
+): Promise<DocumentResponse> {
+  const res = await apiFetch(
+    `${VENDORS_PATH}/${encodeURIComponent(vendorId)}/documents/${encodeURIComponent(docId)}`,
+    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) },
+  );
+  if (!res.ok) throw await readVendorError(res, "Couldn't save document");
+  return res.json();
+}
+
+// DELETE /{id}/documents/{docId} — 204.
+export async function deleteDocument(vendorId: string, docId: string): Promise<void> {
+  const res = await apiFetch(
+    `${VENDORS_PATH}/${encodeURIComponent(vendorId)}/documents/${encodeURIComponent(docId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) throw await readVendorError(res, "Couldn't delete document");
+}
+
+// ── Contracts ──
+
+// GET /{id}/contracts?contract_type=…
+export async function listContracts(vendorId: string, contractType?: string): Promise<ContractResponse[]> {
+  const qs = contractType ? `?contract_type=${encodeURIComponent(contractType)}` : "";
+  const res = await apiFetch(`${VENDORS_PATH}/${encodeURIComponent(vendorId)}/contracts${qs}`);
+  if (!res.ok) throw await readVendorError(res, "Failed to load contracts");
+  return res.json();
+}
+
+// POST /{id}/contracts/extract — upload one file, get extracted contract fields.
+export async function extractContract(vendorId: string, file: File): Promise<ContractExtractResponse> {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  const res = await apiFetch(`${VENDORS_PATH}/${encodeURIComponent(vendorId)}/contracts/extract`, {
+    method: "POST",
+    body: fd,
+  });
+  if (!res.ok) throw await readVendorError(res, "Extraction failed");
+  return res.json();
+}
+
+// POST /{id}/contracts/upload-and-save — upload + extract + persist.
+export async function uploadAndSaveContract(
+  vendorId: string,
+  file: File,
+  opts: { contractType?: string } = {},
+): Promise<ContractUploadResponse> {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  if (opts.contractType) fd.append("contract_type", opts.contractType);
+  const res = await apiFetch(`${VENDORS_PATH}/${encodeURIComponent(vendorId)}/contracts/upload-and-save`, {
+    method: "POST",
+    body: fd,
+  });
+  if (!res.ok) throw await readVendorError(res, "Couldn't save contract");
+  return res.json();
+}
+
+// POST /{id}/contracts/{contractId}/append-file
+export async function appendContractFile(
+  vendorId: string,
+  contractId: string,
+  file: File,
+): Promise<ContractResponse> {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  const res = await apiFetch(
+    `${VENDORS_PATH}/${encodeURIComponent(vendorId)}/contracts/${encodeURIComponent(contractId)}/append-file`,
+    { method: "POST", body: fd },
+  );
+  if (!res.ok) throw await readVendorError(res, "Couldn't attach file");
+  return res.json();
+}
+
+// PATCH /{id}/contracts/{contractId}
+export async function patchContract(
+  vendorId: string,
+  contractId: string,
+  patch: ContractPatchBody,
+): Promise<ContractResponse> {
+  const res = await apiFetch(
+    `${VENDORS_PATH}/${encodeURIComponent(vendorId)}/contracts/${encodeURIComponent(contractId)}`,
+    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) },
+  );
+  if (!res.ok) throw await readVendorError(res, "Couldn't save contract");
+  return res.json();
+}
+
+// DELETE /{id}/contracts/{contractId} — 204.
+export async function deleteContract(vendorId: string, contractId: string): Promise<void> {
+  const res = await apiFetch(
+    `${VENDORS_PATH}/${encodeURIComponent(vendorId)}/contracts/${encodeURIComponent(contractId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) throw await readVendorError(res, "Couldn't delete contract");
+}
+
+// ── History ──
+
+// GET /{id}/history?operation=&page=&page_size=
+export async function listVendorHistory(
+  vendorId: string,
+  operation?: string,
+  opts: { page?: number; pageSize?: number } = {},
+): Promise<VendorHistoryListResponse> {
+  const qs = new URLSearchParams();
+  if (operation) qs.set("operation", operation);
+  qs.set("page", String(opts.page ?? 1));
+  qs.set("page_size", String(opts.pageSize ?? 50));
+  const res = await apiFetch(`${VENDORS_PATH}/${encodeURIComponent(vendorId)}/history?${qs.toString()}`);
+  if (!res.ok) throw await readVendorError(res, "Failed to load history");
+  return res.json();
+}
+
+// GET /{id}/history/{hid} — one snapshot. hid is an int on the wire.
+export async function getHistoryEntry(vendorId: string, historyId: number | string): Promise<VendorHistoryEntry> {
+  const res = await apiFetch(
+    `${VENDORS_PATH}/${encodeURIComponent(vendorId)}/history/${encodeURIComponent(String(historyId))}`,
+  );
+  if (!res.ok) throw await readVendorError(res, "Failed to load history entry");
+  return res.json();
+}
+
+// POST /{id}/history/{hid}/revert — restore the pre-mutation state as a fresh patch.
+export async function revertHistory(
+  vendorId: string,
+  historyId: number | string,
+  reason?: string | null,
+): Promise<VendorResponse> {
+  const res = await apiFetch(
+    `${VENDORS_PATH}/${encodeURIComponent(vendorId)}/history/${encodeURIComponent(String(historyId))}/revert`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: reason ?? null }),
+    },
+  );
+  if (!res.ok) throw await readVendorError(res, "Couldn't revert change");
+  return res.json();
+}
+
+/** null/''/undefined → "—"; else the value as a string. Small display helper. */
+export function dash(v: unknown): string {
+  if (v == null) return "—";
+  const s = String(v).trim();
+  return s === "" ? "—" : s;
+}
+
+/** Collapse a datetime/date string to YYYY-MM-DD; null → "—"; unparseable → raw. */
+export function fmtVendorDate(v: unknown): string {
+  if (v == null || v === "") return "—";
+  const s = String(v);
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : s;
+}

@@ -8,7 +8,9 @@
 
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
-import { useRequireAuth, useUserInitial } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useMe, useIsAdmin } from "@/lib/user";
+import { roleNamesOf } from "@/lib/sample-roles";
+import { scopeAllowsRoute } from "@/lib/modules";
 import { BackLink } from "@/components/BackLink";
 
 type SubModule = {
@@ -46,6 +48,10 @@ export default function ProductionLandingPage() {
   const router = useRouter();
   const initial = useUserInitial();
   useRequireAuth(router.replace);
+  // Module scoping: a scoped role (e.g. so_creator, planner) only sees the
+  // sub-tiles it's allowed. Unscoped roles + admins see all (scopeAllowsRoute).
+  const isAdmin = useIsAdmin();
+  const roles = roleNamesOf(useMe());
 
   function open(m: SubModule) {
     if (m.implemented) router.push(m.route);
@@ -87,7 +93,10 @@ export default function ProductionLandingPage() {
         {GROUPS.map((group) => {
           // Hide flagged entries; drop the whole section when nothing visible
           // remains in it (e.g. Inventory now has every entry hidden).
-          const items = SUB_MODULES.filter((m) => m.group === group && !m.hidden);
+          const items = SUB_MODULES.filter(
+            (m) => m.group === group && !m.hidden &&
+                   scopeAllowsRoute(roles, isAdmin, m.route.replace("/modules/", "")),
+          );
           if (items.length === 0) return null;
           return (
             <section key={group} className="mb-8">

@@ -15,7 +15,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
-import { useRequireAuth, deriveRowLockIndicator, useUserInitial, useUserScope } from "@/lib/user";
+import { useRequireAuth, deriveRowLockIndicator, useUserInitial, useUserScope, useRequireModuleAccess } from "@/lib/user";
 import { userHasWarehouse } from "@/lib/warehouseScope";
 // W4-MED-3/M10 — single context-driven subscription point.
 import { UserProvider, useUserCtx } from "./_UserContext";
@@ -400,6 +400,7 @@ function JobCardListingPageBody() {
   // Returns false during the brief window between the redirect being
   // scheduled and the navigation completing; we use it to skip the fetch.
   const authed = useRequireAuth(router.replace);
+  useRequireModuleAccess("job-card", router.replace);
 
   useEffect(() => {
     if (typeof window === "undefined") return;

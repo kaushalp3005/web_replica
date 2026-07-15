@@ -343,7 +343,10 @@ function DirectTransferForm() {
       net_weight: (parseFloat(b.netWeight) || 0).toFixed(3), total_weight: (parseFloat(b.grossWeight) || 0).toFixed(3),
       batch_number: b.batchNumber || null, lot_number: b.lotNumber || null, vakkal: null,
     }));
-    const boxes: TransferBoxCreateInput[] = scannedBoxes.map((b) => ({
+    // DIRECT (manually-keyed) entries have no physical box_id — they ship as lines only,
+    // never as interunit_transfer_boxes rows (the backend parks their stock via park_lines).
+    // Persisting them as boxes surfaced empty box_ids as "N/A" in the view. (Legacy parity.)
+    const boxes: TransferBoxCreateInput[] = scannedBoxes.filter((b) => b.transactionNo !== "DIRECT").map((b) => ({
       box_number: b.boxNumber, box_id: b.boxId || null, article: b.article,
       lot_number: b.lotNumber || null, batch_number: b.batchNumber || null, transaction_no: b.transactionNo || null,
       net_weight: (parseFloat(b.netWeight) || 0).toFixed(3), gross_weight: (parseFloat(b.grossWeight) || 0).toFixed(3),

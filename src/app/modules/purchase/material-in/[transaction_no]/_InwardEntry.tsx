@@ -7,11 +7,14 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BackLink } from "@/components/BackLink";
+import { useUserScope } from "@/lib/user";
+import { userHasWarehouse, normaliseWarehouseCode } from "@/lib/warehouseScope";
 import { fmtNum, fmtDate } from "@/lib/po";
 import { getPurchasePo, addBoxes, updateBoxes, saveReceive, type PurchasePoDetail, type PurchaseLine } from "@/lib/purchase-receive";
 import { listArrivals, type ArrivalItem } from "@/lib/qc";
-import { inwardReducer, buildReceiveRequest, buildUpdateSections, buildAddSections, buildAddBoxesPayload, type DraftState, type LogisticsField, type InwardAction, type SectionSeed, type PrintBox } from "./_boxEngine";
+import { inwardReducer, buildReceiveRequest, buildUpdateSections, buildAddSections, buildAddBoxesPayload, type DraftState, type LogisticsField, type InwardAction, type SectionSeed, type PrintResolver } from "./_boxEngine";
 import { LineCard } from "./_LineCard";
+import { printLabels } from "./_labelPrint";
 import { SendIntimationModal } from "../_SendIntimationModal";
 
 function matchKey(s: string | null | undefined): string {
@@ -66,6 +69,11 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [intimateOpen, setIntimateOpen] = useState(false);
+  // Non-null while a print is running (drives the overlay). `label` names the
+  // current phase — save vs fetch vs render — so it stops blaming "preparing".
+  const [printing, setPrinting] = useState<{ label: string; done: number; total: number } | null>(null);
+  // box_ids that have been saved + printed — their rows render green.
+  const [printedIds, setPrintedIds] = useState<Set<string>>(new Set());
   // Intimation-derived prefill (vehicle/invoice/challan), re-applied on every
   // reset so a per-section refresh doesn't drop it before the full save persists.
   const prefillRef = useRef<Partial<Record<LogisticsField, string>>>({});
@@ -84,7 +92,8 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
       }
       try {
         const [data, arrivals] = await Promise.all([
-          getPurchasePo(transactionNo, controller.signal),
+          // Lazy: sections load with counts only; box rows fetch per expanded section.
+          getPurchasePo(transactionNo, controller.signal, false),
           // Best-effort: QC may be unavailable or the txn may have no arrivals.
           listArrivals(transactionNo, controller.signal).catch(() => [] as ArrivalItem[]),
         ]);
@@ -109,7 +118,7 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
   // Re-fetch the PO and reseed the draft (used after a per-section save).
   // Mirrors po-receiving.js refreshPO — unsaved new sections are discarded.
   async function refresh() {
-    const data = await getPurchasePo(transactionNo);
+    const data = await getPurchasePo(transactionNo, undefined, false);
     setPo(data);
     dispatch({ type: "reset", po: data, prefill: prefillRef.current, seeds: seedsRef.current });
   }
@@ -151,16 +160,27 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
 
   // Full save (reference save handler 1180-1406): receive → update existing
   // sections → create new sections, in order. Any step error aborts the rest.
+  // No toast/refresh — reused by both Save and the save-then-print flow.
+  async function doFullSave() {
+    if (!po) return;
+    // Header first — it sets the warehouse the box inserts stamp onto inventory
+    // batches. Then update existing boxes + add new sections in parallel (they
+    // touch disjoint rows).
+    await saveReceive(transactionNo, buildReceiveRequest(draft, po));
+    const updates = buildUpdateSections(draft, po);
+    const news = buildAddSections(draft, po, Date.now());
+    await Promise.all([
+      updates.length > 0 ? updateBoxes(transactionNo, { sections: updates }) : null,
+      news.length > 0 ? addBoxes(transactionNo, { sections: news }) : null,
+    ]);
+  }
+
   async function handleSave() {
     if (!po) return;
     setBusy("save");
     setToast(null);
     try {
-      await saveReceive(transactionNo, buildReceiveRequest(draft, po));
-      const updates = buildUpdateSections(draft, po);
-      if (updates.length > 0) await updateBoxes(transactionNo, { sections: updates });
-      const news = buildAddSections(draft, po, Date.now());
-      if (news.length > 0) await addBoxes(transactionNo, { sections: news });
+      await doFullSave();
       await refresh();
       setToast({ kind: "ok", text: "Receiving data saved successfully" });
     } catch (e) {
@@ -170,14 +190,43 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
     }
   }
 
-  // Print hook — wiring point for label printing (functionality provided later).
-  function handlePrint(boxes: PrintBox[]) {
-    if (boxes.length === 0) return;
-    // TODO: integrate actual label printing here.
-    setToast({
-      kind: "ok",
-      text: `Print requested for ${boxes.length} box${boxes.length === 1 ? "" : "es"} — printing will be enabled once configured.`,
-    });
+  // Save-then-print. Every print path (per-box / all / range) first persists the
+  // full inward — logistics/transport + all box data — then resolves the boxes to
+  // print (existing sections re-fetch, so labels carry the just-saved box_id) and
+  // opens the browser/Windows preview (hidden iframe, chunked QR gen so thousands
+  // of labels don't freeze it). Refresh runs last so nothing unmounts mid-print.
+  // ponytail: a brand-new section's boxes get real box_ids on save, but this first
+  // print resolves from the draft (id still null until the page reflects the save);
+  // reprint after it lands to embed the id. Fix needs the add-boxes API to echo ids.
+  async function handlePrint(resolve: PrintResolver) {
+    if (!po) return;
+    setToast(null);
+    setPrinting({ label: "Saving…", done: 0, total: 0 });
+    try {
+      await doFullSave();
+      setPrinting({ label: "Loading boxes…", done: 0, total: 0 });
+      const boxes = await resolve();
+      if (boxes.length === 0) {
+        await refresh();
+        return;
+      }
+      setPrinting({ label: "Rendering labels…", done: 0, total: boxes.length });
+      await printLabels({
+        entity: po.entity,
+        transaction_no: po.transaction_no,
+        boxes,
+        onProgress: (done, total) => setPrinting({ label: "Rendering labels…", done, total }),
+      });
+      // Mark the printed boxes green (only saved boxes carry a box_id).
+      const ids = boxes.map((b) => b.box_id).filter((id): id is string => !!id);
+      if (ids.length) setPrintedIds((prev) => new Set([...prev, ...ids]));
+      await refresh();
+      setToast({ kind: "ok", text: `Saved & sent ${boxes.length} label${boxes.length === 1 ? "" : "s"} to print.` });
+    } catch (e) {
+      setToast({ kind: "err", text: e instanceof Error ? e.message : "Save / print failed" });
+    } finally {
+      setPrinting(null);
+    }
   }
 
   if (loading) return <Shell><Centered>Loading Purchase Order…</Centered></Shell>;
@@ -200,6 +249,28 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
         </div>
       ) : null}
 
+      {printing ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+          <div className="bg-white rounded-md border border-[var(--aws-border)] px-6 py-5 text-center shadow-lg min-w-[260px]">
+            <div className="inline-block w-5 h-5 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin mb-3" />
+            <div className="text-[13px] font-semibold text-[var(--text-primary)]">{printing.label}</div>
+            {printing.total > 0 ? (
+              <div className="text-[12px] text-[var(--text-secondary)] mt-1 tabular-nums">
+                {printing.done.toLocaleString("en-IN")} / {printing.total.toLocaleString("en-IN")}
+              </div>
+            ) : null}
+            {printing.total > 0 ? (
+              <div className="mt-3 h-1.5 w-full bg-[var(--surface-subtle)] rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-[var(--aws-orange)] transition-all"
+                  style={{ width: `${Math.round((printing.done / printing.total) * 100)}%` }}
+                />
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
       <SummaryGrid po={po} />
 
       <LogisticsForm header={draft.header} dispatch={dispatch} />
@@ -215,10 +286,12 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
               line={l}
               draft={draft}
               dispatch={dispatch}
+              transactionNo={transactionNo}
               onUpdateSection={handleUpdateSection}
               onAddBoxesToSection={handleAddBoxesToSection}
               busy={busy}
               onPrint={handlePrint}
+              printedIds={printedIds}
             />
           ))
         )}
@@ -311,6 +384,14 @@ function Centered({ children, tone }: { children: React.ReactNode; tone?: "err" 
   );
 }
 
+// Physical warehouses the inward can be booked to. The Warehouse dropdown is
+// filtered to the warehouses the signed-in user is scoped to (admins see all);
+// the access match is format-insensitive via normaliseWarehouseCode
+// ("W-202" === "W202", "Savla D-34" === "SAVLAD34").
+const WAREHOUSE_OPTIONS = [
+  "W202", "A185", "A68", "F53", "A101", "Savla D-34", "Savla D-514", "Rishi", "Supreme", "Eskimo",
+];
+
 // Logistics & Receiving form — 12 Stores-owned fields (reference index.html 146-202).
 const LOGISTICS_DEFS: { field: LogisticsField; label: string; placeholder: string; type?: string; mono?: boolean }[] = [
   { field: "customer_party_name", label: "Customer / Party", placeholder: "Buyer party name" },
@@ -334,6 +415,17 @@ function LogisticsForm({
   header: DraftState["header"];
   dispatch: React.Dispatch<InwardAction>;
 }) {
+  const { isAdmin, warehouses } = useUserScope();
+  // Warehouses this user may book to (admins see all). Keep an already-saved
+  // value selectable even if it now falls outside the user's scope.
+  const scopedWarehouses = isAdmin
+    ? WAREHOUSE_OPTIONS
+    : WAREHOUSE_OPTIONS.filter((w) => userHasWarehouse(warehouses, w));
+  const currentWh = (header.warehouse ?? "").trim();
+  const allowedWarehouses =
+    currentWh && !scopedWarehouses.some((w) => normaliseWarehouseCode(w) === normaliseWarehouseCode(currentWh))
+      ? [currentWh, ...scopedWarehouses]
+      : scopedWarehouses;
   return (
     <div className="bg-white border border-[var(--aws-border)] rounded-md p-4 mb-4">
       <div className="mb-3">
@@ -346,17 +438,31 @@ function LogisticsForm({
           return (
             <div key={d.field} className="flex flex-col gap-1">
               <label htmlFor={id} className="text-[11px] font-semibold text-[var(--text-primary)]">{d.label}</label>
-              <input
-                id={id}
-                type={d.type ?? "text"}
-                value={header[d.field] ?? ""}
-                placeholder={d.placeholder}
-                onChange={(e) => dispatch({ type: "setHeader", field: d.field, value: e.target.value })}
-                className={[
-                  "h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]",
-                  d.mono ? "font-mono" : "",
-                ].join(" ")}
-              />
+              {d.field === "warehouse" ? (
+                <select
+                  id={id}
+                  value={header[d.field] ?? ""}
+                  onChange={(e) => dispatch({ type: "setHeader", field: d.field, value: e.target.value })}
+                  className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] font-mono"
+                >
+                  <option value="">Select warehouse…</option>
+                  {allowedWarehouses.map((w) => (
+                    <option key={w} value={w}>{w}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  id={id}
+                  type={d.type ?? "text"}
+                  value={header[d.field] ?? ""}
+                  placeholder={d.placeholder}
+                  onChange={(e) => dispatch({ type: "setHeader", field: d.field, value: e.target.value })}
+                  className={[
+                    "h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]",
+                    d.mono ? "font-mono" : "",
+                  ].join(" ")}
+                />
+              )}
             </div>
           );
         })}
