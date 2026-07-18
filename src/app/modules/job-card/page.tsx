@@ -187,17 +187,6 @@ function clampPageSize(v: number | undefined): PageSize {
   return 100;
 }
 
-function fmtCreatedAt(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  try {
-    const d = new Date(iso);
-    // dd-MMM (e.g. 14-Mar) — keeps the column narrow on mobile.
-    return d.toLocaleDateString(undefined, { day: "2-digit", month: "short" });
-  } catch {
-    return iso;
-  }
-}
-
 // Plan date arrives as a bare YYYY-MM-DD (Postgres DATE type) rather
 // than an ISO timestamp. Parse manually so we don't reinterpret it as
 // UTC midnight and slip the displayed date by one day on negative-
@@ -829,16 +818,11 @@ function JobCardListingPageBody() {
                 ) : null}
               </div>
             ) : null}
-            {/* C2 (Wave 4) — cards on sm (single column, then 2-up at sm:),
-                dense table on md+. The table hides the densest columns
-                (Lock, Created) below xl: to keep the row compact on
-                tablet-class viewports. */}
-            <div className="md:hidden">
-              <JobCardGroupedGrid rows={rows} onReload={reload} />
-            </div>
-            <div className="hidden md:block">
-              <JobCardTable rows={rows} onReload={reload} />
-            </div>
+            {/* Grouped chain cards on EVERY viewport — one card per process
+                chain (plan line), its stages listed inside, ordered by step.
+                Same grouped format the mobile view used; now the desktop
+                default too (replacing the flat one-row-per-stage table). */}
+            <JobCardGroupedGrid rows={rows} onReload={reload} />
           </>
         )}
 
@@ -946,10 +930,10 @@ function buildGroups(rows: JobCardRow[]): Group[] {
 function JobCardGroupedGrid({ rows, onReload }: { rows: JobCardRow[]; onReload: () => void }) {
   const groups = buildGroups(rows);
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
       {groups.map((g) => (
         g.kind === "plan" ? (
-          <PlanMergedCard key={`chain-${g.plan_line_id}`} group={g} />
+          <PlanMergedCard key={`chain-${g.plan_line_id}`} group={g} onReload={onReload} />
         ) : (
           <JobCard key={`jc-${g.row.job_card_id}`} jc={g.row} onReload={onReload} />
         )
@@ -958,130 +942,11 @@ function JobCardGroupedGrid({ rows, onReload }: { rows: JobCardRow[]; onReload: 
   );
 }
 
-// C2 (Wave 4) — dense table view used on md+ viewports. Hides plan
-// grouping (the card view keeps that affordance on small screens for
-// glance-friendly scanning) and surfaces every row with the columns the
-// audit asked for: JC#, SO#, FG SKU, Plant, Stage, Status, Lock, Created,
-// Action. Cost columns would be gated by useSeesCost — none are
-// surfaced in the list endpoint today, so the gate is a no-op here but
-// the seam exists for future column additions.
-function JobCardTable({ rows, onReload }: { rows: JobCardRow[]; onReload: () => void }) {
-  // Operator-stated: sort by plan_date desc — latest plan at the top,
-  // older scrolls down. Server already returns this order (the default
-  // sort_by flipped from created_at → plan_date), but we re-sort
-  // defensively so a malformed response or fallback doesn't flip the
-  // visible ordering. Tie-break on job_card_id desc keeps same-day
-  // plans stable. NULL plan_date rows sink to the bottom.
-  const sorted = [...rows].sort((a, b) => {
-    const aP = a.plan_date ?? "";
-    const bP = b.plan_date ?? "";
-    if (aP === bP) return b.job_card_id - a.job_card_id;
-    if (!aP) return 1;
-    if (!bP) return -1;
-    return bP.localeCompare(aP);
-  });
-  return (
-    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
-      <table className="w-full text-[12px] border-collapse table-auto">
-        <thead className="bg-[var(--surface-subtle)]">
-          <tr className="border-b border-[var(--aws-border)]">
-            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">JC #</th>
-            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">SO #</th>
-            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">FG SKU</th>
-            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden lg:table-cell">Plant</th>
-            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden lg:table-cell">Stage</th>
-            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Status</th>
-            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden lg:table-cell">Floor</th>
-            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden md:table-cell">Plan Date</th>
-            <th className="px-3 py-2 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden xl:table-cell">Created</th>
-            <th className="px-3 py-2 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sorted.map((jc) => (
-            <JobCardTableRow key={jc.job_card_id} jc={jc} onReload={onReload} />
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function JobCardTableRow({ jc, onReload }: { jc: JobCardRow; onReload: () => void }) {
-  const router = useRouter();
-  const status = jc.status ?? "";
-  const style = STATUS_STYLES[status] ?? { bg: "#f4f4f4", fg: "#414d5c", ring: "#d5dbdb" };
-  // Show the 8-digit JC number (job_card_id). The long PLAN-… job_card_number
-  // reference is kept on the title tooltip for traceability.
-  const jcNum = String(jc.job_card_id);
-  const jcRef = jc.job_card_number || "";
-  const so = formatSo(jc.so_numbers);
-
-  function openDetail() {
-    patchListCache({ scrollY: typeof window !== "undefined" ? window.scrollY : 0 });
-    router.push(`/modules/job-card/${jc.job_card_id}`);
-  }
-
-  return (
-    <tr className="border-b border-[var(--aws-border)] hover:bg-[var(--surface-subtle)]">
-      <td className="px-3 py-2 font-mono text-[11px] text-[var(--aws-link)] truncate max-w-[160px]" title={jcRef || jcNum}>
-        <button type="button" onClick={openDetail} className="hover:underline">
-          {jcNum}
-        </button>
-      </td>
-      <td className="px-3 py-2 text-[var(--text-primary)] truncate max-w-[140px]" title={so.tooltip}>
-        {so.display}
-      </td>
-      <td className="px-3 py-2 text-[var(--text-primary)] truncate max-w-[200px]" title={jc.fg_sku_name ?? ""}>
-        {jc.fg_sku_name || "—"}
-      </td>
-      <td className="px-3 py-2 text-[var(--text-secondary)] hidden lg:table-cell">{jc.factory || "—"}</td>
-      <td className="px-3 py-2 text-[var(--text-secondary)] hidden lg:table-cell max-w-[180px]" title={jc.stage ?? ""}>
-        <div className="flex items-center gap-1.5 min-w-0">
-          <span className="truncate">{jc.stage || "—"}</span>
-          {/* Slice 7 — SFG#### produced by a Create-WIP step. Defensive:
-              only rendered when output_code is present (backend may omit it). */}
-          {jc.output_code ? (
-            <span
-              className="shrink-0 font-mono font-semibold text-[10px] text-[var(--aws-navy)] px-1 py-0.5 rounded-sm bg-[var(--surface-subtle)] border border-[var(--aws-border)]"
-              title={`Produces ${jc.output_code}`}
-            >
-              {jc.output_code}
-            </span>
-          ) : null}
-        </div>
-      </td>
-      <td className="px-3 py-2">
-        <span
-          className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-sm capitalize whitespace-nowrap border"
-          style={{ background: style.bg, color: style.fg, borderColor: style.ring }}
-        >
-          {fmtStatus(status) || "—"}
-        </span>
-      </td>
-      <td className="px-3 py-2 text-[var(--text-secondary)] hidden lg:table-cell truncate max-w-[140px]" title={jc.floor ?? ""}>
-        {jc.floor || "—"}
-      </td>
-      <td className="px-3 py-2 text-[var(--text-primary)] font-medium hidden md:table-cell">
-        {fmtPlanDate(jc.plan_date)}
-      </td>
-      <td className="px-3 py-2 text-[var(--text-secondary)] hidden xl:table-cell">
-        {fmtCreatedAt(jc.created_at)}
-      </td>
-      <td className="px-3 py-2">
-        <div className="flex flex-wrap items-center justify-end gap-1">
-          <RowActions row={jc} onReload={onReload} onOpenDetail={openDetail} />
-        </div>
-      </td>
-    </tr>
-  );
-}
-
 // Compact merged card: one per process CHAIN (plan line), with each stage
 // rendered as a single row inside, ordered by step_number. Click a stage row
 // to jump to that JC's detail page. Header shows SKU + customer + plant; the
 // stage rows show step number · process · floor · qty · status.
-function PlanMergedCard({ group }: { group: PlanGroup }) {
+function PlanMergedCard({ group, onReload }: { group: PlanGroup; onReload: () => void }) {
   const router = useRouter();
   const first = group.stages[0];
   const sku = first?.fg_sku_name || "—";
@@ -1192,17 +1057,17 @@ function PlanMergedCard({ group }: { group: PlanGroup }) {
                 {stepNo}
               </span>
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <span className="font-medium text-[var(--text-primary)] truncate" title={processLabel}>
+                <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
+                  <span className="min-w-0 font-medium text-[var(--text-primary)] truncate" title={processLabel}>
                     {processLabel}
                   </span>
-                  {/* Slice 7 — surface the SFG#### this Create-WIP step
-                      produces. Defensive: the v2 list endpoint may not return
-                      output_code yet, and non-producer steps have none — only
-                      render the chip when a code is actually present. */}
+                  {/* Slice 7 — the SFG this Create-WIP step produces. May be a
+                      short SFG#### code OR a long canonical SFG name, so it
+                      truncates (min-w-0 + truncate, capped width) — it must never
+                      overflow into the status pill / Force-unlock. Full text on hover. */}
                   {jc.output_code ? (
                     <span
-                      className="shrink-0 font-mono font-semibold text-[9px] text-[var(--aws-navy)] px-1 py-0.5 rounded-sm bg-[var(--surface-subtle)] border border-[var(--aws-border)]"
+                      className="min-w-0 max-w-[55%] truncate font-mono font-semibold text-[9px] text-[var(--aws-navy)] px-1 py-0.5 rounded-sm bg-[var(--surface-subtle)] border border-[var(--aws-border)]"
                       title={`Produces ${jc.output_code}`}
                     >
                       {jc.output_code}
@@ -1222,6 +1087,16 @@ function PlanMergedCard({ group }: { group: PlanGroup }) {
                 }}
               >
                 {fmtStatus(status) || "—"}
+              </span>
+              {/* Force-unlock inline on the locked stage (renders nothing unless
+                  locked + the user may unlock). stopPropagation so acting on the
+                  button doesn't also open the stage's detail page. */}
+              <span
+                className="shrink-0"
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => e.stopPropagation()}
+              >
+                <ForceUnlockButton row={jc} onReload={onReload} />
               </span>
             </li>
           );
@@ -1310,18 +1185,10 @@ function JobCard({ jc, onReload }: { jc: JobCardRow; onReload: () => void }) {
   );
 }
 
-// Shared row actions. Used by both the card grid (sm) and the dense table
-// (md+). Encapsulates the lock-aware Force-Unlock CTA so neither rendering
-// path duplicates logic.
-function RowActions({
-  row,
-  onReload,
-  onOpenDetail,
-}: {
-  row: JobCardRow;
-  onReload: () => void;
-  onOpenDetail: () => void;
-}) {
+// Lock-aware Force-Unlock CTA. Renders nothing unless the row is locked AND the
+// current user may force-unlock. Shared by the table rows, the loose cards, and
+// the grouped-chain stage rows so the prompt + validation flow lives in one place.
+function ForceUnlockButton({ row, onReload }: { row: JobCardRow; onReload: () => void }) {
   // W4-MED-3/M10 — pure lock derivation off the context-provided me snapshot.
   const { me } = useUserCtx();
   const lock = useMemo(
@@ -1353,7 +1220,6 @@ function RowActions({
         body: JSON.stringify({ authority: authority.trim(), reason: trimmedReason }),
       });
       if (!res.ok) {
-        // W4-HIGH-2 — shared envelope reader.
         const msg = await readApiErrorMessage(res, "Force-unlock failed");
         throw new Error(msg);
       }
@@ -1364,29 +1230,42 @@ function RowActions({
     }
   }
 
+  if (!lock.shouldShowForceUnlock) return null;
+  // Server-side gate is still authoritative; roleAllow keeps the button
+  // interactive for the already-vetted role list.
+  return (
+    <LockableButton
+      roleAllow="floor_manager,plant_manager,inventory_manager"
+      variant="danger"
+      lockState={{
+        isLocked: lock.isLocked,
+        lockedReason: lock.lockedReason,
+        mayForceUnlock: lock.mayForceUnlock,
+      }}
+      onClick={() => void forceUnlock()}
+    >
+      Force unlock
+    </LockableButton>
+  );
+}
+
+// Shared row actions — View + lock-aware Force-Unlock. Used by the loose cards
+// (and previously the dense table).
+function RowActions({
+  row,
+  onReload,
+  onOpenDetail,
+}: {
+  row: JobCardRow;
+  onReload: () => void;
+  onOpenDetail: () => void;
+}) {
   return (
     <>
       <ActionButton variant="secondary" onClick={onOpenDetail}>
         View
       </ActionButton>
-      {lock.shouldShowForceUnlock ? (
-        // LockableButton with a synthetic lockState that includes
-        // mayForceUnlock so the button stays interactive for the
-        // already-vetted role list (admin / floor_manager / plant_manager /
-        // inventory_manager). Server-side gate is still authoritative.
-        <LockableButton
-          roleAllow="floor_manager,plant_manager,inventory_manager"
-          variant="danger"
-          lockState={{
-            isLocked: lock.isLocked,
-            lockedReason: lock.lockedReason,
-            mayForceUnlock: lock.mayForceUnlock,
-          }}
-          onClick={() => void forceUnlock()}
-        >
-          Force unlock
-        </LockableButton>
-      ) : null}
+      <ForceUnlockButton row={row} onReload={onReload} />
     </>
   );
 }
