@@ -1462,8 +1462,23 @@ function CreateJobCardModal({
           if (qtyUnits === "" && selectedLine?.planned_qty_units != null && selectedLine.planned_qty_units !== "") {
             setQtyUnits(String(selectedLine.planned_qty_units));
           }
-          // Fresh chain: seed the first WIP step's SFG output with the canonical name.
-          setWipSteps((prev) => prev.map((x, idx) => (idx === 0 && !x.sfgOutput ? { ...x, sfgOutput: canon } : x)));
+          // Prefill the WIP chain + packaging floor from the plan's snapshot route
+          // (returned by the config endpoint for un-carded lines) so Create works
+          // in one click — the plan already carries the process/floor chain.
+          // Fall back to a single blank step when the plan has no steps.
+          if (cfg.wip_steps && cfg.wip_steps.length) {
+            setWipSteps(cfg.wip_steps.map((s) => ({
+              process: s.process ?? "",
+              floor: s.floor ?? "",
+              sfgOutput: canon || (s.sfg_output ?? ""),
+              jobCardId: null,
+              started: false,
+            })));
+            setPkgFloor(cfg.pkg_floor ?? "");
+          } else {
+            // Fresh chain, no plan steps: seed the first WIP step's SFG output.
+            setWipSteps((prev) => prev.map((x, idx) => (idx === 0 && !x.sfgOutput ? { ...x, sfgOutput: canon } : x)));
+          }
         }
       } catch {
         setMode("create");   // fall back to a create attempt; the server still guards
