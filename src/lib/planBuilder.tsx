@@ -633,25 +633,17 @@ export function usePlanBuilder(opts: {
       onToast("Pick an entity (CFPL or CDPL) before creating a plan.");
       return false;
     }
-    // Factory consistency: every selected card must have a factory set, and
-    // all of them must agree (a plan is scoped to one warehouse). Mirrors
-    // fulfillment.js:1976-1993.
-    const factories = new Set<FactoryCode>();
+    // Every selected card must have a factory (it drives the card's warehouse).
+    // Cards may now span factories/warehouses — we no longer force one plan;
+    // instead we GROUP by (warehouse, SKU) below and create one plan per group.
     let missingFactory = 0;
     for (const r of selectedRows) {
-      const f = cardCfgRef.current.get(r.fulfillment_id)?.factory;
-      if (!f) missingFactory += 1; else factories.add(f);
+      if (!cardCfgRef.current.get(r.fulfillment_id)?.factory) missingFactory += 1;
     }
     if (missingFactory > 0) {
       onToast(`Pick a factory for ${missingFactory} card${missingFactory === 1 ? "" : "s"} before creating the plan.`);
       return false;
     }
-    if (factories.size > 1) {
-      onToast(`All selected articles must use the same factory (got: ${[...factories].join(", ")}).`);
-      return false;
-    }
-    const chosenFactory = [...factories][0];
-    const warehouse = FACTORY_TO_WAREHOUSE[chosenFactory];
 
     // Client-side qty validation — saves a 400 round-trip and points at
     // the offending SKU. Mirrors the same check at fulfillment.js:2003.
@@ -688,21 +680,24 @@ export function usePlanBuilder(opts: {
       // off-by-one without pulling in a date library.
       const now = new Date();
       const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-      const lines = selectedRows.map((r) => {
+
+      // Build ONE plan line from a selected card. Each line keeps its OWN SO
+      // reference (linked_so_fulfillment_ids: [fulfillment_id]) and its own qty
+      // — the SO linkage is preserved exactly as before. (Reservation adds a
+      // line's full qty to EVERY linked fid, so collapsing multiple SOs into a
+      // single line would over-reserve; grouping happens at the PLAN level.)
+      const buildLine = (r: FulfillmentRow) => {
         const cfg = cardCfgRef.current.get(r.fulfillment_id) ?? {};
         const defaultKg = toNum(r.pending_qty_kg);
         const defaultUnits = toNum(r.pending_qty_units);
         const qtyKg = cfg.qty_kg != null && cfg.qty_kg > 0 ? cfg.qty_kg : defaultKg;
-        const qtyUnitsRaw = cfg.qty_units != null && cfg.qty_units > 0
-          ? cfg.qty_units
-          : defaultUnits;
+        const qtyUnitsRaw = cfg.qty_units != null && cfg.qty_units > 0 ? cfg.qty_units : defaultUnits;
         const deadline = cfg.deadline_date && cfg.deadline_date !== ""
           ? cfg.deadline_date
           : (r.delivery_deadline ? String(r.delivery_deadline).slice(0, 10) : null);
 
-        // Steps the operator configured. Only forward when at least one
-        // step has a floor — otherwise the server snapshots from
-        // bom_process_route on its own, which is the cleaner default.
+        // Steps the operator configured. Only forward when at least one step
+        // has a floor — otherwise the server snapshots bom_process_route itself.
         const userSteps = cfg.steps?.filter(Boolean) ?? [];
         const anyFloored = userSteps.some((s) => !!s.floor);
         const stepsPayload = anyFloored
@@ -714,61 +709,94 @@ export function usePlanBuilder(opts: {
               loss_pct: s.loss_pct,
             }))
           : undefined;
-        // Surface the first floored step's floor on the line-level `area`
-        // column so non-step-aware readers see something useful.
         const firstFloored = userSteps.find((s) => !!s.floor);
 
         return {
           fg_sku_name: r.fg_sku_name ?? "",
           customer_name: r.customer_name ?? null,
           planned_qty_kg: qtyKg,
-          // production_plan_line_v2.planned_qty_units is NOT NULL CHECK (> 0)
-          // (009_planning_v2.sql:160), so we must always send a positive count.
-          // When the operator entered no units and the fulfillment row carries
-          // none (typically by-weight SKUs), fall back to a kg-derived integer
-          // purely to satisfy that constraint.
-          //
-          // Do NOT "fix" this to send null/0 — that violates the constraint and
-          // create_plan rejects the whole plan. The genuinely-correct unit count
-          // for a per-piece SKU is qty_kg / all_sku.uom, which the backend's
-          // resolve_bom_multiplier already derives — but only when
-          // planned_qty_units is NULL, which this column forbids. Making the
-          // column nullable + deferring to that derivation is a schema change
-          // tracked with the Create-Job-Card backend work.
+          // planned_qty_units is NOT NULL CHECK (> 0) — always send a positive
+          // count; fall back to a kg-derived integer for by-weight SKUs. Do NOT
+          // send null/0 (create_plan would reject the whole plan).
           planned_qty_units: qtyUnitsRaw > 0 ? Math.round(qtyUnitsRaw) : Math.max(1, Math.round(qtyKg)),
           linked_so_fulfillment_ids: [r.fulfillment_id],
           deadline_date: deadline ?? undefined,
           ...(stepsPayload ? { steps: stepsPayload } : {}),
           ...(firstFloored?.floor ? { area: firstFloored.floor } : {}),
         };
-      });
-      // Plan window: date_to is the latest per-line deadline (or today if
-      // none exist). Backend's CHECK enforces date_to >= date_from.
-      const deadlines = lines
-        .map((l) => l.deadline_date)
-        .filter((d): d is string => !!d)
-        .sort();
-      const latest = deadlines.length ? deadlines[deadlines.length - 1] : today;
-      const dateTo = latest >= today ? latest : today;
-      const resp = await createPlan({
-        entity: planEntity,
-        warehouse,
-        plan_type: "daily",
-        plan_date: today,
-        date_from: today,
-        date_to: dateTo,
-        lines,
-      });
-      onToast(resp.plan_id ? `Plan ${resp.plan_id} created.` : "Plan created.");
-      clearAllSelection();
-      return true;
+      };
+
+      // Group selected cards into plans by (warehouse, SKU):
+      //   rule 1 — same SKU (same warehouse) merges into ONE plan;
+      //   rule 2 — same SKU across DIFFERENT warehouses splits into separate plans.
+      // SKU key is trimmed + lower-cased so trivial whitespace/case differences
+      // don't split a group; the line still carries the original SKU name.
+      const groups = new Map<string, { warehouse: string; rows: FulfillmentRow[] }>();
+      for (const r of selectedRows) {
+        const factory = cardCfgRef.current.get(r.fulfillment_id)!.factory as FactoryCode;
+        const warehouse = FACTORY_TO_WAREHOUSE[factory];
+        const key = `${warehouse} ${(r.fg_sku_name ?? "").trim().toLowerCase()}`;
+        const g = groups.get(key);
+        if (g) g.rows.push(r);
+        else groups.set(key, { warehouse, rows: [r] });
+      }
+
+      // One createPlan per group. Plans are independent POSTs, so a failure in
+      // one doesn't roll back the others — track which succeeded.
+      const createdIds: number[] = [];
+      const doneFids: number[] = [];
+      const failures: string[] = [];
+      for (const { warehouse, rows } of groups.values()) {
+        const lines = rows.map(buildLine);
+        const deadlines = lines
+          .map((l) => l.deadline_date)
+          .filter((d): d is string => !!d)
+          .sort();
+        const latest = deadlines.length ? deadlines[deadlines.length - 1] : today;
+        const dateTo = latest >= today ? latest : today;
+        try {
+          const resp = await createPlan({
+            entity: planEntity,
+            warehouse,
+            plan_type: "daily",
+            plan_date: today,
+            date_from: today,
+            date_to: dateTo,
+            lines,
+          });
+          if (resp.plan_id) createdIds.push(resp.plan_id);
+          for (const r of rows) doneFids.push(r.fulfillment_id);
+        } catch (e) {
+          failures.push(`${rows[0].fg_sku_name ?? "article"} @ ${warehouse}: ${friendlyApiError(e)}`);
+        }
+      }
+
+      if (failures.length === 0) {
+        onToast(
+          createdIds.length === 1
+            ? `Plan ${createdIds[0]} created.`
+            : `Created ${createdIds.length} plans (${createdIds.join(", ")}).`,
+        );
+        clearAllSelection();
+        return true;
+      }
+      // Partial/total failure: drop the articles whose plans WERE created (their
+      // fulfillment qty is now reserved — re-running would double it), and leave
+      // the failed ones selected for a retry.
+      for (const fid of doneFids) deselect(fid);
+      onToast(
+        createdIds.length
+          ? `Created ${createdIds.length} plan(s); ${failures.length} group(s) failed — ${failures[0]}`
+          : `Create plan failed: ${failures[0]}`,
+      );
+      return false;
     } catch (e) {
       onToast(`Create plan failed: ${friendlyApiError(e)}`);
       return false;
     } finally {
       setCreatingPlan(false);
     }
-  }, [entity, onToast, clearAllSelection]);
+  }, [entity, onToast, clearAllSelection, deselect]);
 
   return {
     selectedIds,

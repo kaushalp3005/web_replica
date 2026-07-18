@@ -421,8 +421,14 @@ export default function PlanListPage() {
                   const r = await replaceLineJobCards(p.planLineId, body);
                   setToast(`Updated job cards for ${article} · ${r.count} stage${r.count === 1 ? "" : "s"} re-dispatched.`);
                 } else {
-                  const r = await createLineJobCards(p.planLineId, body);
-                  setToast(`Created ${r.count} job card${r.count === 1 ? "" : "s"} for ${article} · dispatched to floors.`);
+                  const r = await createLineJobCards(p.planLineId, {
+                    ...body,
+                    merge_plan_line_ids: p.mergePlanLineIds,
+                  });
+                  const mergedNote = p.mergePlanLineIds.length
+                    ? ` (merged ${p.mergePlanLineIds.length + 1} SOs)`
+                    : "";
+                  setToast(`Created ${r.count} job card${r.count === 1 ? "" : "s"} for ${article}${mergedNote} · dispatched to floors.`);
                 }
               }
               reload();
@@ -1327,6 +1333,65 @@ function getLineId(line: PlanRowLineSummary, index: number): number {
   return line.plan_line_id ?? index;
 }
 
+function numOr0(v: number | string | null | undefined): number {
+  if (v == null || v === "") return 0;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Round to 3 dp (matches production_plan_line_v2's numeric(,3)) so a summed
+// merged quantity doesn't carry binary-float noise like 450.79999999.
+const round3 = (n: number): number => Math.round(n * 1000) / 1000;
+
+// A step-1 article option. UN-CARDED lines with the SAME (SKU, BOM) collapse into
+// ONE option carrying the COMBINED qty and every line id, so the create call can
+// fold the siblings into one job-card chain server-side (both SO numbers ride
+// along). Carded lines — and lines with no plan_line_id — stay individual.
+type ArticleOption = {
+  id: number;           // selection id = primary (first) line's plan_line_id
+  fgSkuName: string;
+  kg: number;           // combined planned qty
+  units: number;
+  carded: boolean;
+  memberIds: number[];  // all plan_line_ids folded here (length > 1 => merged)
+  count: number;        // # of lines/SOs merged
+};
+
+function buildArticleOptions(lines: PlanRowLineSummary[]): ArticleOption[] {
+  const opts: ArticleOption[] = [];
+  const seen = new Set<string>();
+  const mergeKey = (l: PlanRowLineSummary) =>
+    `${(l.fg_sku_name ?? "").trim().toLowerCase()} ${l.bom_id ?? ""}`;
+  lines.forEach((l, i) => {
+    const carded = (l.job_card_count ?? 0) > 0;
+    // Only un-carded lines that carry a real plan_line_id can be merged.
+    if (carded || l.plan_line_id == null) {
+      opts.push({
+        id: getLineId(l, i), fgSkuName: l.fg_sku_name ?? "",
+        kg: numOr0(l.planned_qty_kg), units: numOr0(l.planned_qty_units),
+        carded, memberIds: [getLineId(l, i)], count: 1,
+      });
+      return;
+    }
+    const key = mergeKey(l);
+    if (seen.has(key)) return;   // already emitted this SKU+BOM group
+    seen.add(key);
+    const grp = lines.filter(
+      (x) => (x.job_card_count ?? 0) === 0 && x.plan_line_id != null && mergeKey(x) === key,
+    );
+    opts.push({
+      id: grp[0].plan_line_id as number,
+      fgSkuName: grp[0].fg_sku_name ?? "",
+      kg: round3(grp.reduce((s, g) => s + numOr0(g.planned_qty_kg), 0)),
+      units: round3(grp.reduce((s, g) => s + numOr0(g.planned_qty_units), 0)),
+      carded: false,
+      memberIds: grp.map((g) => g.plan_line_id as number),
+      count: grp.length,
+    });
+  });
+  return opts;
+}
+
 function CreateJobCardModal({
   plan, onClose, onContinue,
 }: {
@@ -1342,13 +1407,18 @@ function CreateJobCardModal({
     liveEdit: boolean;
     pkgJobCardId: number | null;
     removeReasons: Record<string, string>;
+    mergePlanLineIds: number[];   // sibling same-SKU lines to fold (create only)
   }) => Promise<boolean>;
 }) {
   const lines = plan.lines_summary ?? [];
+  // Merge same-(SKU, BOM) un-carded lines into one selectable option (combined
+  // qty). `selected` holds the option id = the primary line's id.
+  const articleOptions = useMemo(() => buildArticleOptions(lines), [lines]);
   const [step, setStep] = useState<1 | 2>(1);
   const [selected, setSelected] = useState<number | null>(
-    lines.length === 1 ? getLineId(lines[0], 0) : null,
+    articleOptions.length === 1 ? articleOptions[0].id : null,
   );
+  const selectedOption = articleOptions.find((o) => o.id === selected) ?? null;
   const [qtyKg, setQtyKg] = useState("");
   const [qtyUnits, setQtyUnits] = useState("");
   // WIP is one or more processes, each with its own floor + SFG output.
@@ -1456,11 +1526,13 @@ function CreateJobCardModal({
         } else {
           setMode("create");
           setChainStarted(false);
-          if (qtyKg === "" && selectedLine?.planned_qty_kg != null) {
-            setQtyKg(String(selectedLine.planned_qty_kg));
+          // Prefill the COMBINED qty of the selected option (summed across merged
+          // same-SKU lines) so a merged article shows its total, not one line's.
+          if (qtyKg === "" && selectedOption && selectedOption.kg > 0) {
+            setQtyKg(String(selectedOption.kg));
           }
-          if (qtyUnits === "" && selectedLine?.planned_qty_units != null && selectedLine.planned_qty_units !== "") {
-            setQtyUnits(String(selectedLine.planned_qty_units));
+          if (qtyUnits === "" && selectedOption && selectedOption.units > 0) {
+            setQtyUnits(String(selectedOption.units));
           }
           // Prefill the WIP chain + packaging floor from the plan's snapshot route
           // (returned by the config endpoint for un-carded lines) so Create works
@@ -1488,12 +1560,12 @@ function CreateJobCardModal({
       }
     } else {
       setMode("create");
-      // Prefill qty + units from the chosen line the first time we advance.
-      if (qtyKg === "" && selectedLine?.planned_qty_kg != null) {
-        setQtyKg(String(selectedLine.planned_qty_kg));
+      // Prefill combined qty from the selected option the first time we advance.
+      if (qtyKg === "" && selectedOption && selectedOption.kg > 0) {
+        setQtyKg(String(selectedOption.kg));
       }
-      if (qtyUnits === "" && selectedLine?.planned_qty_units != null && selectedLine.planned_qty_units !== "") {
-        setQtyUnits(String(selectedLine.planned_qty_units));
+      if (qtyUnits === "" && selectedOption && selectedOption.units > 0) {
+        setQtyUnits(String(selectedOption.units));
       }
     }
     setStep(2);
@@ -1522,8 +1594,11 @@ function CreateJobCardModal({
   // extra digit is easy to miss, so we flag it. Hard reconciliation against
   // the live pending qty is enforced server-side when the create endpoint is
   // wired (see the Create-Job-Card backend design).
-  const plannedKg = selectedLine?.planned_qty_kg != null ? Number(selectedLine.planned_qty_kg) : null;
-  const overQty = plannedKg != null && plannedKg > 0 && Number(qtyKg) > plannedKg;
+  // Compare against the COMBINED planned qty of the selected option (summed over
+  // the merged same-SKU lines), not just the primary line — else a merged article
+  // falsely trips "exceeds planned". Small tolerance absorbs float rounding.
+  const plannedKg = selectedOption && selectedOption.kg > 0 ? selectedOption.kg : null;
+  const overQty = plannedKg != null && Number(qtyKg) > plannedKg + 0.001;
 
   return (
     <div
@@ -1560,17 +1635,16 @@ function CreateJobCardModal({
 
         {step === 1 ? (
           <div className="overflow-y-auto p-2">
-            {lines.length === 0 ? (
+            {articleOptions.length === 0 ? (
               <p className="text-[12px] text-[var(--text-muted)] italic p-3">This plan has no articles.</p>
             ) : (
               <ul className="space-y-1">
-                {lines.map((l, i) => {
-                  const id = getLineId(l, i);
-                  const kg = l.planned_qty_kg != null ? fmtPlanKg(l.planned_qty_kg) : null;
-                  const pcs = l.planned_qty_units != null && l.planned_qty_units !== ""
-                    ? String(l.planned_qty_units) : null;
+                {articleOptions.map((opt) => {
+                  const id = opt.id;
+                  const kg = opt.kg > 0 ? fmtPlanKg(opt.kg) : null;
+                  const pcs = opt.units > 0 ? String(opt.units) : null;
                   const checked = selected === id;
-                  const carded = (l.job_card_count ?? 0) > 0;
+                  const merged = opt.count > 1;   // same SKU folded from N SOs
                   return (
                     <li key={id}>
                       <label
@@ -1588,7 +1662,7 @@ function CreateJobCardModal({
                           onChange={() => {
                             // Switching article drops the previous article's qty
                             // and edit state so goNext re-resolves from the newly
-                            // picked line (create-prefill or edit-prefill).
+                            // picked option (create-prefill or edit-prefill).
                             if (selected !== id) {
                               setSelected(id);
                               setQtyKg("");
@@ -1604,18 +1678,24 @@ function CreateJobCardModal({
                         />
                         <span className="flex-1 min-w-0">
                           <span className="flex items-center gap-1.5 min-w-0">
-                            <span className="text-[13px] text-[var(--text-primary)] truncate" title={l.fg_sku_name ?? ""}>
-                              {l.fg_sku_name || "—"}
+                            <span className="text-[13px] text-[var(--text-primary)] truncate" title={opt.fgSkuName}>
+                              {opt.fgSkuName || "—"}
                             </span>
-                            {carded ? (
+                            {opt.carded ? (
                               <span className="shrink-0 px-1 py-0.5 text-[9px] font-bold uppercase rounded-[2px] border bg-[#eef7ee] text-[#2e7d32] border-[#bfe0c0]">
                                 Carded
+                              </span>
+                            ) : null}
+                            {merged ? (
+                              <span className="shrink-0 px-1 py-0.5 text-[9px] font-bold uppercase rounded-[2px] border bg-[#eef2fb] text-[#1e5aa0] border-[#c3d4ec]">
+                                Merged · {opt.count} SOs
                               </span>
                             ) : null}
                           </span>
                           {(kg != null || pcs != null) ? (
                             <span className="block text-[11px] font-mono text-[var(--text-muted)]">
                               {kg != null ? `${kg} kg` : ""}{kg != null && pcs != null ? " · " : ""}{pcs != null ? `${pcs} pcs` : ""}
+                              {merged ? " · combined" : ""}
                             </span>
                           ) : null}
                         </span>
@@ -1777,6 +1857,11 @@ function CreateJobCardModal({
                     const ok = await onContinue({
                       planLineId: selected, qtyKg, qtyUnits, wipSteps, pkgFloor, mode,
                       liveEdit, pkgJobCardId, removeReasons,
+                      // Fold sibling same-SKU lines into this primary — only on a
+                      // fresh create of a merged option; empty otherwise.
+                      mergePlanLineIds: mode === "create" && selectedOption
+                        ? selectedOption.memberIds.filter((m) => m !== selected)
+                        : [],
                     });
                     if (ok) onClose();        // success → modal unmounts
                     else setCreating(false);  // failure → stay open (toast shows why)

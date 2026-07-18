@@ -211,6 +211,10 @@ export interface CreateJobCardBody {
   qty_units?: number | null;
   wip_steps: CreateJobCardStep[];
   pkg_floor: string;
+  // Other plan lines (same SKU + BOM) to fold into this primary line before the
+  // chain is built — so same-article lines become ONE job-card set. qty_kg /
+  // qty_units must be the COMBINED total. Omit/empty for a plain single create.
+  merge_plan_line_ids?: number[];
 }
 
 export interface CreateJobCardResult {
