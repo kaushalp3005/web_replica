@@ -14,7 +14,7 @@ import type { MeResponse } from "@/lib/auth";
 import {
   getDevJobCard, replaceDevLines, startDevJobCard, closeDevJobCard, cancelDevJobCard,
   addDevPhase, replacePhaseLines, startDevPhase, completeDevPhase, deleteDevPhase, promoteApproval,
-  promoteRejectByEmail,
+  promoteRejectByEmail, dispatchDevJobCard,
   type DevJobCard, type DevLine, type DevPhase, type DevPhaseCompleteBody, type PromoteGate,
 } from "@/lib/npd-dev";
 import { DevJcStatusPill } from "../../../sample/_shared";
@@ -78,6 +78,11 @@ export default function DevJobCardDetailPage() {
   const [outWastage, setOutWastage] = useState("");
   const [outEga, setOutEga] = useState("");      // extra give away
   const [outNotes, setOutNotes] = useState("");
+
+  // Partial-out (dispatch) form on the CLOSED card. Qty defaults to the remaining
+  // balance when left blank; recipient is the driver/receiver on the outpass.
+  const [dispQty, setDispQty] = useState("");
+  const [dispRecipient, setDispRecipient] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -221,9 +226,20 @@ export default function DevJobCardDetailPage() {
     if (reason == null) return; // user dismissed
     run(() => cancelDevJobCard(id, reason || "cancelled"));
   }
-  function openGatePass() {
+  function openGatePass(dispatchId?: number) {
     // A4 Delivery Challan + Gate Pass print page (reproduces the IMS direct-out DC).
-    window.open(`/modules/npd-development/job-cards/${id}/gate-pass`, "_blank", "noopener");
+    // A dispatchId prints that single partial out; omitted → the full finalized output.
+    const q = dispatchId != null ? `?dispatch=${dispatchId}` : "";
+    window.open(`/modules/npd-development/job-cards/${id}/gate-pass${q}`, "_blank", "noopener");
+  }
+  // Partial out: issue part (or all) of the finalized FG sample. Blank qty → the
+  // whole remaining balance. Reload refreshes dispatches[] + remaining_qty.
+  function doDispatch() {
+    const q = dispQty ? Number(dispQty) : undefined;
+    run(async () => {
+      await dispatchDevJobCard(id, { recipient: dispRecipient || undefined, qty: q });
+      setDispQty(""); setDispRecipient("");
+    });
   }
   // Trial phases (multi-day). Each phase clones the previous phase's recipe, then
   // is edited / started / completed (with output + accounting) independently.
@@ -590,17 +606,28 @@ export default function DevJobCardDetailPage() {
                   </p>
                 )}
                 {/* Permanent outpass — A4 Delivery Challan + Gate Pass for the FG sample.
-                    npd_team + admin only; BH/IM may view the card but not download. */}
-                {caps.canOutpass && (
+                    npd_team + admin only; BH/IM may view the card but not download.
+                    Hidden once any partial out exists — the per-part outpasses below
+                    then authorize movement, so a full-qty doc can't double-count. */}
+                {caps.canOutpass && (jc.dispatches?.length ?? 0) === 0 && (
                 <div className="mt-3">
-                  <button onClick={openGatePass}
+                  <button onClick={() => openGatePass()}
                     className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium hover:bg-[var(--aws-orange-hover)] inline-flex items-center gap-1.5">
                     <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
-                    Download outpass
+                    Download full outpass
                   </button>
                 </div>
                 )}
               </Card>
+            )}
+
+            {/* Partial out — issue the finalized FG sample in parts, each part its
+                own 265 goods issue + its own outpass. npd_team + admin only. */}
+            {jc.status === "CLOSED" && caps.canOutpass && (
+              <DispatchPanel jc={jc} busy={busy}
+                qty={dispQty} setQty={setDispQty}
+                recipient={dispRecipient} setRecipient={setDispRecipient}
+                onDispatch={doDispatch} onOutpass={openGatePass} />
             )}
           </div>
         )}
@@ -952,6 +979,88 @@ function AcctRow({ label, value, strong, valueClass }: { label: string; value: s
 }
 function Empty({ children }: { children: React.ReactNode }) {
   return <p className="text-[13px] text-[var(--text-muted)]">{children}</p>;
+}
+
+// Partial-out panel (CLOSED card): issue the finalized FG sample in parts. Shows
+// output / dispatched / remaining, a qty+recipient form bounded by the remaining
+// balance, and the ledger of parts already sent — each with its own outpass.
+function DispatchPanel({ jc, busy, qty, setQty, recipient, setRecipient, onDispatch, onOutpass }: {
+  jc: DevJobCard; busy: boolean;
+  qty: string; setQty: (v: string) => void;
+  recipient: string; setRecipient: (v: string) => void;
+  onDispatch: () => void; onOutpass: (dispatchId?: number) => void;
+}) {
+  const uom = jc.output_uom || jc.uom || "kg";
+  const out = Number(jc.output_qty) || 0;
+  const dispatches = jc.dispatches ?? [];
+  const total = jc.dispatched_total != null ? Number(jc.dispatched_total)
+    : dispatches.reduce((s, d) => s + (Number(d.qty) || 0), 0);
+  const remaining = jc.remaining_qty != null ? Number(jc.remaining_qty) : out - total;
+  const qn = qty === "" ? NaN : Number(qty);
+  const invalid = qty !== "" && (!Number.isFinite(qn) || qn <= 0 || qn > remaining + 1e-6);
+  const canDispatch = !busy && remaining > 1e-6 && !invalid;
+  const f = (v: number) => Number(v.toFixed(3)).toLocaleString("en-IN");
+  return (
+    <Card title="Dispatch / outpass">
+      <p className="text-[12px] text-[var(--text-muted)] mb-3">
+        Issue the finalized FG sample out in parts — each part fires a goods issue and prints its own outpass. Dispatch again until the whole output is sent.
+      </p>
+      <dl className="grid grid-cols-3 gap-x-4 gap-y-1 text-[13px] mb-3">
+        <Field label={`Output (${uom})`} value={f(out)} />
+        <Field label={`Dispatched (${uom})`} value={f(total)} />
+        <Field label={`Remaining (${uom})`} value={f(remaining)} />
+      </dl>
+      {out <= 1e-6 ? (
+        <div className="mb-3 rounded-md border border-[var(--aws-border)] bg-[var(--surface-subtle)] px-3 py-2 text-[13px] text-[var(--text-secondary)]">
+          No finalized output to dispatch.
+        </div>
+      ) : remaining > 1e-6 ? (
+        <div className="flex flex-wrap items-end gap-2 mb-1">
+          <label className="text-[11px] text-[var(--text-secondary)]">Qty ({uom})
+            <input className="form-input mt-0.5 !w-32" type="number" min="0" step="0.001" max={remaining}
+              placeholder={`${f(remaining)} (all)`} value={qty} onChange={(e) => setQty(e.target.value)} />
+          </label>
+          <label className="text-[11px] text-[var(--text-secondary)] flex-1 min-w-[160px]">Recipient / driver
+            <input className="form-input mt-0.5" value={recipient} placeholder="Name…"
+              onChange={(e) => setRecipient(e.target.value)} />
+          </label>
+          <button disabled={!canDispatch} onClick={onDispatch}
+            className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">
+            Dispatch part
+          </button>
+        </div>
+      ) : (
+        <div className="mb-3 rounded-md border border-[#b6dbb1] bg-[#eaf6ed] px-3 py-2 text-[13px] text-[#1d8102]">
+          Fully dispatched — the entire finalized output has been issued out.
+        </div>
+      )}
+      {invalid && (
+        <p className="text-[12px] text-[var(--aws-error)] mb-3">Enter a quantity between 0 and the remaining {f(remaining)} {uom}, or leave blank to send the rest.</p>
+      )}
+      <div className="mt-3">
+        {dispatches.length === 0 ? (
+          <Empty>No parts dispatched yet.</Empty>
+        ) : (
+          <ul className="border border-[var(--aws-border)] rounded-md divide-y divide-[var(--surface-divider)]">
+            {dispatches.map((d) => (
+              <li key={d.dispatch_id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-[13px]">
+                <span className="text-[11px] w-6 h-6 rounded-full bg-[var(--surface-divider)] text-[var(--text-secondary)] flex items-center justify-center shrink-0">{d.seq}</span>
+                <span className="font-medium text-[var(--text-primary)] tabular-nums">{f(Number(d.qty) || 0)} {uom}</span>
+                <span className="text-[var(--text-secondary)]">{d.recipient || "—"}</span>
+                <span className="text-[var(--text-muted)] text-[12px]">{(d.dispatched_at ?? "").slice(0, 10)}</span>
+                {d.mat_doc_id && <span className="text-[var(--text-muted)] text-[12px]">GI {d.mat_doc_id}</span>}
+                <div className="flex-1" />
+                <button onClick={() => onOutpass(d.dispatch_id)}
+                  className="h-7 px-2.5 rounded-[2px] text-[12px] font-medium border border-[var(--aws-border-strong)] bg-white hover:bg-[var(--surface-subtle)]">
+                  Outpass #{d.dev_jc_id}-{d.seq}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </Card>
+  );
 }
 
 // ── Promote-approval gate panel ───────────────────────────────────────────────

@@ -293,8 +293,21 @@ function BatchGroupCard({
   // then print the labels. Boxes default to PENDING at creation; a box becomes
   // PRINTED only here. Locked (received/consumed) boxes just print, no save.
   async function saveAndPrint(boxesToPrint: ProducedBox[]) {
-    const ids = boxesToPrint.map((b) => b.box_id);
-    if (ids.length === 0) return;
+    if (boxesToPrint.length === 0) return;
+    // Label data (QR + printable details) from each box's EFFECTIVE values
+    // (edit overlay via buildItem), so a just-edited box prints its new values.
+    const labels = boxesToPrint.map((b) => {
+      const it = buildItem(b, false);
+      return {
+        box_id: b.box_id,
+        batch: it.batch_code ?? group.label ?? null,
+        article: b.fg_sku_name ?? null,
+        sfg: b.sfg_code ?? null,
+        net: it.net_weight,
+        gross: it.gross_weight,
+        count: it.units,
+      };
+    });
     const payload = boxesToPrint
       .filter(isEditable)
       .map((b) => buildItem(b, true))
@@ -309,7 +322,7 @@ function BatchGroupCard({
         });
         if (!res.ok) { setMsg({ kind: "err", text: await readApiErrorMessage(res, "Save before print failed") }); return; }
       }
-      await printSfgBoxLabels(ids);
+      await printSfgBoxLabels(labels);
       if (payload.length > 0) {
         // Drop the saved boxes' edit overlay so the reloaded server values show.
         const saved = new Set(payload.map((p) => p.box_id));
@@ -475,7 +488,7 @@ function BatchGroupCard({
                   const red = (field: string) =>
                     changedKeys?.has(`box:${b.box_id}.${field}`) ? " bg-[#fbeced]" : "";
                   return (
-                    <tr key={b.box_id} className="border-b border-[var(--aws-border)] last:border-b-0">
+                    <tr key={b.box_id} className={"border-b border-[var(--aws-border)] last:border-b-0" + (b.status === "PRINTED" ? " bg-[#eaf6ed]" : "")}>
                       <td className="px-1.5 py-1">
                         <button type="button" title="Print this box (saves it + marks printed)" aria-label="Print box"
                           disabled={busy !== null} onClick={() => void saveAndPrint([b])}

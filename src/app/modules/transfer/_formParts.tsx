@@ -99,6 +99,45 @@ export function Field({ label, required, children }: { label: string; required?:
   );
 }
 
+// Outcome of one camera scan on a Transfer-OUT form (drives the "Scanned QR" result card,
+// the transfer-out analogue of the job-card RM tab's ScanResult).
+export type OutScan =
+  | { status: "added"; box_id: string; article: string; lot: string; net: string; tno: string }
+  | { status: "dup"; box_id: string; tno: string }
+  | { status: "err"; value: string; error: string };
+
+// Renders the last scan's result below the inline scanner: box added / already scanned / error.
+export function ScanAddResult({ scan, onDismiss }: { scan: OutScan; onDismiss: () => void }) {
+  const head = (tone: string, label: string) => (
+    <div className="flex items-center justify-between gap-2">
+      <span className={`text-[12px] px-2 py-0.5 rounded font-semibold ${tone}`}>{label}</span>
+      <button type="button" onClick={onDismiss} aria-label="Dismiss" className="text-[13px] leading-none text-[var(--text-secondary)] hover:text-[var(--text-primary)]">✕</button>
+    </div>
+  );
+  const kv = (rows: [string, React.ReactNode][]) => (
+    <dl className="grid grid-cols-[minmax(72px,auto)_1fr] gap-x-4 gap-y-1 text-[12px] mt-2">
+      {rows.filter(([, v]) => v !== null && v !== undefined && v !== "").map(([k, v]) => (
+        <div key={k} className="contents">
+          <dt className="text-[var(--text-secondary)]">{k}</dt>
+          <dd className="text-[var(--text-primary)] font-mono break-all">{v}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+  let body: React.ReactNode;
+  if (scan.status === "added") {
+    body = <>{head("bg-emerald-100 text-emerald-800", "✓ Added to dispatch")}
+      {kv([["Box ID", scan.box_id], ["Article", scan.article], ["Txn", scan.tno || "—"], ["Lot", scan.lot || "—"], ["Net", scan.net]])}</>;
+  } else if (scan.status === "dup") {
+    body = <>{head("bg-amber-100 text-amber-800", "Already scanned")}
+      {kv([["Box ID", scan.box_id], ["Txn", scan.tno || "—"]])}</>;
+  } else {
+    body = <>{head("bg-rose-100 text-rose-800", "Scan error")}
+      <div className="text-[12px] text-rose-700 mt-1 break-all">{scan.error}</div></>;
+  }
+  return <div className="bg-white border border-[var(--aws-border)] rounded-md p-3">{body}</div>;
+}
+
 export function SearchableSelect({ value, options, onChange, placeholder, disabled }: {
   value: string; options: string[]; onChange: (v: string) => void; placeholder?: string; disabled?: boolean;
 }) {

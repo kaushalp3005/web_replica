@@ -45,6 +45,20 @@ export interface DevPhase {
   yield_pct?: number | string | null;
 }
 
+// A single partial "out" — one issued part of the finalized FG sample. Each has
+// its own 265 GI (mat_doc_id) and its own printable outpass (Outpass No <jc>-<seq>).
+export interface DevDispatch {
+  dispatch_id: number;
+  dev_jc_id: number;
+  seq: number;
+  qty: number | string;
+  recipient?: string | null;
+  mat_doc_id?: string | null;
+  notes?: string | null;
+  dispatched_at?: string | null;
+  dispatched_by?: number | null;
+}
+
 // One approval row inside a pending promote gate.
 export interface PromoteApproval {
   approver_kind: "INV_MGR" | "REQUESTOR_BH";
@@ -97,10 +111,15 @@ export interface DevJobCard {
   output_notes?: string | null;
   promoted_bom_id?: number | null;
   fg_sample_batch_id?: string | null;   // R&D-location FG-sample batch minted on close (Step B)
-  dispatched_at?: string | null;        // Step C — issued out of R&D
+  dispatched_at?: string | null;        // Step C — issued out of R&D (latest partial)
   dispatch_recipient?: string | null;
   dispatch_qty?: number | string | null;
   dispatch_mat_doc_id?: string | null;
+  // Partial-out ledger (078): the finalized output issued in parts, each with its
+  // own outpass. remaining_qty = output_qty − Σ dispatches[].qty.
+  dispatches?: DevDispatch[];
+  dispatched_total?: number | string | null;
+  remaining_qty?: number | string | null;
   cancellation_reason?: string | null;
   created_at?: string | null;
   started_at?: string | null;

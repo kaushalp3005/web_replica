@@ -49,10 +49,19 @@ export default function DevJcGatePassPage() {
 
   const [jc, setJc] = useState<DevJobCard | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Optional ?dispatch=<id> — when present this outpass is for that single partial
+  // out (its qty + sub-number), not the full finalized output.
+  const [dispatchId, setDispatchId] = useState<number | null>(null);
 
   // Hydration gate (SSR true vs first client false) — mirror the other pages.
   const [mounted, setMounted] = useState(false);
   useEffect(() => { queueMicrotask(() => setMounted(true)); }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const v = new URLSearchParams(window.location.search).get("dispatch");
+    if (v) setDispatchId(Number(v));
+  }, []);
 
   // npd_team + admin only — BH/IM are module members but must not reach the
   // outpass. The module layout lets them in; this is the finer gate.
@@ -87,14 +96,23 @@ export default function DevJcGatePassPage() {
     return <div style={{ padding: 24, fontFamily: "Arial, sans-serif", color: "#666" }}>Loading outpass…</div>;
   }
 
+  // Partial out (078): when ?dispatch=<id> resolves to a ledger row, the outpass
+  // shows THAT part's qty and a sub-numbered outpass no; otherwise it's the full
+  // finalized output (backward compatible).
+  const disp = dispatchId != null
+    ? (jc.dispatches ?? []).find((d) => Number(d.dispatch_id) === dispatchId) ?? null
+    : null;
+  const outQty = disp ? disp.qty : jc.output_qty;
+  const outpassNo = disp ? `${id}-${disp.seq}` : String(id);
+
   const itemDesc = jc.fg_sku_name || jc.title || "—";
   const uom = jc.output_uom || jc.uom || "kg";
-  const date = (jc.closed_at ?? jc.dispatched_at ?? "").slice(0, 10) || "—";
+  const date = ((disp?.dispatched_at ?? jc.closed_at ?? jc.dispatched_at) ?? "").slice(0, 10) || "—";
   const toName = jc.customer_name || jc.company_name || "—";
   const toAddr = jc.customer_ship_to_address || "";
   const fromAddr = (jc.warehouse && WAREHOUSE_ADDR[jc.warehouse]) || jc.warehouse || "—";
-  const recipient = jc.dispatch_recipient || "—";
-  const reason = jc.output_notes || `NPD sample dispatch — ${id}`;
+  const recipient = disp?.recipient || jc.dispatch_recipient || "—";
+  const reason = jc.output_notes || `NPD sample dispatch — ${outpassNo}`;
   // Promote-gate digital signatures (name + decided date) — BH = REQUESTOR_BH, Inventory
   // manager = INV_MGR. Absent for a sourceless / pre-gate card → blank signature line.
   const bh = jc.gate_signatures?.REQUESTOR_BH;
@@ -167,7 +185,7 @@ export default function DevJcGatePassPage() {
             </td>
           </tr>
           <tr>
-            <td colSpan={3} style={td}><strong>Outpass No:</strong> {id}</td>
+            <td colSpan={3} style={td}><strong>Outpass No:</strong> {outpassNo}</td>
             <td colSpan={2} style={td}><strong>Date:</strong> {date}</td>
           </tr>
           <tr>
@@ -201,19 +219,19 @@ export default function DevJcGatePassPage() {
           <tr>
             <td style={cell({ textAlign: "center" })}>1</td>
             <td style={cell({ whiteSpace: "normal", wordBreak: "break-word" })}>{itemDesc}</td>
-            <td style={cell({ textAlign: "center", fontWeight: "bold" })}>{qtyStr(jc.output_qty)}</td>
+            <td style={cell({ textAlign: "center", fontWeight: "bold" })}>{qtyStr(outQty)}</td>
             <td style={cell({ textAlign: "center" })}>{uom}</td>
-            <td style={cell({ textAlign: "right" })}>{n(jc.output_qty)}</td>
+            <td style={cell({ textAlign: "right" })}>{n(outQty)}</td>
           </tr>
           <tr style={{ backgroundColor: "#f0ebe3" }}>
             <td colSpan={2} style={cell({ fontWeight: "bold", textAlign: "right" })}>TOTAL (1 item):</td>
-            <td style={cell({ textAlign: "center", fontWeight: "bold" })}>{qtyStr(jc.output_qty)}</td>
+            <td style={cell({ textAlign: "center", fontWeight: "bold" })}>{qtyStr(outQty)}</td>
             <td style={cell()}>&nbsp;</td>
-            <td style={cell({ textAlign: "right", fontWeight: "bold" })}>{n(jc.output_qty)}</td>
+            <td style={cell({ textAlign: "right", fontWeight: "bold" })}>{n(outQty)}</td>
           </tr>
           <tr style={{ backgroundColor: "#fdf8f4" }}>
             <td colSpan={3} style={cell({ fontWeight: "bold", textAlign: "right", whiteSpace: "normal" })}>TOTAL FG (kg):</td>
-            <td colSpan={2} style={cell({ textAlign: "right", fontWeight: "bold", color: BURGUNDY, fontSize: "12px" })}>{n(jc.output_qty)}</td>
+            <td colSpan={2} style={cell({ textAlign: "right", fontWeight: "bold", color: BURGUNDY, fontSize: "12px" })}>{n(outQty)}</td>
           </tr>
           <tr><td colSpan={COLS} style={{ padding: "10px", border: "1px solid #000" }}><strong>Reason:</strong> {reason}</td></tr>
           <tr>
@@ -250,7 +268,7 @@ export default function DevJcGatePassPage() {
         </thead>
         <tbody>
           <tr>
-            <td colSpan={2} style={td}><strong>Outpass No:</strong> {id}</td>
+            <td colSpan={2} style={td}><strong>Outpass No:</strong> {outpassNo}</td>
             <td colSpan={3} style={td}><strong>Date:</strong> {date}</td>
           </tr>
           <tr>
@@ -273,13 +291,13 @@ export default function DevJcGatePassPage() {
           <tr>
             <td style={{ ...td, textAlign: "center" }}>1</td>
             <td style={td}>{itemDesc}</td>
-            <td style={{ ...td, textAlign: "center", fontWeight: "bold" }}>{qtyStr(jc.output_qty)}</td>
+            <td style={{ ...td, textAlign: "center", fontWeight: "bold" }}>{qtyStr(outQty)}</td>
             <td style={{ ...td, textAlign: "center" }}>{uom}</td>
-            <td style={{ ...td, textAlign: "right", fontWeight: "bold" }}>{n(jc.output_qty, 2)}</td>
+            <td style={{ ...td, textAlign: "right", fontWeight: "bold" }}>{n(outQty, 2)}</td>
           </tr>
           <tr style={{ backgroundColor: "#fdf8f4" }}>
             <td colSpan={4} style={{ ...td, fontWeight: "bold", textAlign: "right" }}>Total FG (kg):</td>
-            <td style={{ ...td, textAlign: "right", fontWeight: "bold", color: BURGUNDY }}>{n(jc.output_qty, 2)}</td>
+            <td style={{ ...td, textAlign: "right", fontWeight: "bold", color: BURGUNDY }}>{n(outQty, 2)}</td>
           </tr>
           {/* Digital approvals captured on the promote gate */}
           <tr style={{ backgroundColor: "#f8f9fa" }}>

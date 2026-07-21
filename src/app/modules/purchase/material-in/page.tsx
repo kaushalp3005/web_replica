@@ -13,6 +13,7 @@ import { type PoListQuery } from "@/lib/po";
 import { BackLink } from "@/components/BackLink";
 import { PurchaseChrome } from "../_chrome";
 import { MaterialInList } from "./_MaterialInList";
+import { WalkInIntimationModal } from "./_WalkInIntimationModal";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -43,6 +44,7 @@ export default function MaterialInPage(): React.JSX.Element {
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState<PoListQuery>(DEFAULT_QUERY);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [walkInOpen, setWalkInOpen] = useState(false);
 
   // ── Debounce search → query.po_number_contains ────────────────────────────
   const isFirstSearch = useRef(true);
@@ -95,13 +97,25 @@ export default function MaterialInPage(): React.JSX.Element {
       </div>
 
       {/* Page header */}
-      <div className="mb-5">
-        <h1 className="text-[22px] leading-[28px] font-semibold text-[var(--text-primary)]">
-          Material In
-        </h1>
-        <p className="text-[13px] text-[var(--text-secondary)] mt-1">
-          Browse purchase orders by article and send arrival intimations.
-        </p>
+      <div className="mb-5 flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-[22px] leading-[28px] font-semibold text-[var(--text-primary)]">
+            Material In
+          </h1>
+          <p className="text-[13px] text-[var(--text-secondary)] mt-1">
+            Browse purchase orders by article and send arrival intimations.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setWalkInOpen(true)}
+          className="h-9 px-4 text-[13px] rounded-[2px] bg-[var(--aws-orange)] text-white font-semibold hover:bg-[var(--aws-orange-hover)] whitespace-nowrap shrink-0 inline-flex items-center gap-2"
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
+          </svg>
+          Send Purchase Intimation
+        </button>
       </div>
 
       {/* Listing */}
@@ -113,6 +127,8 @@ export default function MaterialInPage(): React.JSX.Element {
         expanded={expanded}
         onToggleExpand={handleToggleExpand}
       />
+
+      {walkInOpen ? <WalkInIntimationModal onClose={() => setWalkInOpen(false)} /> : null}
     </PurchaseChrome>
   );
 }

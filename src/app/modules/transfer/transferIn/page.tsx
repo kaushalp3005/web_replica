@@ -27,7 +27,7 @@ import { useRequireAuth, useMe } from "@/lib/user";
 import { TransferChrome } from "../_chrome";
 import { TransferApi, type TransferDetail, type AcknowledgeBoxInput } from "@/lib/transfer";
 import { getDisplayWarehouseName } from "@/lib/transferBuildSummary";
-import { QRScanner } from "../_QRScanner";
+import { QrScanBox } from "@/components/QrScanBox";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
 import { friendlyApiError } from "@/lib/apiErrors";
 
@@ -165,7 +165,6 @@ function ReceiveInner() {
   const [shortageReason, setShortageReason] = useState("");
   const [showEdit, setShowEdit] = useState(false);
   const [editForm, setEditForm] = useState({ grn_number: "", box_condition: "Good", condition_remarks: "" });
-  const [showScanner, setShowScanner] = useState(false);
   const [scan, setScan] = useState<ScanOutcome | null>(null);
   // Monotonic id per scan: a slow identify response is dropped once a newer scan supersedes it.
   const scanReqRef = useRef(0);
@@ -492,12 +491,15 @@ function ReceiveInner() {
             )}
           </div>
 
-          {/* Camera QR scan — opens the device camera with a proportional ROI overlay. */}
-          <div className="bg-white border border-[var(--aws-border)] rounded-md p-6 text-center">
-            <button onClick={() => setShowScanner(true)} disabled={!canAcknowledge}
-              className="px-5 py-2 text-[13px] rounded bg-blue-600 text-white hover:opacity-90 disabled:opacity-40">📷 Start Camera Scan</button>
-            <div className="text-[11px] text-[var(--text-secondary)] mt-2">Scan QR codes to auto-acknowledge boxes</div>
-          </div>
+          {/* Inline camera scanner — same always-on card as the job-card RM tab. Each
+              decode routes through onScanDetected (match+acknowledge, else identify). */}
+          {canAcknowledge && (
+            <QrScanBox
+              title="Scan box to receive"
+              idleHint="Start the camera and centre a box QR to acknowledge it."
+              onResult={(v) => { void onScanDetected(v); }}
+            />
+          )}
 
           {/* Last-scan result — mirrors the job-card RM tab's "Scanned QR" card. */}
           {scan && <ScanReceiptResult scan={scan} onDismiss={() => setScan(null)} />}
@@ -711,15 +713,6 @@ function ReceiveInner() {
         </div>
       )}
 
-      {/* Camera scanner (mounted only while open, so closing fully releases the camera) */}
-      {showScanner && (
-        <QRScanner
-          title="Scan box to receive"
-          hint="Align the box QR inside the green box to acknowledge it."
-          onScan={onScanDetected}
-          onClose={() => setShowScanner(false)}
-        />
-      )}
     </TransferChrome>
   );
 }

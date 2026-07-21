@@ -277,6 +277,29 @@ export async function sendQcIntimation(transactionNo: string, body: QcIntimation
   return res.json();
 }
 
+// ── Walk-in (no-PO) Purchase Intimation ──────────────────────────────────────
+// Articles are chosen from the global SKU master (/api/v1/so/sku-lookup); the
+// backend records the arrival with po_number=null under a generated WI-* txn.
+export interface WalkInIntimationItem { sku_id?: number | null; sku_name: string; }
+export interface WalkInIntimationBody {
+  entity?: string; // "cfpl" | "cdpl"
+  vendor_name?: string;
+  vehicle_number?: string;
+  invoice_no?: string;
+  items: WalkInIntimationItem[];
+}
+export interface WalkInIntimationResult extends QcIntimationResult {
+  transaction_no: string; // the generated WI-* id
+}
+export async function sendWalkInIntimation(body: WalkInIntimationBody): Promise<WalkInIntimationResult> {
+  const res = await apiFetch(`/api/v1/po/walk-in-intimation`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (res.status === 404) throw new Error("Walk-in intimation isn't available on this backend yet.");
+  if (!res.ok) throw new Error(await readError(res, "Failed to send intimation"));
+  return res.json();
+}
+
 // Manual create — backend route pending. Mirrors manual-entry.js payload.
 // TODO: type the payload + return once POST /api/v1/purchase/create is implemented on the backend.
 export async function createPo(payload: Record<string, unknown>): Promise<unknown> {

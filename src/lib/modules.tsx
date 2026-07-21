@@ -253,7 +253,9 @@ export const ROLE_MODULE_SCOPE: Record<string, string[]> = {
   // landing page — SO Creation / Planning / Plan List all live under the one
   // "production" tile, so they need sub-route keys. See scopeAllowsRoute.
   so_creator:    ["production/so-creation"],
-  planner:       ["production/planning", "production/plan-list", "job-card"],
+  // planner also gets SO Creation (Sales-Register upload lives there) so a
+  // planner can bring in demand before building a plan.
+  planner:       ["production/so-creation", "production/planning", "production/plan-list", "job-card"],
   floor_manager: ["job-card"],
 };
 

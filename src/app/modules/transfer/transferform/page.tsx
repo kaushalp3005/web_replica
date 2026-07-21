@@ -16,12 +16,12 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useRouter, useSearchParams } from "next/navigation";
 import { useRequireAuth } from "@/lib/user";
 import { TransferChrome } from "../_chrome";
-import { QRScanner } from "../_QRScanner";
+import { QrScanBox } from "@/components/QrScanBox";
 import {
-  Card, Field, SearchableSelect, QuickSearch,
+  Card, Field, SearchableSelect, QuickSearch, ScanAddResult,
   EMPTY_ARTICLE, patchArticle, todayDMY, genTransferNo,
   UOM_OPTIONS, FROM_WAREHOUSES, TO_WAREHOUSES, REASONS, VEHICLES, DRIVERS, COLD_STORAGE_WAREHOUSES,
-  type Article, type ScannedBox,
+  type Article, type ScannedBox, type OutScan,
 } from "../_formParts";
 import {
   TransferApi,
@@ -74,7 +74,7 @@ function TransferOutForm() {
   const [materialTypes, setMaterialTypes] = useState<string[]>([]);
 
   const [manualBox, setManualBox] = useState({ boxNumber: "", transactionNo: "" });
-  const [showScanner, setShowScanner] = useState(false);
+  const [scanInfo, setScanInfo] = useState<OutScan | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [banner, setBanner] = useState<{ type: "error" | "success"; text: string } | null>(null);
   const [coldPopup, setColdPopup] = useState<string | null>(null);
@@ -166,21 +166,24 @@ function TransferOutForm() {
     const key = boxId && tno ? `${boxId}|${tno}` : "";
     if (key && scannedKeysRef.current.has(key)) {
       setBanner({ type: "error", text: `Box ${boxId} / ${tno} already scanned.` });
+      setScanInfo({ status: "dup", box_id: boxId, tno });
       return;
     }
     if (key) scannedKeysRef.current.add(key);
     const article = b.item_description || b.article_description || "";
+    const net = b.net_weight != null ? String(b.net_weight) : "0";
     const id = boxCounter.current++;  // computed outside the updater (StrictMode-safe)
     setScannedBoxes((boxes) => [...boxes, {
       id,
       boxNumber: typeof b.box_number === "number" ? b.box_number : id,
       boxId, transactionNo: tno, article,
       lotNumber: b.lot_number || "", batchNumber: b.batch_number || "",
-      netWeight: b.net_weight != null ? String(b.net_weight) : "0",
+      netWeight: net,
       grossWeight: b.gross_weight != null ? String(b.gross_weight) : "0",
     }]);
     bumpScanned(article);
     setBanner(null);
+    setScanInfo({ status: "added", box_id: boxId, article, lot: b.lot_number || "", net, tno });
   }, [bumpScanned]);
 
   const handleManualBoxFetch = async () => {
@@ -209,13 +212,14 @@ function TransferOutForm() {
           ? await TransferApi.bulkEntryBoxLookup(COMPANY, bi, tx)
           : await TransferApi.boxLookupById(COMPANY, bi, tx);
         appendBox(res.box, tx);
-        setShowScanner(false);
         return true;
       }
-      setBanner({ type: "error", text: "Unrecognised QR format (expected a BE-/TR- box code)." });
+      { const msg = "Unrecognised QR format (expected a BE-/TR- box code).";
+        setBanner({ type: "error", text: msg }); setScanInfo({ status: "err", value: text, error: msg }); }
       return false;
     } catch (e) {
-      setBanner({ type: "error", text: e instanceof Error ? e.message : "QR lookup failed." });
+      const msg = e instanceof Error ? e.message : "QR lookup failed.";
+      setBanner({ type: "error", text: msg }); setScanInfo({ status: "err", value: text, error: msg });
       return false;
     }
   }, [appendBox]);
@@ -412,20 +416,25 @@ function TransferOutForm() {
 
         {/* Box ingestion */}
         <Card title="Scan / add boxes">
-          <div className="flex flex-wrap items-end gap-3">
-            <button type="button" onClick={() => setShowScanner(true)}
-              className="px-3 py-1.5 text-[13px] rounded-md border border-[var(--aws-navy)] text-[var(--aws-navy)] hover:bg-[var(--aws-navy)] hover:text-white">📷 Start Camera Scan</button>
-            <span className="text-[12px] text-[var(--text-secondary)]">or enter manually:</span>
-            <div className="flex items-end gap-2">
-              <Field label="Box Number"><input value={manualBox.boxNumber} type="number" onWheel={(e) => e.currentTarget.blur()}
-                onChange={(e) => setManualBox({ ...manualBox, boxNumber: e.target.value })}
-                className="w-28 px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" /></Field>
-              <Field label="Transaction No"><input value={manualBox.transactionNo}
-                onChange={(e) => setManualBox({ ...manualBox, transactionNo: e.target.value })}
-                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleManualBoxFetch(); } }}
-                className="w-44 px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" /></Field>
-              <button type="button" onClick={handleManualBoxFetch}
-                className="px-3 py-1.5 text-[13px] rounded-md bg-[var(--aws-navy)] text-white hover:opacity-90">Fetch Box</button>
+          <div className="space-y-3">
+            {/* Inline always-on scanner — same card as the job-card RM tab. */}
+            <QrScanBox title="Scan box QR"
+              idleHint="Start the camera and centre a box QR to add it to the dispatch."
+              onResult={(v) => { void handleQRScan(v); }} />
+            {scanInfo && <ScanAddResult scan={scanInfo} onDismiss={() => setScanInfo(null)} />}
+            <div className="flex flex-wrap items-end gap-3">
+              <span className="text-[12px] text-[var(--text-secondary)]">or enter manually:</span>
+              <div className="flex items-end gap-2">
+                <Field label="Box Number"><input value={manualBox.boxNumber} type="number" onWheel={(e) => e.currentTarget.blur()}
+                  onChange={(e) => setManualBox({ ...manualBox, boxNumber: e.target.value })}
+                  className="w-28 px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" /></Field>
+                <Field label="Transaction No"><input value={manualBox.transactionNo}
+                  onChange={(e) => setManualBox({ ...manualBox, transactionNo: e.target.value })}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleManualBoxFetch(); } }}
+                  className="w-44 px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" /></Field>
+                <button type="button" onClick={handleManualBoxFetch}
+                  className="px-3 py-1.5 text-[13px] rounded-md bg-[var(--aws-navy)] text-white hover:opacity-90">Fetch Box</button>
+              </div>
             </div>
           </div>
         </Card>
@@ -547,8 +556,6 @@ function TransferOutForm() {
           </div>
         </Card>
       </form>
-
-      {showScanner && <QRScanner onScan={handleQRScan} onClose={() => setShowScanner(false)} />}
 
       {coldPopup && (
         <div className="fixed inset-0 z-[100] bg-black/60 flex items-center justify-center p-4">
