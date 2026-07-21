@@ -1345,7 +1345,10 @@ function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
     const ctrl = new AbortController();
     queueMicrotask(() => { void refresh(ctrl.signal); });
     return () => ctrl.abort();
-  }, [refresh]);
+    // detail.status re-runs this fetch on START (assigned→in_progress) so the
+    // toolbar picks up the auto-opened batch and hides the manual Open button.
+    // (refresh identity is stable across a status flip, so it must be its own dep.)
+  }, [refresh, detail.status]);
 
   const openBatch = batches.find((p) => p.status === "open") ?? null;
   const closedCount = batches.filter((p) => p.status === "closed").length;
@@ -3153,19 +3156,43 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     const ctrl = new AbortController();
     void refetchBatches(ctrl.signal);
     return () => ctrl.abort();
-    // Re-fetch only when the JC id changes (navigation between JCs).
-    // Auto-poll re-fetches detail every 60s but NOT batches — those
-    // are refreshed explicitly by doOpenBatch + the close modal so
-    // the perBatchSummaries memo / collapsibles don't flash on every
-    // poll. refetchBatches() itself is stable as long as job_card_id
-    // doesn't change.
-  }, [detail.job_card_id, refetchBatches]);
+    // Re-fetch when the JC id changes (navigation between JCs) OR when status
+    // changes. The status dep is load-bearing: START flips assigned→in_progress
+    // and auto-opens a batch server-side; without re-fetching batches here the
+    // Output form stays noBatchPicked/read-only until a navigation. A same-value
+    // status on the 60s auto-poll is a no-op (React compares the primitive), so
+    // this doesn't reintroduce the poll-cascade the id-only dep avoided.
+  }, [detail.job_card_id, detail.status, refetchBatches]);
+
+  // batch_ids that actually carry recorded data (output / consumption /
+  // byproduct / balance rows). Used to bias the initial batch auto-select
+  // toward a batch the operator worked, instead of an empty phantom-open
+  // batch. Without this, a JC with several stray open batches plus a
+  // closed batch that holds the real data lands on an empty open batch —
+  // matchesBatch() then filters every section out and the whole form
+  // reads blank even though the data persisted (observed on prod JCs
+  // with 3 phantom-open phases + 1 closed-with-data).
+  const batchIdsWithData = useMemo(() => {
+    const s = new Set<number>();
+    const scan = (rows: unknown) => {
+      if (!Array.isArray(rows)) return;
+      for (const r of rows) {
+        const bid = (r as { batch_id?: number | null }).batch_id;
+        if (bid != null) s.add(Number(bid));
+      }
+    };
+    scan(detail.outputs);
+    scan(detail.consumption_lines);
+    scan(detail.byproducts);
+    scan(detail.balance_materials);
+    return s;
+  }, [detail.outputs, detail.consumption_lines, detail.byproducts, detail.balance_materials]);
 
   // Selected batch — drives form hydration + the POST body's batch_id.
-  // Default to the highest-numbered open batch on first load; falls
-  // back to the highest-numbered closed batch when no open exists; null
-  // means "legacy / pre-batch" (form hydrates from rows with batch_id
-  // IS NULL).
+  // Default (first load) prefers a batch that HAS data over an empty open
+  // one; only a fresh JC with no data anywhere falls through to the
+  // highest open batch. null means "legacy / pre-batch" (form hydrates
+  // from rows with batch_id IS NULL).
   const [selectedBatchId, setSelectedBatchId] = useState<number | null>(null);
   useEffect(() => {
     // Reset on detail reload so navigating between JCs doesn't carry
@@ -3190,10 +3217,19 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       return;
     }
     const sorted = [...batches].sort((a, b) => b.batch_number - a.batch_number);
-    const open = sorted.find((b) => b.status === "open");
-    const fallback = sorted[0];
-    setSelectedBatchId((open ?? fallback).batch_id);
-  }, [batches, selectedBatchId]);
+    // Priority, highest batch_number first within each tier:
+    //   1. an OPEN batch that has data — resume active work.
+    //   2. ANY batch that has data — surfaces a closed batch the operator
+    //      already filled instead of blanking on an empty open one.
+    //   3. the highest OPEN batch — fresh JC: operator opened an empty
+    //      batch to type into (no data anywhere yet).
+    //   4. the highest batch — last-resort fallback.
+    const openWithData = sorted.find((b) => b.status === "open" && batchIdsWithData.has(b.batch_id));
+    const anyWithData  = sorted.find((b) => batchIdsWithData.has(b.batch_id));
+    const open         = sorted.find((b) => b.status === "open");
+    const fallback     = sorted[0];
+    setSelectedBatchId((openWithData ?? anyWithData ?? open ?? fallback).batch_id);
+  }, [batches, selectedBatchId, batchIdsWithData]);
 
   const selectedBatch = useMemo(
     () => batches.find((b) => b.batch_id === selectedBatchId) ?? null,
@@ -3378,18 +3414,31 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     //       now repairs the displayed value at read time without
     //       requiring a DB backfill.
     if (Array.isArray(detail.outputs)) {
-      let latest: Record<string, unknown> | null = null;
-      let latestId = -Infinity;
+      // Pick the latest output row (highest output_id) for THIS batch,
+      // but fall back to null-batch rows when no batch-tagged row exists.
+      // This mirrors matchesBatch() in outputAccounting.ts, which already
+      // surfaces null-batch consumption/byproduct/balance rows under the
+      // selected batch. Without the null-batch fallback here, FG Actual /
+      // Units / Process Loss blanked on reload for legacy / pre-batch-
+      // tagged output rows (~20% of prod output rows carry batch_id=NULL)
+      // while every OTHER section still showed — the exact "some fields
+      // blank, some filled" symptom. Exact-batch rows always win over a
+      // null-batch fallback so a real per-batch value is never masked.
+      let exact: Record<string, unknown> | null = null;
+      let exactId = -Infinity;
+      let nullBatch: Record<string, unknown> | null = null;
+      let nullBatchId = -Infinity;
       for (const o of detail.outputs) {
         const row = o as Record<string, unknown>;
         const bid = row.batch_id;
-        if (bid == null || Number(bid) !== selectedBatch.batch_id) continue;
         const oid = Number(row.output_id ?? 0);
-        if (oid > latestId) {
-          latest = row;
-          latestId = oid;
+        if (bid != null && Number(bid) === selectedBatch.batch_id) {
+          if (oid > exactId) { exact = row; exactId = oid; }
+        } else if (bid == null) {
+          if (oid > nullBatchId) { nullBatch = row; nullBatchId = oid; }
         }
       }
+      const latest = exact ?? nullBatch;
       if (latest) {
         if (!fgKg    && latest.output_qty_kg    != null) fgKg    = String(latest.output_qty_kg);
         if (!fgUnits && latest.output_qty_units != null) fgUnits = String(latest.output_qty_units);

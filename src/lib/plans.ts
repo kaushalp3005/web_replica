@@ -22,6 +22,9 @@ export interface PlanRowLineSummary {
   planned_qty_units?: number | string | null;
   area?: string | null;
   job_card_count?: number | null;   // >0 ⇒ article already carded (Edit, not Create)
+  // Σ of each chain's HEAD card qty (one head per partial chain). The line can
+  // be carded in multiple partial chains; remaining = planned_qty_kg − this.
+  carded_qty_kg?: number | string | null;
 }
 
 export interface PlanRow {

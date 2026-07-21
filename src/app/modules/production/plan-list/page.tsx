@@ -114,6 +114,9 @@ export default function PlanListPage() {
   // step — for now Continue just confirms the pick. This is the path that will
   // replace Approve once the full flow lands.
   const [jcPlan, setJcPlan] = useState<PlanRow | null>(null);
+  // Which intent the Create/Edit Job Card modal opened with: "create" starts a
+  // fresh / additional (create-another) chain, "edit" opens the existing chain.
+  const [jcIntent, setJcIntent] = useState<"create" | "edit">("create");
   const [dispatchPlan, setDispatchPlan] = useState<PlanRow | null>(null);
 
   // Debounce search; bump page back to 1 on every change so a stale page
@@ -356,7 +359,7 @@ export default function PlanListPage() {
                 expandedPlanId={expandedPlanId}
                 onToggleExpand={onToggleExpand}
                 onOpen={onOpen}
-                onCreateJobCard={setJcPlan}
+                onCreateJobCard={(p, ci) => { setJcIntent(ci); setJcPlan(p); }}
                 onDispatch={onDispatch}
               />
             </div>
@@ -369,6 +372,7 @@ export default function PlanListPage() {
       {jcPlan ? (
         <CreateJobCardModal
           plan={jcPlan}
+          intent={jcIntent}
           onClose={() => setJcPlan(null)}
           onContinue={async (p) => {
             if (p.planLineId == null) {
@@ -928,7 +932,7 @@ function PlansList({
   expandedPlanId: number | null;
   onToggleExpand: (p: PlanRow) => void;
   onOpen:    (p: PlanRow) => void;
-  onCreateJobCard: (p: PlanRow) => void;
+  onCreateJobCard: (p: PlanRow, intent: "create" | "edit") => void;
   onDispatch: (p: PlanRow) => void;
 }) {
   // The handlers are passed through verbatim — the row components apply
@@ -1067,16 +1071,27 @@ const PlanRowDesktop = memo(function PlanRowDesktop({
   expanded: boolean;
   onToggleExpand: (p: PlanRow) => void;
   onOpen: (p: PlanRow) => void;
-  onCreateJobCard: (p: PlanRow) => void;
+  onCreateJobCard: (p: PlanRow, intent: "create" | "edit") => void;
   onDispatch: (p: PlanRow) => void;
 }) {
   // Any article already carded ⇒ the row's action is "Edit Job Card".
-  const hasJobCards = (row.lines_summary ?? []).some((l) => (l.job_card_count ?? 0) > 0);
+  const _lines = row.lines_summary ?? [];
+  // anyCarded → this plan has ≥1 carded line (show Edit). anyRemaining → some
+  // line still has balance to card, incl. any un-carded line (show Create).
+  // A partially-carded plan shows BOTH buttons side by side.
+  const anyCarded = _lines.some((l) => (l.job_card_count ?? 0) > 0);
+  const anyRemaining = _lines.some(
+    (l) => (l.job_card_count ?? 0) === 0
+      || numOr0(l.planned_qty_kg) - numOr0(l.carded_qty_kg) > 0.001,
+  );
   // Memoise the row-bound adapters so the per-row buttons / rowclick
   // don't churn their own listeners on every render either.
   const handleToggle = useCallback(() => onToggleExpand(row), [onToggleExpand, row]);
   const handleOpen = useCallback(() => onOpen(row), [onOpen, row]);
-  const handleCreateJobCard = useCallback(() => onCreateJobCard(row), [onCreateJobCard, row]);
+  const handleCreateJobCard = useCallback(
+    (intent: "create" | "edit") => onCreateJobCard(row, intent),
+    [onCreateJobCard, row],
+  );
   const handleDispatch = useCallback(() => onDispatch(row), [onDispatch, row]);
   return (
     <>
@@ -1149,7 +1164,8 @@ const PlanRowDesktop = memo(function PlanRowDesktop({
       </td>
       <td className="px-2.5 py-1.5 text-right">
         <RowActions
-          hasJobCards={hasJobCards}
+          anyCarded={anyCarded}
+          anyRemaining={anyRemaining}
           onOpen={handleOpen}
           onCreateJobCard={handleCreateJobCard}
           onDispatch={handleDispatch}
@@ -1174,13 +1190,24 @@ const PlanMobileCard = memo(function PlanMobileCard({
   expanded: boolean;
   onToggleExpand: (p: PlanRow) => void;
   onOpen: (p: PlanRow) => void;
-  onCreateJobCard: (p: PlanRow) => void;
+  onCreateJobCard: (p: PlanRow, intent: "create" | "edit") => void;
   onDispatch: (p: PlanRow) => void;
 }) {
-  const hasJobCards = (row.lines_summary ?? []).some((l) => (l.job_card_count ?? 0) > 0);
+  const _lines = row.lines_summary ?? [];
+  // anyCarded → this plan has ≥1 carded line (show Edit). anyRemaining → some
+  // line still has balance to card, incl. any un-carded line (show Create).
+  // A partially-carded plan shows BOTH buttons side by side.
+  const anyCarded = _lines.some((l) => (l.job_card_count ?? 0) > 0);
+  const anyRemaining = _lines.some(
+    (l) => (l.job_card_count ?? 0) === 0
+      || numOr0(l.planned_qty_kg) - numOr0(l.carded_qty_kg) > 0.001,
+  );
   const handleToggle = useCallback(() => onToggleExpand(row), [onToggleExpand, row]);
   const handleOpen = useCallback(() => onOpen(row), [onOpen, row]);
-  const handleCreateJobCard = useCallback(() => onCreateJobCard(row), [onCreateJobCard, row]);
+  const handleCreateJobCard = useCallback(
+    (intent: "create" | "edit") => onCreateJobCard(row, intent),
+    [onCreateJobCard, row],
+  );
   const handleDispatch = useCallback(() => onDispatch(row), [onDispatch, row]);
   return (
     <div
@@ -1239,7 +1266,8 @@ const PlanMobileCard = memo(function PlanMobileCard({
         />
         <div className="flex items-center gap-2 mt-2">
           <RowActions
-            hasJobCards={hasJobCards}
+            anyCarded={anyCarded}
+          anyRemaining={anyRemaining}
             onOpen={handleOpen}
             onCreateJobCard={handleCreateJobCard}
             onDispatch={handleDispatch}
@@ -1256,36 +1284,54 @@ const PlanMobileCard = memo(function PlanMobileCard({
 });
 
 function RowActions({
-  hasJobCards, onOpen, onCreateJobCard, onDispatch,
+  anyCarded, anyRemaining, onOpen, onCreateJobCard, onDispatch,
 }: {
-  hasJobCards: boolean;
+  anyCarded: boolean;
+  anyRemaining: boolean;
   onOpen: () => void;
-  onCreateJobCard: () => void;
+  onCreateJobCard: (intent: "create" | "edit") => void;
   onDispatch: () => void;
 }) {
   return (
     <div className="inline-flex items-center gap-1.5">
-      {/* Create / Edit Job Card — the per-article job-card flow (replaces the
-          old Approve auto-generate). Label flips to "Edit" once this plan has
-          any job cards. */}
-      <button
-        type="button"
-        onClick={(e) => { e.stopPropagation(); onCreateJobCard(); }}
-        title={hasJobCards ? "Edit this plan's job cards" : "Create a job card from one of this plan's articles"}
-        className="h-7 px-2.5 text-[11px] rounded-[2px] font-semibold border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white inline-flex items-center gap-1"
-      >
-        {hasJobCards ? (
+      {/* Create / Edit Job Card — the per-article flow. A plan with balance left
+          shows Create (start a fresh / additional partial chain); a plan with
+          any carded line shows Edit. A partially-carded plan shows BOTH, so the
+          operator can card the next portion or edit what exists. */}
+      {anyRemaining ? (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onCreateJobCard("create"); }}
+          title="Create a job card from one of this plan's articles (fresh, or an additional partial chain for the remaining balance)"
+          className="h-7 px-2.5 text-[11px] rounded-[2px] font-semibold border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white inline-flex items-center gap-1"
+        >
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
+            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          Create Job Card
+        </button>
+      ) : null}
+      {anyCarded ? (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onCreateJobCard("edit"); }}
+          title="Edit this plan's existing job cards"
+          className={[
+            "h-7 px-2.5 text-[11px] rounded-[2px] font-semibold border inline-flex items-center gap-1",
+            // When Create is also shown, Edit becomes the secondary (outline)
+            // button so the primary Create action stays visually dominant.
+            anyRemaining
+              ? "bg-white border-[var(--aws-border)] text-[var(--aws-link)] hover:border-[var(--aws-navy)]"
+              : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
+          ].join(" ")}
+        >
           <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
             <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
             <path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
           </svg>
-        ) : (
-          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
-            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-        )}
-        {hasJobCards ? "Edit Job Card" : "Create Job Card"}
-      </button>
+          Edit Job Card
+        </button>
+      ) : null}
       <button
         type="button"
         onClick={(e) => { e.stopPropagation(); onOpen(); }}
@@ -1353,6 +1399,7 @@ type ArticleOption = {
   kg: number;           // combined planned qty
   units: number;
   carded: boolean;
+  remainingKg: number;  // kg still un-carded on this line (= kg for a fresh option)
   memberIds: number[];  // all plan_line_ids folded here (length > 1 => merged)
   count: number;        // # of lines/SOs merged
 };
@@ -1361,7 +1408,7 @@ function buildArticleOptions(lines: PlanRowLineSummary[]): ArticleOption[] {
   const opts: ArticleOption[] = [];
   const seen = new Set<string>();
   const mergeKey = (l: PlanRowLineSummary) =>
-    `${(l.fg_sku_name ?? "").trim().toLowerCase()} ${l.bom_id ?? ""}`;
+    `${(l.fg_sku_name ?? "").trim().toLowerCase()} ${l.bom_id ?? ""}`;
   lines.forEach((l, i) => {
     const carded = (l.job_card_count ?? 0) > 0;
     // Only un-carded lines that carry a real plan_line_id can be merged.
@@ -1369,7 +1416,9 @@ function buildArticleOptions(lines: PlanRowLineSummary[]): ArticleOption[] {
       opts.push({
         id: getLineId(l, i), fgSkuName: l.fg_sku_name ?? "",
         kg: numOr0(l.planned_qty_kg), units: numOr0(l.planned_qty_units),
-        carded, memberIds: [getLineId(l, i)], count: 1,
+        carded,
+        remainingKg: round3(Math.max(0, numOr0(l.planned_qty_kg) - numOr0(l.carded_qty_kg))),
+        memberIds: [getLineId(l, i)], count: 1,
       });
       return;
     }
@@ -1379,12 +1428,14 @@ function buildArticleOptions(lines: PlanRowLineSummary[]): ArticleOption[] {
     const grp = lines.filter(
       (x) => (x.job_card_count ?? 0) === 0 && x.plan_line_id != null && mergeKey(x) === key,
     );
+    const grpKg = round3(grp.reduce((s, g) => s + numOr0(g.planned_qty_kg), 0));
     opts.push({
       id: grp[0].plan_line_id as number,
       fgSkuName: grp[0].fg_sku_name ?? "",
-      kg: round3(grp.reduce((s, g) => s + numOr0(g.planned_qty_kg), 0)),
+      kg: grpKg,
       units: round3(grp.reduce((s, g) => s + numOr0(g.planned_qty_units), 0)),
       carded: false,
+      remainingKg: grpKg,   // fresh/merged option — nothing carded yet
       memberIds: grp.map((g) => g.plan_line_id as number),
       count: grp.length,
     });
@@ -1393,9 +1444,12 @@ function buildArticleOptions(lines: PlanRowLineSummary[]): ArticleOption[] {
 }
 
 function CreateJobCardModal({
-  plan, onClose, onContinue,
+  plan, intent, onClose, onContinue,
 }: {
   plan: PlanRow;
+  // "create" opens a fresh / additional (create-another) chain drawing from the
+  // remaining balance; "edit" opens the existing chain for the selected article.
+  intent: "create" | "edit";
   onClose: () => void;
   onContinue: (payload: {
     planLineId: number | null;
@@ -1445,6 +1499,14 @@ function CreateJobCardModal({
   const [chainStarted, setChainStarted] = useState(false);
   const [pkgJobCardId, setPkgJobCardId] = useState<number | null>(null);
   const [removeReasons, setRemoveReasons] = useState<Record<string, string>>({});
+  // Read-only snapshot of the existing job-card chain (edit mode) so the
+  // operator SEES the previously-created job cards while editing. Captured from
+  // the config fetch and kept separate from the editable wipSteps, so it always
+  // reflects the AS-SAVED chain rather than the in-progress edits below it.
+  const [existingCards, setExistingCards] = useState<{
+    jobCardId: number | null; role: string; process: string;
+    floor: string; status: string | null;
+  }[]>([]);
   // Canonical SFG name for the selected article (auto-fill, design §5.4).
   const [canonicalSfg, setCanonicalSfg] = useState("");
   const liveEdit = mode === "edit" && chainStarted;
@@ -1500,7 +1562,33 @@ function CreateJobCardModal({
         const cfg = await fetchLineJobCardConfig(planLineId);
         const canon = cfg.canonical_sfg ?? "";
         setCanonicalSfg(canon);
-        if (cfg.exists) {
+        // Snapshot the existing chain (WIP + packaging card) once — shown in the
+        // read-only "Existing job cards" panel for BOTH editing and creating
+        // another partial chain.
+        const snapshot = cfg.exists
+          ? [
+              ...(cfg.wip_steps ?? []).map((s, i) => ({
+                jobCardId: s.job_card_id ?? null,
+                role: `WIP ${i + 1}`,
+                process: s.process ?? "",
+                floor: s.floor ?? "",
+                status: s.status ?? null,
+              })),
+              ...(cfg.pkg_job_card_id != null
+                ? [{
+                    jobCardId: cfg.pkg_job_card_id,
+                    role: "Packaging",
+                    process: "Packaging",
+                    floor: cfg.pkg_floor ?? "",
+                    status: cfg.pkg_status ?? null,
+                  }]
+                : []),
+            ]
+          : [];
+        setExistingCards(snapshot);
+
+        if (cfg.exists && intent === "edit") {
+          // EDIT the existing chain (save REPLACES it).
           setMode("edit");
           setEditable(cfg.editable !== false);
           setChainStarted(cfg.started === true);
@@ -1524,20 +1612,28 @@ function CreateJobCardModal({
           );
           setPkgFloor(cfg.pkg_floor ?? "");
         } else {
+          // CREATE a fresh chain, OR "create another" partial chain when cards
+          // already exist but the operator chose Create — a NEW chain drawing
+          // from the line's remaining balance.
           setMode("create");
           setChainStarted(false);
-          // Prefill the COMBINED qty of the selected option (summed across merged
-          // same-SKU lines) so a merged article shows its total, not one line's.
-          if (qtyKg === "" && selectedOption && selectedOption.kg > 0) {
-            setQtyKg(String(selectedOption.kg));
-          }
-          if (qtyUnits === "" && selectedOption && selectedOption.units > 0) {
+          // Default qty: create-another → the line's remaining balance; a fresh
+          // create → the combined (possibly-merged) option qty.
+          const remainingKg = selectedLine
+            ? round3(Math.max(0, numOr0(selectedLine.planned_qty_kg) - numOr0(selectedLine.carded_qty_kg)))
+            : 0;
+          const defKg = cfg.exists
+            ? remainingKg
+            : (selectedOption && selectedOption.kg > 0 ? selectedOption.kg : 0);
+          if (qtyKg === "" && defKg > 0) setQtyKg(String(defKg));
+          // Units auto-default only for a fresh create — a partial chain's unit
+          // split isn't derivable from kg alone, so the operator enters it.
+          if (qtyKg === "" && !cfg.exists && selectedOption && selectedOption.units > 0) {
             setQtyUnits(String(selectedOption.units));
           }
-          // Prefill the WIP chain + packaging floor from the plan's snapshot route
-          // (returned by the config endpoint for un-carded lines) so Create works
-          // in one click — the plan already carries the process/floor chain.
-          // Fall back to a single blank step when the plan has no steps.
+          // Prefill the WIP chain + packaging floor from the config (the existing
+          // chain's route when carded, else the plan's snapshot route). Each new
+          // chain gets its own steps (jobCardId null).
           if (cfg.wip_steps && cfg.wip_steps.length) {
             setWipSteps(cfg.wip_steps.map((s) => ({
               process: s.process ?? "",
@@ -1579,26 +1675,34 @@ function CreateJobCardModal({
   const wipOk = wipSteps.length > 0 && wipSteps.every((s) => s.process !== "" && s.floor !== "");
   const canCreate =
     qtyKg.trim() !== "" && Number(qtyKg) > 0 && wipOk && pkgFloor !== "";
+
+  // Quantity cap (decision: cap-at-remaining). A carded line's remaining balance
+  // is planned − Σ(chain-head qty); a fresh line's cap is the (merged) option
+  // qty. On the CREATE path the backend hard-caps at this remaining (returns
+  // exceeds_balance), so we block submit here too. EDIT replaces via a separate
+  // path and isn't re-capped here. Small tolerance absorbs float rounding.
+  const selCardedKg = selectedLine ? numOr0(selectedLine.carded_qty_kg) : 0;
+  const selRemainingKg = selectedLine
+    ? round3(Math.max(0, numOr0(selectedLine.planned_qty_kg) - selCardedKg))
+    : null;
+  const isCreateAnother = mode === "create" && selCardedKg > 0;
+  const capKg = isCreateAnother
+    ? selRemainingKg
+    : (selectedOption && selectedOption.kg > 0 ? selectedOption.kg : null);
+  const overQty = capKg != null && Number(qtyKg) > capKg + 0.001;
+  const overBlocks = mode === "create" && overQty;
+
   // Create + un-started edit go through the replace path (needs `editable`);
   // a started chain goes through the live apply-edits path (always submittable).
-  const canSubmit = canCreate && (mode === "create" || editable || liveEdit);
+  // Over-remaining on a create is a HARD block (cap-at-remaining).
+  const canSubmit =
+    canCreate && (mode === "create" || editable || liveEdit) && !overBlocks;
 
   // Remove a WIP row. A started row force-records its job-card data on the
   // server, so we capture a reason first (the operator must confirm).
   function onRemoveStartedReason(jobCardId: number, reason: string) {
     setRemoveReasons((m) => ({ ...m, [String(jobCardId)]: reason }));
   }
-
-  // Soft over-qty hint. Producing more than the line's planned kg can be
-  // legitimate (catch-up / rework), so we don't block — but an accidental
-  // extra digit is easy to miss, so we flag it. Hard reconciliation against
-  // the live pending qty is enforced server-side when the create endpoint is
-  // wired (see the Create-Job-Card backend design).
-  // Compare against the COMBINED planned qty of the selected option (summed over
-  // the merged same-SKU lines), not just the primary line — else a merged article
-  // falsely trips "exceeds planned". Small tolerance absorbs float rounding.
-  const plannedKg = selectedOption && selectedOption.kg > 0 ? selectedOption.kg : null;
-  const overQty = plannedKg != null && Number(qtyKg) > plannedKg + 0.001;
 
   return (
     <div
@@ -1672,6 +1776,7 @@ function CreateJobCardModal({
                               setChainStarted(false);
                               setPkgJobCardId(null);
                               setRemoveReasons({});
+                              setExistingCards([]);
                             }
                           }}
                           className="accent-[var(--aws-orange)]"
@@ -1682,9 +1787,18 @@ function CreateJobCardModal({
                               {opt.fgSkuName || "—"}
                             </span>
                             {opt.carded ? (
-                              <span className="shrink-0 px-1 py-0.5 text-[9px] font-bold uppercase rounded-[2px] border bg-[#eef7ee] text-[#2e7d32] border-[#bfe0c0]">
-                                Carded
-                              </span>
+                              opt.remainingKg > 0.001 ? (
+                                <span
+                                  className="shrink-0 px-1 py-0.5 text-[9px] font-bold uppercase rounded-[2px] border bg-[#fef6e7] text-[#8a4b00] border-[#f5d9a8]"
+                                  title="Partially carded — this much balance is left to create"
+                                >
+                                  {fmtPlanKg(opt.remainingKg)} kg left
+                                </span>
+                              ) : (
+                                <span className="shrink-0 px-1 py-0.5 text-[9px] font-bold uppercase rounded-[2px] border bg-[#eef7ee] text-[#2e7d32] border-[#bfe0c0]">
+                                  Carded
+                                </span>
+                              )
                             ) : null}
                             {merged ? (
                               <span className="shrink-0 px-1 py-0.5 text-[9px] font-bold uppercase rounded-[2px] border bg-[#eef2fb] text-[#1e5aa0] border-[#c3d4ec]">
@@ -1712,6 +1826,38 @@ function CreateJobCardModal({
               <span className="text-[var(--text-muted)]">Article: </span>
               <span className="font-semibold text-[var(--text-primary)]">{selectedLine?.fg_sku_name ?? "—"}</span>
             </div>
+
+            {mode === "edit" && existingCards.length > 0 ? (
+              <div className="rounded-[3px] border border-[var(--aws-border)] bg-[var(--surface-subtle)] p-2.5">
+                <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-secondary)] mb-1.5">
+                  Existing job cards
+                </div>
+                <ul className="space-y-1">
+                  {existingCards.map((c, i) => (
+                    <li key={c.jobCardId ?? i} className="flex items-center gap-2 text-[11px]">
+                      <span className="font-mono text-[var(--aws-link)] shrink-0">
+                        {c.jobCardId != null ? `#${c.jobCardId}` : "—"}
+                      </span>
+                      <span className="text-[var(--text-muted)] shrink-0">{c.role}</span>
+                      <span className="font-medium text-[var(--text-primary)] truncate" title={c.process}>
+                        {c.process || "—"}
+                      </span>
+                      {c.floor ? (
+                        <span className="text-[var(--text-muted)] truncate">· {c.floor}</span>
+                      ) : null}
+                      {c.status ? (
+                        <span className="ml-auto shrink-0 px-1.5 py-0.5 rounded-[2px] text-[9px] font-semibold capitalize border border-[var(--aws-border)] bg-white text-[var(--text-secondary)]">
+                          {c.status.replace(/_/g, " ")}
+                        </span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-[10px] text-[var(--text-muted)] italic mt-1.5">
+                  Editing below updates this chain.
+                </p>
+              </div>
+            ) : null}
 
             <div className="grid grid-cols-2 gap-3">
               <label className="block">
@@ -1744,7 +1890,9 @@ function CreateJobCardModal({
 
             {overQty ? (
               <p className="text-[11px] text-[#9a393e] -mt-2">
-                Quantity exceeds this article&apos;s planned {fmtPlanKg(plannedKg!)} kg — double-check before creating.
+                {isCreateAnother
+                  ? `Only ${fmtPlanKg(capKg!)} kg remaining on this line — reduce the quantity.`
+                  : `Quantity exceeds this article's planned ${fmtPlanKg(capKg!)} kg — reduce the quantity.`}
               </p>
             ) : null}
 
