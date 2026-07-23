@@ -424,6 +424,15 @@ function PlanHeader({
   // accepts them.
   const isEditable = isDraft || isApproved;
   const lineCount = detail.lines?.length ?? 0;
+  // Plan-level delivery date = the line deadline(s) carried from the SO's
+  // delivery_deadline. One date if every line shares it, a range otherwise.
+  const deadlineDates = (detail.lines ?? [])
+    .map((l) => l.deadline_date)
+    .filter((d): d is string => !!d)
+    .map((d) => d.slice(0, 10))
+    .sort();
+  const deliveryFrom = deadlineDates[0];
+  const deliveryTo = deadlineDates[deadlineDates.length - 1];
 
   return (
     <div className="bg-white border border-[var(--aws-border)] rounded-md overflow-hidden mb-4">
@@ -468,6 +477,12 @@ function PlanHeader({
             <div className="min-w-0">
               <dt className="uppercase tracking-wide font-semibold text-[var(--text-muted)] text-[9px] leading-[12px]">Plan date</dt>
               <dd className="text-[12px] text-[var(--text-primary)] truncate">{fmtPlanDate(detail.plan_date)}</dd>
+            </div>
+          ) : null}
+          {deliveryFrom ? (
+            <div className="min-w-0">
+              <dt className="uppercase tracking-wide font-semibold text-[var(--text-muted)] text-[9px] leading-[12px]">Delivery date</dt>
+              <dd className="text-[12px] text-[var(--text-primary)] truncate">{fmtDateRange(deliveryFrom, deliveryTo)}</dd>
             </div>
           ) : null}
           <div className="min-w-0">
@@ -688,6 +703,22 @@ function LineCard({
           <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)] truncate">
             {line.customer_name || "—"}
           </div>
+          {typeof line.job_card_count === "number" ? (
+            <div className="mt-1">
+              <span
+                className={[
+                  "inline-block text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-sm border whitespace-nowrap",
+                  line.job_card_count > 0
+                    ? "text-[#1d8102] bg-[#eaf6ed] border-[#b6dbb1]"
+                    : "text-[var(--text-muted)] bg-[var(--surface-subtle)] border-[var(--aws-border)]",
+                ].join(" ")}
+              >
+                {line.job_card_count > 0
+                  ? `${line.job_card_count} job card${line.job_card_count === 1 ? "" : "s"}`
+                  : "no job cards"}
+              </span>
+            </div>
+          ) : null}
         </div>
         <div className="shrink-0 text-right">
           <div className="text-[14px] font-semibold text-[var(--text-primary)] leading-tight">

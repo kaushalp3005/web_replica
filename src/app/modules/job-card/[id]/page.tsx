@@ -200,6 +200,7 @@ type JobCardDetail = {
     fg_actual_kg?: number | string | null;
     fg_actual_units?: number | null;
     process_loss_kg?: number | string | null;
+    process_loss_remark?: string | null;
     rm_consumed_kg?: number | string | null;
     yield_pct?: number | string | null;
     created_at?: string | null;
@@ -1297,9 +1298,11 @@ type BatchRow = {
 };
 
 // Display name for a batch: the operator-typed label (072) when present,
-// else the system "Batch <number>". One helper so every accounting spot agrees.
-function batchLabel(b: { batch_label?: string | null; batch_number: number }): string {
-  return b.batch_label?.trim() || `Batch ${b.batch_number}`;
+// else the batch's 8-digit code (batch_id). Non-packing batches open
+// nameless, so the code is their identifier; named packing batches keep
+// their label. One helper so every accounting spot agrees.
+function batchLabel(b: { batch_label?: string | null; batch_id: number }): string {
+  return b.batch_label?.trim() || String(b.batch_id);
 }
 
 function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () => void }) {
@@ -1479,7 +1482,7 @@ function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
               {batches.map((p) => (
                 <tr key={p.batch_id} className="border-b border-[var(--aws-border)]">
                   <td className="px-2 py-1 font-semibold text-[var(--text-primary)]">
-                    {p.batch_number}
+                    {batchLabel(p)}
                     {p.status === "open" ? (
                       <span className="ml-1 text-[10px] font-normal text-[var(--text-muted)]">(open)</span>
                     ) : null}
@@ -3387,8 +3390,9 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     const sec5Kg    = sec5?.fg_actual_kg    != null ? String(sec5.fg_actual_kg)    : "";
     const sec5Units = sec5?.fg_actual_units != null ? String(sec5.fg_actual_units) : "";
     const sec5Loss  = sec5?.process_loss_kg != null ? String(sec5.process_loss_kg) : "";
+    const sec5Remark = sec5?.process_loss_remark != null ? String(sec5.process_loss_remark) : "";
     if (!selectedBatch) {
-      return { fgKg: sec5Kg, fgUnits: sec5Units, loss: sec5Loss };
+      return { fgKg: sec5Kg, fgUnits: sec5Units, loss: sec5Loss, remark: sec5Remark };
     }
     // Primary source: the BatchRow (job_card_batch_v2 view). For closed
     // batches this is the canonical snapshot; for open batches it's
@@ -3396,6 +3400,9 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     let fgKg = selectedBatch.fg_actual_kg != null ? String(selectedBatch.fg_actual_kg) : "";
     let fgUnits = selectedBatch.fg_actual_units != null ? String(selectedBatch.fg_actual_units) : "";
     let loss = selectedBatch.process_loss_kg != null ? String(selectedBatch.process_loss_kg) : "";
+    // No batch-row column for the remark — it lives only on the output row,
+    // recovered from detail.outputs below (batch-scoped, like `loss`).
+    let remark = "";
     // Fallback: latest job_card_output_v2 row for THIS batch. Was
     // previously gated on `status === "open"` so closed batches with a
     // null BatchRow.process_loss_kg never recovered the value the output
@@ -3443,9 +3450,10 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
         if (!fgKg    && latest.output_qty_kg    != null) fgKg    = String(latest.output_qty_kg);
         if (!fgUnits && latest.output_qty_units != null) fgUnits = String(latest.output_qty_units);
         if (!loss    && latest.process_loss_kg  != null) loss    = String(latest.process_loss_kg);
+        if (!remark  && latest.process_loss_remark != null) remark = String(latest.process_loss_remark);
       }
     }
-    return { fgKg, fgUnits, loss };
+    return { fgKg, fgUnits, loss, remark };
   }, [
     selectedBatch,
     detail.outputs,
@@ -3454,10 +3462,12 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   const fgKgFromServer    = batchScopedDefaults.fgKg;
   const fgUnitsFromServer = batchScopedDefaults.fgUnits;
   const lossFromServer    = batchScopedDefaults.loss;
+  const remarkFromServer  = batchScopedDefaults.remark;
 
   const [fgActualUnits, setFgActualUnits] = useState(fgUnitsFromServer);
   const [fgActualKg,    setFgActualKg]    = useState(fgKgFromServer);
   const [processLoss,   setProcessLoss]   = useState(lossFromServer);
+  const [processLossRemark, setProcessLossRemark] = useState(remarkFromServer);
 
   // formDirty guards the auto-poll / focus-refetch path: the page-level
   // window-focus listener + 60s visibility poll re-fetch the JC detail
@@ -3530,24 +3540,27 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   >(null);
   const [closeBatchModal, setCloseBatchModal] = useState<BatchRow | null>(null);
   // 072: operator-typed batch name for the next Open Batch. Blank → server
-  // keeps NULL and the batch shows as "Batch <number>".
+  // keeps NULL and the batch shows as its 8-digit code.
   const [newBatchLabel, setNewBatchLabel] = useState("");
+  // Packing batches must be named (labels drive QR / label traceability);
+  // every other stage opens a nameless batch identified by its 8-digit code.
+  const isPackingStage = isPackingStageJc(detail.stage);
 
   const doOpenBatch = useCallback(async () => {
     const label = newBatchLabel.trim();
-    // Batch name is mandatory — operator must name every batch.
-    if (!label) {
+    // Name is mandatory only for packing batches; other stages open nameless.
+    if (isPackingStage && !label) {
       setBatchActionMsg({ kind: "err", msg: "Enter a batch name before opening a batch." });
       return;
     }
     // Confirm before creating — a new batch is not trivially undoable.
-    if (!window.confirm(`Open a new batch named "${label}"?`)) return;
+    if (!window.confirm(label ? `Open a new batch named "${label}"?` : "Open a new batch?")) return;
     setBatchActionMsg(null);
     setBatchActionBusy(true);
     try {
       const res = await apiFetch(
         `/api/v1/production/job-cards-v2/${detail.job_card_id}/batches/open`,
-        { method: "POST", body: JSON.stringify({ batch_label: label }) },
+        { method: "POST", body: JSON.stringify(label ? { batch_label: label } : {}) },
       );
       if (!res.ok) {
         throw new Error(
@@ -3568,7 +3581,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     } finally {
       setBatchActionBusy(false);
     }
-  }, [detail.job_card_id, onReload, refetchBatches, newBatchLabel]);
+  }, [detail.job_card_id, onReload, refetchBatches, newBatchLabel, isPackingStage]);
 
   // 072: rename a batch (so a batch — including legacy ones — can be given the
   // free-text name shown in the batch table). Acts on the passed row.
@@ -3608,8 +3621,9 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       setFgActualKg(fgKgFromServer);
       setFgActualUnits(fgUnitsFromServer);
       setProcessLoss(lossFromServer);
+      setProcessLossRemark(remarkFromServer);
     });
-  }, [fgKgFromServer, fgUnitsFromServer, lossFromServer]);
+  }, [fgKgFromServer, fgUnitsFromServer, lossFromServer, remarkFromServer]);
 
   // EGA hydration — R10 per-batch scoped (was JC-level via
   // detail.accounting.extra_give_away_qty, which leaked Batch 1's
@@ -3919,6 +3933,10 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   const onChangeProcessLoss = useCallback((v: string) => {
     markSectionDirty("output_qty");
     setProcessLoss(v);
+  }, [markSectionDirty]);
+  const onChangeProcessLossRemark = useCallback((v: string) => {
+    markSectionDirty("output_qty");
+    setProcessLossRemark(v);
   }, [markSectionDirty]);
 
   // Operator-stated: Process Loss % should read off FG Actual Kg, not
@@ -4358,6 +4376,9 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       // skip the output row and persist just the consumption / byproducts
       // the operator actually typed.
       process_loss_kg:   processLoss.trim()   === "" ? null : num(processLoss),
+      // Free-text note on the output row explaining the process loss. Rides
+      // the same /outputs save as process_loss_kg; null when blank.
+      process_loss_remark: processLossRemark.trim() === "" ? null : processLossRemark.trim(),
     };
 
     // Per-line consumption — split RM vs PM by article.item_type.
@@ -4743,7 +4764,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   // gated on packing-stage detection (PM stocks are only consumed there).
   // EGA is now consolidated (no per-article picker), so the rmArticles
   // memo that previously filtered for the dropdown is gone.
-  const isPackingStage = isPackingStageJc(detail.stage);
+  // (isPackingStage is declared once, up by the batch-open handler.)
   // C3: any operational input is disabled when locked. We compute this
   // OR with submitting so the save-in-flight state still wins (you can't
   // edit mid-flight either).
@@ -4853,28 +4874,30 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
             />
           </dl>
         ) : null}
-        {/* Open a new batch — name is mandatory. */}
+        {/* Open a new batch — name is mandatory for packing stages only. */}
         {detail.status !== "completed" || isAdmin ? (
           <div className="flex items-center gap-2 mb-3 flex-wrap">
             <label className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)] sm:w-[110px]">
               New batch
             </label>
-            <input
-              type="text"
-              value={newBatchLabel}
-              onChange={(e) => setNewBatchLabel(e.target.value)}
-              disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked}
-              placeholder="Batch name (required)"
-              maxLength={120}
-              required
-              aria-label="Batch name for the new batch"
-              className={`${inputCls} h-7 w-[220px] text-[12px]`}
-            />
+            {isPackingStage ? (
+              <input
+                type="text"
+                value={newBatchLabel}
+                onChange={(e) => setNewBatchLabel(e.target.value)}
+                disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked}
+                placeholder="Batch name (required)"
+                maxLength={120}
+                required
+                aria-label="Batch name for the new batch"
+                className={`${inputCls} h-7 w-[220px] text-[12px]`}
+              />
+            ) : null}
             <button
               type="button"
               onClick={() => void doOpenBatch()}
-              disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked || !newBatchLabel.trim()}
-              title={lifecycleLocked ? "Start the job card first" : !newBatchLabel.trim() ? "Enter a batch name first" : undefined}
+              disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked || (isPackingStage && !newBatchLabel.trim())}
+              title={lifecycleLocked ? "Start the job card first" : (isPackingStage && !newBatchLabel.trim()) ? "Enter a batch name first" : undefined}
               className="h-7 px-3 text-[11px] font-semibold rounded-[2px] border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {batchActionBusy ? "…" : "Open Batch"}
@@ -4890,7 +4913,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
           <div className="text-[12px] text-[var(--text-muted)] italic mb-2">loading batches…</div>
         ) : batches.length === 0 ? (
           <div className="text-[12px] text-[var(--text-secondary)] mb-2">
-            No batches yet — enter a name and click <strong>Open Batch</strong> to create the first one.
+            No batches yet — {isPackingStage ? <>enter a name and click <strong>Open Batch</strong></> : <>click <strong>Open Batch</strong></>} to create the first one.
           </div>
         ) : (
           <div className="overflow-x-auto rounded-[2px] border border-[var(--aws-border)] bg-white mb-2">
@@ -5362,6 +5385,15 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
               {processLossPct != null ? `${processLossPct.toFixed(2)}%` : "—"}
             </div>
           </div>
+        </div>
+        <div className="mt-3">
+          <FormText
+            label="Process Loss Remark"
+            value={processLossRemark}
+            onChange={onChangeProcessLossRemark}
+            disabled={inputsDisabled}
+            placeholder="Reason / note for the process loss (optional)"
+          />
         </div>
 
         {/* Extra Giveaway (EGA) — R11/C7: packing stages only.

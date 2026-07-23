@@ -2676,6 +2676,26 @@ function LineStageBreakdown({ steps }: { steps?: PlanStepRow[] | null }) {
   );
 }
 
+// Makes it unambiguous whether a line's process route is just a plan template
+// or has real job cards behind it — answers the "why do steps show with no job
+// cards?" confusion directly on each line.
+function JobCardCountBadge({ count }: { count?: number | null }) {
+  if (count == null) return null;
+  const made = count > 0;
+  return (
+    <span
+      className={[
+        "inline-block text-[9px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-sm border whitespace-nowrap",
+        made
+          ? "text-[#1d8102] bg-[#eaf6ed] border-[#b6dbb1]"
+          : "text-[var(--text-muted)] bg-[var(--surface-subtle)] border-[var(--aws-border)]",
+      ].join(" ")}
+    >
+      {made ? `${count} job card${count === 1 ? "" : "s"}` : "no job cards"}
+    </span>
+  );
+}
+
 // Lines preview — stacked cards at every width so each line can show its full
 // WIP → Packing breakdown (not just a step count).
 function PreviewLinesList({ lines }: { lines: PlanLineRow[] }) {
@@ -2690,6 +2710,9 @@ function PreviewLinesList({ lines }: { lines: PlanLineRow[] }) {
               </div>
               <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)] truncate">
                 {l.customer_name || "—"}
+              </div>
+              <div className="mt-1">
+                <JobCardCountBadge count={l.job_card_count} />
               </div>
             </div>
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[11px] justify-end">

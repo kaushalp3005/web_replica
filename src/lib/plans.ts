@@ -143,6 +143,9 @@ export interface PlanLineRow {
   area?: string | null;
   deadline_date?: string | null;
   linked_so_fulfillment_ids?: number[] | null;
+  // Head cards created for this line (one per chain). 0 ⇒ route is only a
+  // plan template; >0 ⇒ job cards exist.
+  job_card_count?: number | null;
   steps?: PlanStepRow[];
   [k: string]: unknown;
 }
