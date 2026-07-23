@@ -14,10 +14,9 @@ import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe, useIsAdmin } from "@/lib/user";
-import { listUsers } from "@/lib/admin-api";
-import { sampleCaps } from "@/lib/sample-roles";
+import { sampleCaps, roleNamesOf } from "@/lib/sample-roles";
 import {
-  listRequisitions, listRequestors, npdReview, cancelRequisition, updateRequisition,
+  listRequisitions, listRequestors, npdReview, cancelRequisition, updateRequisition, listBusinessHeads,
   WAREHOUSES, NPD_WAREHOUSES, NPD_SAMPLE_TYPES,
   type Requisition, type PurposeTag, type Warehouse,
 } from "@/lib/sample";
@@ -167,21 +166,21 @@ export default function NpdQueuePage() {
     customer_ship_to_address: "", mode_of_transport: "", expected_dispatch_date: "",
     billing: EMPTY_BILLING,
   });
-  // Requestor dropdown — business heads only (mirrors the create form), admin-gated
-  // (/users is admin-only); non-admins keep free-text. Plus derived qty + billing guard.
+  // Requestor dropdown — business heads (mirrors the create form). Admin + sales pick a
+  // BH; other roles keep free-text. Fetched via the sample business-heads endpoint (not
+  // admin-gated). Plus derived qty + billing guard.
   const isAdmin = useIsAdmin();
+  const needsBhDropdown = isAdmin || roleNamesOf(me).includes("sales");
   const [bhOptions, setBhOptions] = useState<string[]>([]);
   useEffect(() => {
-    if (!isAdmin) return;
+    if (!needsBhDropdown) return;
     let cancelled = false;
-    listUsers().then((users) => {
+    listBusinessHeads().then((names) => {
       if (cancelled) return;
-      setBhOptions(Array.from(new Set(users
-        .filter((u) => u.role_name === "business_head")
-        .map((u) => (u.full_name ?? "").trim()).filter(Boolean))));
+      setBhOptions(Array.from(new Set(names.map((n) => n.trim()).filter(Boolean))));
     }).catch(() => { /* leave empty — the placeholder prompts a selection */ });
     return () => { cancelled = true; };
-  }, [isAdmin]);
+  }, [needsBhDropdown]);
   const editPcsN = Number(editForm.pcs), editWppN = Number(editForm.weight_per_piece);
   const editQty = (editForm.pcs.trim() && editForm.weight_per_piece.trim()
     && Number.isFinite(editPcsN) && Number.isFinite(editWppN))
@@ -603,7 +602,7 @@ export default function NpdQueuePage() {
               </div>
               <div>
                 <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Requestor</label>
-                {isAdmin ? (
+                {needsBhDropdown ? (
                   <select className="form-input" value={editForm.requestor_team}
                     onChange={(e) => setEditForm((f) => ({ ...f, requestor_team: e.target.value }))}>
                     <option value="">Select a business head…</option>

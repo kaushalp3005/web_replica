@@ -41,8 +41,9 @@ export const COST_FIELDS_DENY_ROLES: ReadonlySet<string> = new Set([
 export const COST_FIELDS_ALLOW_ROLES: ReadonlySet<string> = new Set([
   "admin", "planner", "purchase_manager", "inventory_manager",
   // sample module — business_head is a management role and sees cost
-  // (npd_team is intentionally omitted → default-deny).
-  "business_head",
+  // (npd_team is intentionally omitted → default-deny). sales raises requisitions
+  // (incl. the paid amount), so it sees cost like business_head.
+  "business_head", "sales",
   // future commercial roles — explicit opt-in so adding the
   // role on the backend doesn't silently expose ₹ in the UI.
   "commercial_manager", "cost_controller",

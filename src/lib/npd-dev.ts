@@ -45,13 +45,53 @@ export interface DevPhase {
   yield_pct?: number | string | null;
 }
 
+// A target article on a dev job card (082) — its own product with its own base BOM +
+// trial recipe (and, in later phases, its own output + promoted BOM).
+export interface DevArticle {
+  article_id: number | null;   // null for the legacy synthesized single article
+  name: string;
+  pcs?: number | string | null;
+  weight_per_piece?: number | string | null;
+  quantity?: number | string | null;
+  uom?: string | null;
+  base_bom_id?: number | null;
+  base_bom_name?: string | null;
+  output_qty?: number | string | null;
+  output_uom?: string | null;
+  yield_pct?: number | string | null;
+  rm_consumed_qty?: number | string | null;
+  wastage_qty?: number | string | null;
+  extra_give_away_qty?: number | string | null;
+  promoted_bom_id?: number | null;
+  fg_sample_batch_id?: string | null;   // this article's own R&D FG batch (083)
+  status?: string | null;
+  line_order?: number;
+  lines?: DevLine[];           // this article's own trial recipe
+  // Per-article dispatch balances (083) — present on the detail GET for a real article.
+  dispatches?: DevDispatch[];
+  dispatched_total?: number | string | null;
+  remaining_qty?: number | string | null;
+}
+
+// One article on the create payload: its details + base BOM + explicit recipe lines.
+export interface DevArticleInput {
+  name: string;
+  pcs?: number;
+  weight_per_piece?: number;
+  base_bom_id?: number | null;
+  base_bom_name?: string | null;
+  lines: DevLine[];
+}
+
 // A single partial "out" — one issued part of the finalized FG sample. Each has
 // its own 265 GI (mat_doc_id) and its own printable outpass (Outpass No <jc>-<seq>).
 export interface DevDispatch {
   dispatch_id: number;
   dev_jc_id: number;
+  article_id?: number | null;   // per-article dispatch (083); null for a legacy card-level part
   seq: number;
   qty: number | string;
+  uom?: string | null;          // custom unit for this part (084); null → the article uom
   recipient?: string | null;
   mat_doc_id?: string | null;
   notes?: string | null;
@@ -129,6 +169,9 @@ export interface DevJobCard {
   lines?: DevLine[];
   // Trial phases (multi-day) — present on the detail GET.
   phases?: DevPhase[];
+  // Target articles (082) each with its own base BOM + trial recipe. Present on the
+  // detail GET; legacy cards synthesize one from the header.
+  articles?: DevArticle[];
   // Pending dual-approval promote gate (null when no live request).
   promote_gate?: PromoteGate | null;
   // Gate-pass digital signatures — the promote approvers by name + decided date.
@@ -150,6 +193,19 @@ export interface DevJobCardCreate {
   source_requisition_id?: number;   // set when started from a request's "Develop"
   clone_from_base?: boolean;
   lines?: DevLine[];
+  // Per-article develop (082): each article its own product + base BOM + recipe. When
+  // sent, the card-level fg_sku_name/pcs/weight/base_bom_id mirror article #1.
+  articles?: DevArticleInput[];
+}
+
+// Per-article output + accounting at promote (082/083) — each article's own output.
+export interface DevCloseArticleInput {
+  article_id: number;
+  output_qty?: number;
+  output_uom?: string;
+  rm_consumed_qty?: number;
+  wastage_qty?: number;
+  extra_give_away_qty?: number;
 }
 
 export interface DevJobCardCloseBody {
@@ -161,6 +217,9 @@ export interface DevJobCardCloseBody {
   wastage_qty?: number;
   extra_give_away_qty?: number;
   output_notes?: string;
+  // Per-article cards (082): the output entered per article — drives each article's own FG
+  // receipt + dispatchable balance. When present the promote fans out per article.
+  articles?: DevCloseArticleInput[];
 }
 
 // Per-phase completion body — the phase's output + material accounting.
@@ -274,6 +333,13 @@ export async function replaceDevLines(id: number, lines: DevLine[]): Promise<Dev
     "Failed to save recipe lines");
 }
 
+// Replace ALL target articles + their recipes on a DRAFT/IN_DEVELOPMENT card (082).
+export async function replaceDevArticles(id: number, articles: DevArticleInput[]): Promise<DevJobCard> {
+  return jsonOrThrow(
+    await apiFetch(`${BASE}/${id}/articles`, { method: "PUT", body: JSON.stringify({ articles }) }),
+    "Failed to save articles");
+}
+
 export const startDevJobCard = (id: number) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/start`), "Start failed");
 
@@ -337,5 +403,5 @@ export const startDevPhase = (id: number, phaseId: number) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/phases/${phaseId}/start`), "Failed to start phase");
 export const completeDevPhase = (id: number, phaseId: number, body?: DevPhaseCompleteBody) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/phases/${phaseId}/complete`, body ?? {}), "Failed to complete phase");
-export const dispatchDevJobCard = (id: number, body: { recipient?: string; qty?: number }) =>
+export const dispatchDevJobCard = (id: number, body: { recipient?: string; qty?: number; article_id?: number; uom?: string }) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/dispatch`, body), "Dispatch failed");

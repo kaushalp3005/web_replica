@@ -17,8 +17,8 @@ import {
   type NpdSampleType, type PurposeTag,
 } from "@/lib/sample";
 import {
-  FormSection, ReviewRow, BillingFields, billingError, billingPayload,
-  EMPTY_BILLING, type BillingValue,
+  FormSection, ReviewRow, BillingFields, billingError, billingPayload, EMPTY_BILLING, type BillingValue,
+  TargetArticlesEditor, targetsValid, targetsPayload, targetsTotalQty, EMPTY_TARGET, type TargetRow,
 } from "../../_form";
 
 const PURPOSE_OPTIONS: { value: PurposeTag; label: string }[] = [
@@ -35,9 +35,7 @@ export default function NewNpdRequisitionPage() {
   const initial = useUserInitial();
 
   const [sampleType, setSampleType] = useState<NpdSampleType | "">("");
-  const [targetArticle, setTargetArticle] = useState("");
-  const [pcs, setPcs] = useState("");
-  const [weightPerPiece, setWeightPerPiece] = useState("");
+  const [targets, setTargets] = useState<TargetRow[]>([{ ...EMPTY_TARGET }]);
   const [description, setDescription] = useState("");
   const [purposeTag, setPurposeTag] = useState<PurposeTag | "">("");
   const [requestorTeam, setRequestorTeam] = useState("");
@@ -53,15 +51,11 @@ export default function NewNpdRequisitionPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Mandatory: type, target article, pcs (>0), weight per piece (>0), warehouse,
-  // company, customer. Quantity is derived = pcs × weight per piece (kg).
-  const pcsNum = Number(pcs);
-  const wppNum = Number(weightPerPiece);
-  const qtyNum = (pcs.trim() !== "" && weightPerPiece.trim() !== ""
-    && Number.isFinite(pcsNum) && Number.isFinite(wppNum))
-    ? Number((pcsNum * wppNum).toFixed(3)) : 0;
+  // Mandatory: type, ≥1 target (name + pcs>0 + weight>0), warehouse, company,
+  // customer. Each target's quantity is derived = pcs × weight per piece (kg).
+  const totalQty = targetsTotalQty(targets);
   const canSubmit =
-    !!sampleType && targetArticle.trim() !== "" && pcsNum > 0 && wppNum > 0 && !!warehouse &&
+    !!sampleType && targetsValid(targets) && !!warehouse &&
     companyName.trim() !== "" && customerName.trim() !== "" && !billingError(billing);
 
   async function save() {
@@ -70,10 +64,7 @@ export default function NewNpdRequisitionPage() {
     try {
       await createNpdRequisition({
         sample_type: sampleType,
-        npd_target_name: targetArticle.trim(),
-        pcs: pcsNum,
-        weight_per_piece: wppNum,
-        quantity: qtyNum,
+        targets: targetsPayload(targets),
         warehouse,
         company_name: companyName.trim(),
         customer_name: customerName.trim(),
@@ -135,29 +126,9 @@ export default function NewNpdRequisitionPage() {
                 {NPD_SAMPLE_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
               </select>
             </div>
-            {/* target NPD article */}
-            <div>
-              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Target NPD article <span className="text-[var(--aws-error)]">*</span></label>
-              <input className="form-input" value={targetArticle} onChange={(e) => setTargetArticle(e.target.value)}
-                placeholder="e.g. Premia Trail Mix 200g" />
-            </div>
-            {/* pcs */}
-            <div>
-              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Pcs <span className="text-[var(--aws-error)]">*</span></label>
-              <input className="form-input" type="number" min="0" step="1" value={pcs}
-                onChange={(e) => setPcs(e.target.value)} placeholder="e.g. 25" />
-            </div>
-            {/* weight per piece */}
-            <div>
-              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Weight per piece (kg) <span className="text-[var(--aws-error)]">*</span></label>
-              <input className="form-input" type="number" min="0" step="0.001" value={weightPerPiece}
-                onChange={(e) => setWeightPerPiece(e.target.value)} placeholder="e.g. 0.5" />
-            </div>
-            {/* quantity (computed = pcs × weight per piece) */}
-            <div>
-              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Quantity (kg)</label>
-              <input className="form-input bg-[var(--surface-subtle)] cursor-not-allowed" value={qtyNum > 0 ? qtyNum.toLocaleString("en-IN") : "—"} readOnly tabIndex={-1} />
-              <p className="mt-1 text-[11px] text-[var(--text-muted)]">= Pcs × Weight per piece</p>
+            {/* target articles — one or more products, each pcs × weight → qty */}
+            <div className="sm:col-span-2">
+              <TargetArticlesEditor rows={targets} onChange={setTargets} />
             </div>
             {/* warehouse */}
             <div>
@@ -228,10 +199,8 @@ export default function NewNpdRequisitionPage() {
         <FormSection n={3} title="Review">
           <dl className="space-y-1.5 text-[13px]">
             <ReviewRow label="Type" value={typeLabel} />
-            <ReviewRow label="Target article" value={targetArticle || "—"} />
-            <ReviewRow label="Pcs" value={pcs || "—"} />
-            <ReviewRow label="Weight per piece" value={weightPerPiece ? `${weightPerPiece} kg` : "—"} />
-            <ReviewRow label="Quantity" value={qtyNum > 0 ? `${qtyNum} kg` : "—"} />
+            <ReviewRow label={`Target articles (${targets.length})`} value={targets.map((t) => t.name.trim()).filter(Boolean).join(", ") || "—"} />
+            <ReviewRow label="Total quantity" value={totalQty > 0 ? `${totalQty.toLocaleString("en-IN")} kg` : "—"} />
             <ReviewRow label="Warehouse" value={warehouse || "—"} />
             <ReviewRow label="Company" value={companyName || "—"} />
             <ReviewRow label="Customer" value={customerName || "—"} />

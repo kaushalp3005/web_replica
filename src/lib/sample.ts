@@ -35,6 +35,15 @@ export interface Article {
   notes?: string | null;
 }
 
+// A requested NPD target article as returned on the requisition detail (080).
+export interface NpdTarget {
+  id?: number;
+  name: string;
+  pcs?: number | string | null;
+  weight_per_piece?: number | string | null;
+  quantity?: number | string | null;
+}
+
 export interface Approval {
   id: number;
   approval_stage: string;
@@ -68,10 +77,13 @@ export interface Requisition {
   purpose_tag?: PurposeTag | null;
   purpose_note?: string | null;
   base_bom_id?: number | null;
-  npd_target_name?: string | null;   // requested new NPD article name
-  pcs?: number | null;               // number of pieces
-  weight_per_piece?: number | null;  // weight per piece (kg)
-  quantity?: number | null;          // total = pcs × weight_per_piece (kg)
+  npd_target_name?: string | null;   // requested new NPD article name (mirror of targets[0])
+  pcs?: number | null;               // number of pieces (target #1)
+  weight_per_piece?: number | null;  // weight per piece (kg) (target #1)
+  quantity?: number | null;          // total = pcs × weight_per_piece (kg) (target #1)
+  // Full list of requested target articles (080). Legacy requisitions synthesize one
+  // entry from the header. Present on the detail GET.
+  npd_targets?: NpdTarget[];
   description?: string | null;       // free-text request description
   linked_dev_jc_id?: number | null;  // dev job card created from this request's Develop
   npd_draft_bom_id?: number | null;
@@ -235,6 +247,7 @@ export interface RequisitionCreate {
   pcs?: number;
   weight_per_piece?: number;
   quantity?: number;
+  targets?: NpdTargetInput[];   // multiple NPD target articles (replace on edit)
   internal_override?: boolean;
   transporter_name?: string;
   vehicle_number?: string;
@@ -269,12 +282,17 @@ export const NPD_SAMPLE_TYPES: { value: NpdSampleType; label: string }[] = [
 ];
 export const NPD_WAREHOUSES = ["W202", "A185", "A68", "F53", "A101"] as const;
 
+// One requested target product. Each carries its own pcs × weight → quantity.
+export interface NpdTargetInput {
+  name: string;
+  pcs: number;
+  weight_per_piece: number;
+}
+
 export interface NpdRequisitionCreate {
   sample_type: NpdSampleType;     // required
-  npd_target_name: string;        // required: target NPD article
-  pcs: number;                    // required: number of pieces
-  weight_per_piece: number;       // required: kg per piece
-  quantity?: number;              // computed = pcs × weight_per_piece (kg)
+  // One or more target articles; the backend mirrors targets[0] onto the header.
+  targets: NpdTargetInput[];      // required: at least one
   warehouse: (typeof NPD_WAREHOUSES)[number];  // required
   company_name: string;           // required
   customer_name: string;          // required
@@ -294,6 +312,18 @@ export interface NpdRequisitionCreate {
 
 export async function createNpdRequisition(body: NpdRequisitionCreate): Promise<Requisition> {
   return jsonOrThrow(await post(`/api/v1/sample/npd-requisitions`, body), "Failed to create NPD requisition");
+}
+
+// Business-head names for the requestor dropdown (sales/admin raise on behalf of a BH).
+// Not admin-gated (unlike /auth/users), so a sales user can populate it. Degrades to [].
+export async function listBusinessHeads(): Promise<string[]> {
+  try {
+    const res = await apiFetch(`/api/v1/sample/business-heads`);
+    if (!res.ok) return [];
+    return (await res.json()) as string[];
+  } catch {
+    return [];
+  }
 }
 
 export async function updateRequisition(id: number, body: Partial<RequisitionCreate>): Promise<Requisition> {

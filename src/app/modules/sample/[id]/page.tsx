@@ -11,18 +11,20 @@ import { useParams, useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, SAMPLE_ROOT, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe, useIsAdmin } from "@/lib/user";
-import { listUsers } from "@/lib/admin-api";
-import { sampleCaps } from "@/lib/sample-roles";
+import { sampleCaps, roleNamesOf } from "@/lib/sample-roles";
 import {
   getRequisition, submitRequisition, cancelRequisition, closeRequisition,
   approveRequisition, npdReview, issueOutward, dispatchInternal, startProduction,
   markPacking, markReady, invVerify, issueGatePass, convertFull, convertPartial,
-  printGatePassBlob, updateRequisition, WAREHOUSES,
+  printGatePassBlob, updateRequisition, listBusinessHeads, WAREHOUSES,
   type Requisition, type RecipientBody, type RequisitionCreate,
   type PurposeTag, type Warehouse,
 } from "@/lib/sample";
 import { StatusPill, NpdStatusPill, TYPE_LABEL } from "../_shared";
-import { BillingFields, billingError, billingPayload, billingFrom, type BillingValue } from "../_form";
+import {
+  BillingFields, billingError, billingPayload, billingFrom, type BillingValue,
+  TargetArticlesEditor, targetsValid, targetsPayload, EMPTY_TARGET, type TargetRow,
+} from "../_form";
 
 type ModalMode =
   | null | "reject" | "cancel" | "gatePass" | "convertFull" | "convertPartial"
@@ -218,14 +220,27 @@ export default function SampleDetailPage() {
                 <>
                   <dl className="border-t border-[var(--surface-divider)] px-5 py-4 grid grid-cols-2 sm:grid-cols-4 gap-y-4 gap-x-4">
                     <Field label="Warehouse" value={req.warehouse ?? "—"} />
-                    <Field label="Target NPD article name" value={req.npd_target_name ?? "—"} />
-                    <Field label="Pcs" value={req.pcs != null ? String(req.pcs) : "—"} />
-                    <Field label="Weight per piece (kg)" value={req.weight_per_piece != null ? String(req.weight_per_piece) : "—"} />
-                    <Field label="Quantity (kg)" value={req.quantity != null ? String(req.quantity) : "—"} />
                     <Field label="Requestor" value={req.requestor_team ?? "—"} />
                     <Field label="Purpose" value={req.purpose_tag ? req.purpose_tag.replace(/_/g, " ") : "—"} />
                     <Field label="Created" value={(req.created_at ?? "").slice(0, 10)} />
                   </dl>
+                  {(req.npd_targets?.length ?? 0) > 0 && (
+                    <div className="border-t border-[var(--surface-divider)] px-5 py-4">
+                      <div className="text-[11px] text-[var(--text-muted)] mb-2">Target article{req.npd_targets!.length > 1 ? "s" : ""}</div>
+                      <ul className="space-y-1.5">
+                        {req.npd_targets!.map((t, i) => (
+                          <li key={t.id ?? i} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[13px]">
+                            <span className="text-[11px] w-5 h-5 rounded-full bg-[var(--surface-divider)] text-[var(--text-secondary)] flex items-center justify-center shrink-0">{i + 1}</span>
+                            <span className="font-medium text-[var(--text-primary)]">{t.name}</span>
+                            <span className="text-[var(--text-secondary)]">
+                              {t.pcs != null ? `${t.pcs} pc` : ""}{t.pcs != null && t.weight_per_piece != null ? " × " : ""}{t.weight_per_piece != null ? `${t.weight_per_piece} kg` : ""}
+                              {t.quantity != null ? ` = ${Number(t.quantity).toLocaleString("en-IN")} kg` : ""}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                   {isNpdTrial && (
                     <dl className="border-t border-[var(--surface-divider)] px-5 py-4 grid grid-cols-2 sm:grid-cols-4 gap-y-4 gap-x-4">
                       <Field label="Company" value={req.company_name ?? "—"} />
@@ -336,9 +351,15 @@ function EditCard({ req, busy, onSave, onCancel }: {
   onSave: (patch: Partial<RequisitionCreate>) => void; onCancel: () => void;
 }) {
   const [warehouse, setWarehouse] = useState<string>(req.warehouse ?? "");
-  const [target, setTarget] = useState(req.npd_target_name ?? "");
-  const [pcs, setPcs] = useState(req.pcs != null ? String(req.pcs) : "");
-  const [weightPerPiece, setWeightPerPiece] = useState(req.weight_per_piece != null ? String(req.weight_per_piece) : "");
+  // Target articles (NPD/TRIAL) — seeded from the child rows (or the header for legacy).
+  const [targets, setTargets] = useState<TargetRow[]>(() =>
+    (req.npd_targets && req.npd_targets.length > 0)
+      ? req.npd_targets.map((t) => ({
+          name: t.name ?? "",
+          pcs: t.pcs != null ? String(t.pcs) : "",
+          weightPerPiece: t.weight_per_piece != null ? String(t.weight_per_piece) : "",
+        }))
+      : [{ ...EMPTY_TARGET }]);
   const [purposeTag, setPurposeTag] = useState<string>(req.purpose_tag ?? "");
   const [requestorTeam, setRequestorTeam] = useState(req.requestor_team ?? "");
   const [description, setDescription] = useState(req.description ?? "");
@@ -354,38 +375,32 @@ function EditCard({ req, busy, onSave, onCancel }: {
   // Requestor dropdown — business heads only (mirrors the create form). Admin-gated
   // because /users is admin-only; non-admins keep the free-text input.
   const isAdmin = useIsAdmin();
+  const me = useMe();
+  const needsBhDropdown = isAdmin || roleNamesOf(me).includes("sales");
   const [reqOptions, setReqOptions] = useState<string[]>([]);
   useEffect(() => {
-    if (!isAdmin) return;
+    if (!needsBhDropdown) return;
     let cancelled = false;
-    listUsers().then((users) => {
+    listBusinessHeads().then((names) => {
       if (cancelled) return;
-      setReqOptions(Array.from(new Set(users
-        .filter((u) => u.role_name === "business_head")
-        .map((u) => (u.full_name ?? "").trim())
-        .filter(Boolean))));
+      setReqOptions(Array.from(new Set(names.map((n) => n.trim()).filter(Boolean))));
     }).catch(() => { /* leave empty — the placeholder prompts a selection */ });
     return () => { cancelled = true; };
-  }, [isAdmin]);
+  }, [needsBhDropdown]);
   // Keep the currently-saved requestor selectable even if it isn't (or is no longer)
   // a business head, so editing never silently blanks an existing value.
   const currentReq = (req.requestor_team ?? "").trim();
   const reqChoices = currentReq && !reqOptions.includes(currentReq)
     ? [currentReq, ...reqOptions] : reqOptions;
-  // Quantity is derived = pcs × weight per piece (kg).
-  const pcsNum = Number(pcs), wppNum = Number(weightPerPiece);
-  const qtyNum = (pcs.trim() !== "" && weightPerPiece.trim() !== "" && Number.isFinite(pcsNum) && Number.isFinite(wppNum))
-    ? Number((pcsNum * wppNum).toFixed(3)) : 0;
   const billErr = isNpd ? billingError(billing) : null;
+  const targetErr = isNpd && !targetsValid(targets) ? "Each target needs a name, pcs and weight (> 0)." : null;
 
   function save() {
-    if (billErr) return;
+    if (billErr || targetErr) return;
     onSave({
       warehouse: (warehouse || undefined) as Warehouse | undefined,
-      npd_target_name: target.trim() || undefined,
-      pcs: pcs.trim() ? pcsNum : undefined,
-      weight_per_piece: weightPerPiece.trim() ? wppNum : undefined,
-      quantity: qtyNum > 0 ? qtyNum : undefined,
+      // NPD/TRIAL: replace the target articles; the backend re-mirrors the header from #1.
+      ...(isNpd ? { targets: targetsPayload(targets) } : {}),
       purpose_tag: (purposeTag || undefined) as PurposeTag | undefined,
       requestor_team: requestorTeam.trim() || undefined,
       description: description.trim() || undefined,
@@ -408,20 +423,12 @@ function EditCard({ req, busy, onSave, onCancel }: {
           {WAREHOUSES.map((w) => <option key={w} value={w}>{w}</option>)}
         </select>
       </label>
-      <label className="text-[12px] text-[var(--text-secondary)]">Target NPD article name
-        <input className="form-input mt-0.5" value={target} onChange={(e) => setTarget(e.target.value)} />
-      </label>
-      <label className="text-[12px] text-[var(--text-secondary)]">Pcs
-        <input className="form-input mt-0.5" type="number" min="0" step="1" value={pcs}
-          onChange={(e) => setPcs(e.target.value)} onWheel={(e) => e.currentTarget.blur()} />
-      </label>
-      <label className="text-[12px] text-[var(--text-secondary)]">Weight per piece (kg)
-        <input className="form-input mt-0.5" type="number" min="0" step="0.001" value={weightPerPiece}
-          onChange={(e) => setWeightPerPiece(e.target.value)} onWheel={(e) => e.currentTarget.blur()} />
-      </label>
-      <label className="text-[12px] text-[var(--text-secondary)]">Quantity (kg)
-        <input className="form-input mt-0.5 bg-[var(--surface-subtle)] cursor-not-allowed" value={qtyNum > 0 ? qtyNum.toLocaleString("en-IN") : "—"} readOnly tabIndex={-1} />
-      </label>
+      {isNpd && (
+        <div className="sm:col-span-2">
+          <TargetArticlesEditor rows={targets} onChange={setTargets} />
+          {targetErr && <p className="mt-1 text-[12px] text-[var(--aws-error)]">{targetErr}</p>}
+        </div>
+      )}
       <label className="text-[12px] text-[var(--text-secondary)]">Purpose
         <select className="form-input mt-0.5" value={purposeTag} onChange={(e) => setPurposeTag(e.target.value)}>
           <option value="">Select…</option>
@@ -429,7 +436,7 @@ function EditCard({ req, busy, onSave, onCancel }: {
         </select>
       </label>
       <label className="text-[12px] text-[var(--text-secondary)]">Requestor
-        {isAdmin ? (
+        {needsBhDropdown ? (
           <select className="form-input mt-0.5" value={requestorTeam} onChange={(e) => setRequestorTeam(e.target.value)}>
             <option value="">Select a business head…</option>
             {reqChoices.map((n) => <option key={n} value={n}>{n}</option>)}

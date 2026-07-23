@@ -15,13 +15,13 @@ import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe, useIsAdmin } from "@/lib/user";
 import {
-  createNpdRequisition, submitRequisition, NPD_SAMPLE_TYPES, NPD_WAREHOUSES,
+  createNpdRequisition, submitRequisition, listBusinessHeads, NPD_SAMPLE_TYPES, NPD_WAREHOUSES,
   type NpdSampleType, type PurposeTag,
 } from "@/lib/sample";
-import { listUsers } from "@/lib/admin-api";
+import { roleNamesOf } from "@/lib/sample-roles";
 import {
-  FormSection, BillingFields, billingError, billingPayload,
-  EMPTY_BILLING, type BillingValue,
+  FormSection, BillingFields, billingError, billingPayload, EMPTY_BILLING, type BillingValue,
+  TargetArticlesEditor, targetsValid, targetsPayload, EMPTY_TARGET, type TargetRow,
 } from "../sample/_form";
 
 const PURPOSE_OPTIONS: { value: PurposeTag; label: string }[] = [
@@ -42,12 +42,14 @@ export function NpdSampleForm({ defaultType, heading }: {
   const me = useMe();
   const isAdmin = useIsAdmin();
   const profileName = (me?.full_name ?? "").trim();
+  // sales (like admin) raises on behalf of a business head → pick the requestor from a
+  // dropdown of BHs, rather than defaulting to the signed-in user's own name.
+  const needsBhDropdown = isAdmin || roleNamesOf(me).includes("sales");
 
   const [type, setType] = useState<NpdSampleType>(defaultType);
   const [warehouse, setWarehouse] = useState<(typeof NPD_WAREHOUSES)[number] | "">("");
-  const [fgSkuName, setFgSkuName] = useState("");          // target NPD article name
-  const [pcs, setPcs] = useState("");                      // number of pieces
-  const [weightPerPiece, setWeightPerPiece] = useState(""); // kg per piece
+  // Multiple target articles — each a product with its own pcs × weight → qty.
+  const [targets, setTargets] = useState<TargetRow[]>([{ ...EMPTY_TARGET }]);
   const [purposeTag, setPurposeTag] = useState<PurposeTag | "">("");
   const [requestorTeam, setRequestorTeam] = useState("");
   const [requestorTouched, setRequestorTouched] = useState(false);
@@ -67,37 +69,28 @@ export function NpdSampleForm({ defaultType, heading }: {
 
   // Requestor is a business head chosen from the dropdown. An admin must pick one
   // (no self-default); a non-admin's free-text field still defaults to their own name.
-  const effectiveRequestor = requestorTouched ? requestorTeam : (isAdmin ? "" : profileName);
+  const effectiveRequestor = requestorTouched ? requestorTeam : (needsBhDropdown ? "" : profileName);
 
-  // Admins pick the requestor from a dropdown of business heads ONLY (no admins).
-  // (The /users endpoint is admin-gated, so non-admins never call it.)
+  // Admin + sales pick the requestor from a dropdown of business heads. Fetched via the
+  // sample business-heads endpoint (not admin-gated, so a sales user can populate it too).
   useEffect(() => {
-    if (!isAdmin) return;
+    if (!needsBhDropdown) return;
     let cancelled = false;
-    listUsers().then((users) => {
+    listBusinessHeads().then((names) => {
       if (cancelled) return;
-      const names = users
-        .filter((u) => u.role_name === "business_head")
-        .map((u) => (u.full_name ?? "").trim())
-        .filter(Boolean);
-      setReqOptions(Array.from(new Set(names)));
+      setReqOptions(Array.from(new Set(names.map((n) => n.trim()).filter(Boolean))));
     }).catch(() => { /* leave empty — the placeholder prompts a selection */ });
     return () => { cancelled = true; };
-  }, [isAdmin]);
+  }, [needsBhDropdown]);
 
   // Business heads only — never the signed-in admin's own name.
   const requestorChoices = reqOptions;
 
-  // Mandatory: target article, pcs (>0), weight per piece (>0), warehouse,
-  // company, customer. Quantity is derived = pcs × weight per piece (kg).
-  const pcsNum = Number(pcs);
-  const wppNum = Number(weightPerPiece);
-  const qtyNum = (pcs.trim() !== "" && weightPerPiece.trim() !== ""
-    && Number.isFinite(pcsNum) && Number.isFinite(wppNum))
-    ? Number((pcsNum * wppNum).toFixed(3)) : 0;
+  // Mandatory: ≥1 target (name + pcs>0 + weight>0), warehouse, company, customer.
   const canSave =
-    !!warehouse && !!fgSkuName.trim() && pcsNum > 0 && wppNum > 0 &&
-    companyName.trim() !== "" && customerName.trim() !== "" && !billingError(billing);
+    !!warehouse && targetsValid(targets) &&
+    companyName.trim() !== "" && customerName.trim() !== "" && !billingError(billing) &&
+    (!needsBhDropdown || effectiveRequestor.trim() !== "");   // sales/admin must pick a BH
 
   async function save(submit: boolean) {
     if (!canSave || !warehouse) return;
@@ -108,10 +101,7 @@ export function NpdSampleForm({ defaultType, heading }: {
         const req = await createNpdRequisition({
           sample_type: type,
           warehouse,
-          npd_target_name: fgSkuName.trim(),
-          pcs: pcsNum,
-          weight_per_piece: wppNum,
-          quantity: qtyNum,
+          targets: targetsPayload(targets),
           company_name: companyName.trim(),
           customer_name: customerName.trim(),
           customer_contact: customerContact.trim() || undefined,
@@ -181,30 +171,8 @@ export function NpdSampleForm({ defaultType, heading }: {
               </select>
             </div>
 
-            {/* target NPD article */}
-            <div>
-              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Target NPD article name <span className="text-[var(--aws-error)]">*</span></label>
-              <input className="form-input" value={fgSkuName} onChange={(e) => setFgSkuName(e.target.value)} placeholder="name of the new product being requested / developed" />
-              <p className="mt-1 text-[11px] text-[var(--text-muted)]">Carried on the requisition; the NPD team uses it as the new BOM&apos;s FG name when they open it into development.</p>
-            </div>
-
-            {/* pcs / weight per piece / quantity (computed = pcs × weight) */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div>
-                <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Pcs <span className="text-[var(--aws-error)]">*</span></label>
-                <input className="form-input" type="number" min="0" step="1" value={pcs}
-                  onChange={(e) => setPcs(e.target.value)} onWheel={(e) => e.currentTarget.blur()} placeholder="e.g. 25" />
-              </div>
-              <div>
-                <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Weight per piece (kg) <span className="text-[var(--aws-error)]">*</span></label>
-                <input className="form-input" type="number" min="0" step="0.001" value={weightPerPiece}
-                  onChange={(e) => setWeightPerPiece(e.target.value)} onWheel={(e) => e.currentTarget.blur()} placeholder="e.g. 0.5" />
-              </div>
-              <div>
-                <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Quantity (kg)</label>
-                <input className="form-input bg-[var(--surface-subtle)] cursor-not-allowed" value={qtyNum > 0 ? qtyNum.toLocaleString("en-IN") : "—"} readOnly tabIndex={-1} />
-              </div>
-            </div>
+            {/* target articles — one or more products, each pcs × weight → qty */}
+            <TargetArticlesEditor rows={targets} onChange={setTargets} />
 
             {/* purpose / requestor / description (optional) */}
             <div className="rounded-md border border-[var(--aws-border)] p-3">
@@ -220,8 +188,8 @@ export function NpdSampleForm({ defaultType, heading }: {
                 </div>
                 {/* requestor */}
                 <div>
-                  <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Requestor</label>
-                  {isAdmin ? (
+                  <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Requestor {needsBhDropdown && <span className="text-[var(--aws-error)]">*</span>}</label>
+                  {needsBhDropdown ? (
                     <select className="form-input" value={effectiveRequestor}
                       onChange={(e) => { setRequestorTouched(true); setRequestorTeam(e.target.value); }}>
                       <option value="">Select a business head…</option>

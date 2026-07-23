@@ -80,14 +80,16 @@ export function sampleCaps(me: MeResponse | null): SampleCaps {
   const is = (...names: string[]) => isAdmin || names.some((n) => roles.includes(n));
   return {
     isAdmin,
-    canRequest: is("planner", "business_head", "npd_team"),
-    canEdit: is("business_head", "planner"),
+    // `sales` is the requesting side (raises on behalf of a BH) — same as business_head
+    // MINUS approve/convert (the BH still approves). See 081_sales_role.sql.
+    canRequest: is("planner", "business_head", "npd_team", "sales"),
+    canEdit: is("business_head", "planner", "sales"),
     canApprove: is("business_head"),
     canConvert: is("business_head"),
     canProduction: is("floor_manager"),
     canInventory: is("inventory_manager"),
     canNpd: is("npd_team"),
-    canSeeNpd: is("npd_team", "business_head", "inventory_manager"),
+    canSeeNpd: is("npd_team", "business_head", "inventory_manager", "sales"),
     canOutpass: is("npd_team"),
   };
 }

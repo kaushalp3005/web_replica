@@ -52,6 +52,9 @@ export default function DevJcGatePassPage() {
   // Optional ?dispatch=<id> — when present this outpass is for that single partial
   // out (its qty + sub-number), not the full finalized output.
   const [dispatchId, setDispatchId] = useState<number | null>(null);
+  // ?merge=1 → one combined outpass listing EVERY article (each its own line), instead of
+  // a single-item full/partial outpass.
+  const [mergeAll, setMergeAll] = useState(false);
 
   // Hydration gate (SSR true vs first client false) — mirror the other pages.
   const [mounted, setMounted] = useState(false);
@@ -59,8 +62,10 @@ export default function DevJcGatePassPage() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const v = new URLSearchParams(window.location.search).get("dispatch");
+    const sp = new URLSearchParams(window.location.search);
+    const v = sp.get("dispatch");
     if (v) setDispatchId(Number(v));
+    if (sp.get("merge") === "1") setMergeAll(true);
   }, []);
 
   // npd_team + admin only — BH/IM are module members but must not reach the
@@ -105,8 +110,25 @@ export default function DevJcGatePassPage() {
   const outQty = disp ? disp.qty : jc.output_qty;
   const outpassNo = disp ? `${id}-${disp.seq}` : String(id);
 
-  const itemDesc = jc.fg_sku_name || jc.title || "—";
-  const uom = jc.output_uom || jc.uom || "kg";
+  // Per-article dispatch (083): the outpass names THAT article's product + uom, not the
+  // card-level (article-#1 mirror) header.
+  const dispArticle = disp?.article_id != null
+    ? (jc.articles ?? []).find((a) => a.article_id === disp.article_id) ?? null
+    : null;
+  const itemDesc = dispArticle?.name || jc.fg_sku_name || jc.title || "—";
+  const uom = dispArticle?.output_uom || jc.output_uom || jc.uom || "kg";
+
+  // Line items on the challan/outpass:
+  //  • merge=1 → EVERY article with a finalized output, one line each (combined challan)
+  //  • ?dispatch=<id> → that single dispatched part; else the card's full finalized output.
+  const artItems = (jc.articles ?? [])
+    .filter((a) => a.article_id != null && Number(a.output_qty) > 0)
+    .map((a) => ({ desc: a.name, qty: Number(a.output_qty) || 0,
+                   uom: a.output_uom || jc.output_uom || jc.uom || "kg" }));
+  const items = mergeAll && artItems.length > 0
+    ? artItems
+    : [{ desc: itemDesc, qty: Number(outQty) || 0, uom: disp?.uom || uom }];   // 084: a part's own unit
+  const totalQty = items.reduce((s, it) => s + it.qty, 0);
   const date = ((disp?.dispatched_at ?? jc.closed_at ?? jc.dispatched_at) ?? "").slice(0, 10) || "—";
   const toName = jc.customer_name || jc.company_name || "—";
   const toAddr = jc.customer_ship_to_address || "";
@@ -148,7 +170,11 @@ export default function DevJcGatePassPage() {
   const COLS = 5; // S.No | Item Description | Qty | UOM | Net Wt (kg)
 
   const printCss = `
-    @media print { @page { size: A4; margin: 0; } body { margin: 0; padding: 0; print-color-adjust: exact; -webkit-print-color-adjust: exact; } * { print-color-adjust: exact !important; -webkit-print-color-adjust: exact !important; } .no-print { display: none !important; } }
+    @media print { @page { size: A4; margin: 0; } body { margin: 0; padding: 0; print-color-adjust: exact; -webkit-print-color-adjust: exact; } * { print-color-adjust: exact !important; -webkit-print-color-adjust: exact !important; } .no-print { display: none !important; }
+      /* When the item list runs past a page, move whole rows to the next page — never
+         split a row across the page break. thead (logo + FROM/TO) reprints per page. */
+      tr { break-inside: avoid; page-break-inside: avoid; }
+    }
     @media screen { body { background: #f5f5f5; } }
   `;
 
@@ -216,22 +242,24 @@ export default function DevJcGatePassPage() {
           </tr>
         </thead>
         <tbody>
-          <tr>
-            <td style={cell({ textAlign: "center" })}>1</td>
-            <td style={cell({ whiteSpace: "normal", wordBreak: "break-word" })}>{itemDesc}</td>
-            <td style={cell({ textAlign: "center", fontWeight: "bold" })}>{qtyStr(outQty)}</td>
-            <td style={cell({ textAlign: "center" })}>{uom}</td>
-            <td style={cell({ textAlign: "right" })}>{n(outQty)}</td>
-          </tr>
+          {items.map((it, idx) => (
+            <tr key={idx}>
+              <td style={cell({ textAlign: "center" })}>{idx + 1}</td>
+              <td style={cell({ whiteSpace: "normal", wordBreak: "break-word" })}>{it.desc}</td>
+              <td style={cell({ textAlign: "center", fontWeight: "bold" })}>{qtyStr(it.qty)}</td>
+              <td style={cell({ textAlign: "center" })}>{it.uom}</td>
+              <td style={cell({ textAlign: "right" })}>{n(it.qty)}</td>
+            </tr>
+          ))}
           <tr style={{ backgroundColor: "#f0ebe3" }}>
-            <td colSpan={2} style={cell({ fontWeight: "bold", textAlign: "right" })}>TOTAL (1 item):</td>
-            <td style={cell({ textAlign: "center", fontWeight: "bold" })}>{qtyStr(outQty)}</td>
+            <td colSpan={2} style={cell({ fontWeight: "bold", textAlign: "right" })}>TOTAL ({items.length} item{items.length > 1 ? "s" : ""}):</td>
+            <td style={cell({ textAlign: "center", fontWeight: "bold" })}>{qtyStr(totalQty)}</td>
             <td style={cell()}>&nbsp;</td>
-            <td style={cell({ textAlign: "right", fontWeight: "bold" })}>{n(outQty)}</td>
+            <td style={cell({ textAlign: "right", fontWeight: "bold" })}>{n(totalQty)}</td>
           </tr>
           <tr style={{ backgroundColor: "#fdf8f4" }}>
             <td colSpan={3} style={cell({ fontWeight: "bold", textAlign: "right", whiteSpace: "normal" })}>TOTAL FG (kg):</td>
-            <td colSpan={2} style={cell({ textAlign: "right", fontWeight: "bold", color: BURGUNDY, fontSize: "12px" })}>{n(outQty)}</td>
+            <td colSpan={2} style={cell({ textAlign: "right", fontWeight: "bold", color: BURGUNDY, fontSize: "12px" })}>{n(totalQty)}</td>
           </tr>
           <tr><td colSpan={COLS} style={{ padding: "10px", border: "1px solid #000" }}><strong>Reason:</strong> {reason}</td></tr>
           <tr>
@@ -288,16 +316,18 @@ export default function DevJcGatePassPage() {
             <td style={{ ...td, fontWeight: "bold", textAlign: "center" }}>UOM</td>
             <td style={{ ...td, fontWeight: "bold", textAlign: "right" }}>Net Wt (Kg)</td>
           </tr>
-          <tr>
-            <td style={{ ...td, textAlign: "center" }}>1</td>
-            <td style={td}>{itemDesc}</td>
-            <td style={{ ...td, textAlign: "center", fontWeight: "bold" }}>{qtyStr(outQty)}</td>
-            <td style={{ ...td, textAlign: "center" }}>{uom}</td>
-            <td style={{ ...td, textAlign: "right", fontWeight: "bold" }}>{n(outQty, 2)}</td>
-          </tr>
+          {items.map((it, idx) => (
+            <tr key={idx}>
+              <td style={{ ...td, textAlign: "center" }}>{idx + 1}</td>
+              <td style={td}>{it.desc}</td>
+              <td style={{ ...td, textAlign: "center", fontWeight: "bold" }}>{qtyStr(it.qty)}</td>
+              <td style={{ ...td, textAlign: "center" }}>{it.uom}</td>
+              <td style={{ ...td, textAlign: "right", fontWeight: "bold" }}>{n(it.qty, 2)}</td>
+            </tr>
+          ))}
           <tr style={{ backgroundColor: "#fdf8f4" }}>
             <td colSpan={4} style={{ ...td, fontWeight: "bold", textAlign: "right" }}>Total FG (kg):</td>
-            <td style={{ ...td, textAlign: "right", fontWeight: "bold", color: BURGUNDY }}>{n(outQty, 2)}</td>
+            <td style={{ ...td, textAlign: "right", fontWeight: "bold", color: BURGUNDY }}>{n(totalQty, 2)}</td>
           </tr>
           {/* Digital approvals captured on the promote gate */}
           <tr style={{ backgroundColor: "#f8f9fa" }}>

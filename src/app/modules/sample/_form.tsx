@@ -155,6 +155,77 @@ export function BillingFields({ value, onChange }: {
   );
 }
 
+// ── NPD target articles — a repeatable list of requested products ───────────
+// Each target is a new product with its own Pcs × Weight/piece → Quantity (kg).
+// Shared by both NPD requisition forms (sample/npd/new + the NpdSampleForm).
+export interface TargetRow { name: string; pcs: string; weightPerPiece: string; }
+export const EMPTY_TARGET: TargetRow = { name: "", pcs: "", weightPerPiece: "" };
+
+export function targetQty(t: TargetRow): number {
+  const p = Number(t.pcs), w = Number(t.weightPerPiece);
+  return t.pcs.trim() !== "" && t.weightPerPiece.trim() !== "" && Number.isFinite(p) && Number.isFinite(w)
+    ? Number((p * w).toFixed(3)) : 0;
+}
+export const targetsTotalQty = (rows: TargetRow[]) => rows.reduce((s, t) => s + targetQty(t), 0);
+export const targetsValid = (rows: TargetRow[]) =>
+  rows.length > 0 && rows.every((t) => t.name.trim() !== "" && Number(t.pcs) > 0 && Number(t.weightPerPiece) > 0);
+// Serialise to the API's targets[] shape (name + pcs + weight_per_piece; qty derived server-side).
+export const targetsPayload = (rows: TargetRow[]) =>
+  rows.map((t) => ({ name: t.name.trim(), pcs: Number(t.pcs), weight_per_piece: Number(t.weightPerPiece) }));
+
+export function TargetArticlesEditor({ rows, onChange }: {
+  rows: TargetRow[]; onChange: (rows: TargetRow[]) => void;
+}) {
+  const patch = (i: number, p: Partial<TargetRow>) => onChange(rows.map((t, idx) => (idx === i ? { ...t, ...p } : t)));
+  const add = () => onChange([...rows, { ...EMPTY_TARGET }]);
+  const remove = (i: number) => onChange(rows.length > 1 ? rows.filter((_, idx) => idx !== i) : rows);
+  const total = targetsTotalQty(rows);
+  return (
+    <div>
+      <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Target articles <span className="text-[var(--aws-error)]">*</span></label>
+      <div className="space-y-2">
+        {rows.map((t, i) => {
+          const q = targetQty(t);
+          return (
+            <div key={i} className="border border-[var(--aws-border)] rounded-md p-3">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-[11px] w-5 h-5 rounded-full bg-[var(--surface-divider)] text-[var(--text-secondary)] flex items-center justify-center shrink-0">{i + 1}</span>
+                <input className="form-input flex-1" value={t.name} placeholder="name of the new product being requested / developed"
+                  onChange={(e) => patch(i, { name: e.target.value })} />
+                {rows.length > 1 && (
+                  <button type="button" onClick={() => remove(i)} aria-label="Remove target article" title="Remove"
+                    className="w-7 h-7 flex items-center justify-center rounded-[2px] text-[var(--aws-error)] hover:bg-[#fdf3f1] shrink-0">✕</button>
+                )}
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                <label className="block text-[11px] font-medium text-[var(--text-secondary)]">Pcs <span className="text-[var(--aws-error)]">*</span>
+                  <input className="form-input mt-0.5" type="number" min="0" step="1" value={t.pcs}
+                    onChange={(e) => patch(i, { pcs: e.target.value })} onWheel={(e) => e.currentTarget.blur()} placeholder="e.g. 25" />
+                </label>
+                <label className="block text-[11px] font-medium text-[var(--text-secondary)]">Weight/pc (kg) <span className="text-[var(--aws-error)]">*</span>
+                  <input className="form-input mt-0.5" type="number" min="0" step="0.001" value={t.weightPerPiece}
+                    onChange={(e) => patch(i, { weightPerPiece: e.target.value })} onWheel={(e) => e.currentTarget.blur()} placeholder="e.g. 0.5" />
+                </label>
+                <label className="block text-[11px] font-medium text-[var(--text-secondary)]">Quantity (kg)
+                  <input className="form-input mt-0.5 bg-[var(--surface-subtle)] cursor-not-allowed" value={q > 0 ? q.toLocaleString("en-IN") : "—"} readOnly tabIndex={-1} />
+                </label>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-2 flex items-center justify-between">
+        <button type="button" onClick={add}
+          className="h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[12px] hover:bg-[var(--surface-subtle)]">+ Add target article</button>
+        {rows.length > 1 && (
+          <span className="text-[12px] text-[var(--text-secondary)]">Total: <span className="font-medium text-[var(--text-primary)]">{total.toLocaleString("en-IN")} kg</span></span>
+        )}
+      </div>
+      <p className="mt-1 text-[11px] text-[var(--text-muted)]">Each target is a new product; the NPD team develops them together on one job card.</p>
+    </div>
+  );
+}
+
 // Article picker — two ways to find an article, mirroring the Base-BOM picker:
 //   • Search — one global typeahead over the SKU master by name (debounced).
 //   • Browse — the four dependent dropdowns (material_type → item_category →

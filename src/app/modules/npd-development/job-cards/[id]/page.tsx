@@ -14,9 +14,14 @@ import type { MeResponse } from "@/lib/auth";
 import {
   getDevJobCard, replaceDevLines, startDevJobCard, closeDevJobCard, cancelDevJobCard,
   addDevPhase, replacePhaseLines, startDevPhase, completeDevPhase, deleteDevPhase, promoteApproval,
-  promoteRejectByEmail, dispatchDevJobCard,
+  promoteRejectByEmail, dispatchDevJobCard, replaceDevArticles,
   type DevJobCard, type DevLine, type DevPhase, type DevPhaseCompleteBody, type PromoteGate,
+  type DevArticle, type DevJobCardCloseBody,
 } from "@/lib/npd-dev";
+import {
+  ArticleEditor, articleToDraft, draftToInput, emptyArticle, articlesValid,
+  type ArticleDraft, type DraftLine,
+} from "../../_article-editor";
 import { DevJcStatusPill } from "../../../sample/_shared";
 import { ArticlePicker, UomSelect } from "../../../sample/_form";
 
@@ -63,6 +68,10 @@ export default function DevJobCardDetailPage() {
   // Set to true after a successful "Record output & request promote" to show the
   // pending-gate message until the next full reload clears it.
   const [promoteRequested, setPromoteRequested] = useState(false);
+
+  // Per-article articles (082) editing on the detail page.
+  const [editingArticles, setEditingArticles] = useState(false);
+  const [articleDrafts, setArticleDrafts] = useState<ArticleDraft[]>([]);
 
   // Promote-gate REJECT reason dialog. `email` is set when opened from the email
   // Reject link (?promote_reject=<gate>&email=<addr>) — the submit then goes through the
@@ -164,6 +173,9 @@ export default function DevJobCardDetailPage() {
   const isDraft = jc?.status === "DRAFT";
   // Base recipe is editable while DRAFT or IN_DEVELOPMENT (same as phase recipes).
   const editable = (isDraft || jc?.status === "IN_DEVELOPMENT") && caps.canNpd;
+  // Per-article cards (082) carry the recipe on each article, not the card base recipe.
+  // article_id != null distinguishes a real article row from the legacy header synthesis.
+  const hasArticles = (jc?.articles ?? []).some((a) => a.article_id != null);
 
   // Live accounting math for the close form (material balance + auto yield).
   const qOut = Number(outQty) || 0;
@@ -206,6 +218,26 @@ export default function DevJobCardDetailPage() {
     }));
     run(() => replaceDevLines(id, wire));
   }
+  // Per-article article editing (082): seed drafts from the loaded articles, then
+  // replace the whole set on save (backend deletes + re-inserts + re-mirrors the header).
+  function startEditArticles() {
+    setArticleDrafts((jc?.articles ?? []).map(articleToDraft));
+    setEditingArticles(true);
+  }
+  // Keyed by the stable uid, not the array index: a base-BOM fetch inside ArticleEditor
+  // awaits, and if an earlier article is removed meanwhile the captured index goes stale
+  // (writes land on the wrong article or nowhere). uid is stable across splices.
+  function patchArticleDraft(uid: string, patch: Partial<ArticleDraft>) {
+    setArticleDrafts((prev) => prev.map((a) => (a.uid === uid ? { ...a, ...patch } : a)));
+  }
+  function addArticleDraft() { setArticleDrafts((prev) => [...prev, emptyArticle()]); }
+  function removeArticleDraft(uid: string) { setArticleDrafts((prev) => (prev.length > 1 ? prev.filter((a) => a.uid !== uid) : prev)); }
+  function updateArticleDraftLines(uid: string, fn: (lines: DraftLine[]) => DraftLine[]) {
+    setArticleDrafts((prev) => prev.map((a) => (a.uid === uid ? { ...a, lines: fn(a.lines) } : a)));
+  }
+  function saveArticles() {
+    run(async () => { await replaceDevArticles(id, articleDrafts.map(draftToInput)); setEditingArticles(false); });
+  }
   function closeCard() {
     run(async () => {
       await closeDevJobCard(id, {
@@ -221,6 +253,20 @@ export default function DevJobCardDetailPage() {
       setPromoteRequested(true);
     });
   }
+  // Per-article promote (082/083): the output entered per article opens the same
+  // dual-approval gate; on clear each article fans out to its own BOM + FG batch.
+  function submitArticlePromote(body: DevJobCardCloseBody) {
+    run(async () => { await closeDevJobCard(id, body); setPromoteRequested(true); });
+  }
+  // Per-article dispatch (083/084): issue one article's finalized output in parts, in a
+  // custom unit + quantity.
+  function doDispatchArticle(articleId: number, qty: string, uom: string, recipient: string, reset: () => void) {
+    const q = qty ? Number(qty) : undefined;
+    run(async () => {
+      await dispatchDevJobCard(id, { article_id: articleId, recipient: recipient || undefined, qty: q, uom: uom || undefined });
+      reset();
+    });
+  }
   function cancelCard() {
     const reason = window.prompt("Reason for cancelling this development job card?");
     if (reason == null) return; // user dismissed
@@ -231,6 +277,10 @@ export default function DevJobCardDetailPage() {
     // A dispatchId prints that single partial out; omitted → the full finalized output.
     const q = dispatchId != null ? `?dispatch=${dispatchId}` : "";
     window.open(`/modules/npd-development/job-cards/${id}/gate-pass${q}`, "_blank", "noopener");
+  }
+  // One combined outpass listing EVERY article (each its own line) — merge=1.
+  function openMergedOutpass() {
+    window.open(`/modules/npd-development/job-cards/${id}/gate-pass?merge=1`, "_blank", "noopener");
   }
   // Partial out: issue part (or all) of the finalized FG sample. Blank qty → the
   // whole remaining balance. Reload refreshes dispatches[] + remaining_qty.
@@ -341,7 +391,7 @@ export default function DevJobCardDetailPage() {
             )}
 
             {/* Trial phases — opens once development has started (IN_DEVELOPMENT) */}
-            {(jc.status === "IN_DEVELOPMENT" || (jc.phases?.length ?? 0) > 0) && (
+            {!hasArticles && (jc.status === "IN_DEVELOPMENT" || (jc.phases?.length ?? 0) > 0) && (
               <Card title="Trial phases">
                 <p className="text-[12px] text-[var(--text-muted)] mb-3">Each phase is a trial iteration — its own recipe (cloned from the previous phase), run over days, with its own output &amp; accounting.</p>
                 {(jc.phases?.length ?? 0) === 0 ? (
@@ -441,7 +491,62 @@ export default function DevJobCardDetailPage() {
               </Card>
             )}
 
-            {/* Base recipe — the starting point each first phase clones */}
+            {/* Articles (082) — per-article recipe. Read-only here in Phase A. */}
+            {hasArticles && (
+              <Card title="Articles">
+                <div className="flex items-start justify-between gap-2 mb-3">
+                  <p className="text-[12px] text-[var(--text-muted)]">Each article is developed with its own base BOM &amp; trial recipe, and on promote each is minted into its own live BOM.</p>
+                  {editable && !editingArticles && (
+                    <button onClick={startEditArticles}
+                      className="shrink-0 h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[12px] hover:bg-[var(--surface-subtle)]">Edit articles</button>
+                  )}
+                </div>
+                {editingArticles ? (
+                  <>
+                    <div className="space-y-4">
+                      {articleDrafts.map((a, i) => (
+                        <ArticleEditor key={a.uid} index={i} article={a} uom={jc.uom || "kg"}
+                          onChange={(patch) => patchArticleDraft(a.uid, patch)}
+                          onLines={(fn) => updateArticleDraftLines(a.uid, fn)}
+                          onRemove={() => removeArticleDraft(a.uid)} canRemove={articleDrafts.length > 1} />
+                      ))}
+                    </div>
+                    <div className="mt-3 flex items-center gap-2">
+                      <button type="button" onClick={addArticleDraft}
+                        className="h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[12px] hover:bg-[var(--surface-subtle)]">+ Add article</button>
+                      <div className="flex-1" />
+                      <button disabled={busy} onClick={() => setEditingArticles(false)}
+                        className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] disabled:opacity-50 hover:bg-[var(--surface-subtle)]">Cancel</button>
+                      <button disabled={busy || !articlesValid(articleDrafts)} onClick={saveArticles}
+                        className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Save articles</button>
+                    </div>
+                  </>
+                ) : (
+                  <ul className="space-y-3">
+                    {jc.articles!.map((a, i) => (
+                      <li key={a.article_id ?? i} className="border border-[var(--aws-border)] rounded-md p-3">
+                        <div className="flex flex-wrap items-center gap-2 mb-2">
+                          <span className="text-[11px] w-6 h-6 rounded-full bg-[var(--surface-divider)] text-[var(--text-secondary)] flex items-center justify-center shrink-0">{i + 1}</span>
+                          <span className="text-[13px] font-medium text-[var(--text-primary)]">{a.name}</span>
+                          {a.quantity != null && <span className="text-[12px] text-[var(--text-muted)]">{num(a.quantity)} {a.uom || jc.uom || "kg"}</span>}
+                          {a.base_bom_id != null && <span className="text-[12px] text-[var(--text-muted)]">Base BOM {a.base_bom_name ? `${a.base_bom_name} ` : ""}#{a.base_bom_id}</span>}
+                          {a.promoted_bom_id != null && <span className="text-[12px] text-[var(--text-success)]">→ live BOM #{a.promoted_bom_id}</span>}
+                          {/* Output summary once promoted — visible to all viewers (BH/IM see
+                              it here since the per-article dispatch panels are npd/outpass-only). */}
+                          {a.output_qty != null && <span className="text-[12px] text-[var(--text-secondary)]">FG {num(a.output_qty)} {a.output_uom || jc.uom || "kg"}{a.yield_pct != null ? ` · ${num(a.yield_pct)}% yield` : ""}</span>}
+                        </div>
+                        {(a.lines?.length ?? 0) === 0
+                          ? <Empty>No recipe lines.</Empty>
+                          : <RecipeLines lines={a.lines!} />}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </Card>
+            )}
+
+            {/* Base recipe — the starting point each first phase clones (single-product cards only) */}
+            {!hasArticles && (
             <Card title="Base recipe">
               <p className="text-[12px] text-[var(--text-muted)] mb-3">The starting recipe — the first trial phase clones it. Each phase&apos;s own recipe is edited under Trial phases above.</p>
               {editable && (
@@ -472,11 +577,12 @@ export default function DevJobCardDetailPage() {
                 </div>
               )}
             </Card>
+            )}
 
             {/* Request promote (IN_DEVELOPMENT) — only once EVERY trial phase is completed.
                 Pick the final trial; its recipe is promoted and its recorded output
                 is inherited (no second accounting entry). */}
-            {caps.canNpd && jc.status === "IN_DEVELOPMENT" && allPhasesClosed && !jc.promote_gate && (
+            {!hasArticles && caps.canNpd && jc.status === "IN_DEVELOPMENT" && allPhasesClosed && !jc.promote_gate && (
               <Card title="Request promote">
                 <p className="text-[12px] text-[var(--text-muted)] mb-3">Pick the final trial. Its recipe will be promoted into a live BOM once the inventory manager and original requestor both accept the promote request.</p>
                 {completedPhases.length === 0 ? (
@@ -513,8 +619,18 @@ export default function DevJobCardDetailPage() {
               </Card>
             )}
 
-            {/* Record output & request promote — legacy no-phase card (manual accounting). */}
-            {caps.canNpd && jc.status === "IN_DEVELOPMENT" && !hasPhases && !jc.promote_gate && (
+            {/* Per-article card (082): each article records its OWN output → its own FG
+                batch → its own dispatchable balance. One request-promote for the whole card
+                fans out to N BOMs once both gates accept. */}
+            {hasArticles && caps.canNpd && jc.status === "IN_DEVELOPMENT" && !jc.promote_gate && (
+              // key on the article-id set so editing articles (which re-mints ids) re-seeds
+              // the output rows — else entered outputs would map to stale ids and be dropped.
+              <PerArticlePromoteCard key={(jc.articles ?? []).map((a) => a.article_id).join(",")}
+                jc={jc} busy={busy} requested={promoteRequested} onSubmit={submitArticlePromote} />
+            )}
+
+            {/* Record output & request promote — legacy no-phase single-product card. */}
+            {!hasArticles && caps.canNpd && jc.status === "IN_DEVELOPMENT" && !hasPhases && !jc.promote_gate && (
               <Card title="Record output & request promote">
                 <p className="text-[12px] text-[var(--text-muted)] mb-3">Requesting promote locks the output and opens a dual-approval gate — both inventory manager and the original requestor must accept before the recipe is promoted to a live BOM.</p>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -581,8 +697,10 @@ export default function DevJobCardDetailPage() {
               />
             )}
 
-            {/* Output (CLOSED) */}
-            {jc.status === "CLOSED" && (
+            {/* Output (CLOSED) — card-level (single-product). A per-article card shows its
+                output + dispatch per article below instead (the card total would hide which
+                article produced/dispatched what). */}
+            {jc.status === "CLOSED" && !hasArticles && (
               <Card title="Output">
                 <dl className="grid grid-cols-2 sm:grid-cols-4 gap-y-2 gap-x-4 text-[13px]">
                   <Field label="Output qty" value={jc.output_qty != null ? `${num(jc.output_qty)} ${jc.output_uom ?? ""}`.trim() : "—"} />
@@ -623,11 +741,32 @@ export default function DevJobCardDetailPage() {
 
             {/* Partial out — issue the finalized FG sample in parts, each part its
                 own 265 goods issue + its own outpass. npd_team + admin only. */}
-            {jc.status === "CLOSED" && caps.canOutpass && (
+            {jc.status === "CLOSED" && caps.canOutpass && !hasArticles && (
               <DispatchPanel jc={jc} busy={busy}
                 qty={dispQty} setQty={setDispQty}
                 recipient={dispRecipient} setRecipient={setDispRecipient}
                 onDispatch={doDispatch} onOutpass={openGatePass} />
+            )}
+
+            {/* Per-article output & dispatch (083) — each article dispatches its OWN
+                finalized output from its own FG batch, each part its own outpass. */}
+            {jc.status === "CLOSED" && caps.canOutpass && hasArticles && (
+              <>
+                {/* One combined outpass for the whole card — every article on its own line. */}
+                {(jc.articles ?? []).some((a) => a.article_id != null && Number(a.output_qty) > 0) && (
+                  <div className="flex justify-end">
+                    <button onClick={openMergedOutpass}
+                      className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:bg-[var(--surface-subtle)] inline-flex items-center gap-1.5">
+                      <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
+                      Combined outpass — all articles
+                    </button>
+                  </div>
+                )}
+                {(jc.articles ?? []).filter((a) => a.article_id != null).map((a) => (
+                  <PerArticleDispatchPanel key={a.article_id} jc={jc} article={a} busy={busy}
+                    onDispatch={doDispatchArticle} onOutpass={openGatePass} />
+                ))}
+              </>
             )}
           </div>
         )}
@@ -981,6 +1120,167 @@ function Empty({ children }: { children: React.ReactNode }) {
   return <p className="text-[13px] text-[var(--text-muted)]">{children}</p>;
 }
 
+// ── Per-article promote (083): each article records its own output. On submit the
+// whole card opens ONE dual-approval gate; on clear each article fans out to its own
+// live BOM + its own FG batch (its dispatchable balance). ──────────────────────────
+interface ArtOutRow { article_id: number; name: string; output_qty: string; rm: string; wastage: string; ega: string; }
+function PerArticlePromoteCard({ jc, busy, requested, onSubmit }: {
+  jc: DevJobCard; busy: boolean; requested: boolean; onSubmit: (body: DevJobCardCloseBody) => void;
+}) {
+  const uom = jc.uom || "kg";
+  const arts = (jc.articles ?? []).filter((a) => a.article_id != null);
+  const [rows, setRows] = useState<ArtOutRow[]>(() =>
+    arts.map((a) => ({ article_id: a.article_id as number, name: a.name, output_qty: "", rm: "", wastage: "", ega: "" })));
+  const [notes, setNotes] = useState("");
+  const patch = (i: number, p: Partial<ArtOutRow>) => setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, ...p } : r)));
+  const submit = () => onSubmit({
+    output_notes: notes || undefined,
+    articles: rows.map((r) => ({
+      article_id: r.article_id,
+      output_qty: r.output_qty ? Number(r.output_qty) : undefined,
+      output_uom: uom,
+      rm_consumed_qty: r.rm ? Number(r.rm) : undefined,
+      wastage_qty: r.wastage ? Number(r.wastage) : undefined,
+      extra_give_away_qty: r.ega ? Number(r.ega) : undefined,
+    })),
+  });
+  return (
+    <Card title="Record output & request promote">
+      <p className="text-[12px] text-[var(--text-muted)] mb-3">Enter each article&apos;s finished output. Requesting promote opens one dual-approval gate — once the inventory manager and the original requestor both accept, each article is promoted into its own live BOM and its output is received as its own dispatchable FG sample.</p>
+      <div className="space-y-3">
+        {rows.map((r, i) => {
+          const out = Number(r.output_qty) || 0, rm = Number(r.rm) || 0;
+          const yld = rm > 0 ? (out / rm) * 100 : null;
+          return (
+            <div key={r.article_id} className="border border-[var(--aws-border)] rounded-md p-3">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-[11px] w-6 h-6 rounded-full bg-[var(--aws-orange)] text-white font-bold flex items-center justify-center shrink-0">{i + 1}</span>
+                <span className="text-[13px] font-medium text-[var(--text-primary)]">{r.name}</span>
+                {yld != null && <span className="text-[12px] text-[var(--text-muted)]">yield {yld.toFixed(2)}%</span>}
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <label className="text-[11px] text-[var(--text-secondary)]">FG output ({uom})
+                  <input className="form-input mt-0.5" type="number" min="0" step="0.001" value={r.output_qty}
+                    onChange={(e) => patch(i, { output_qty: e.target.value })} onWheel={(e) => e.currentTarget.blur()} />
+                </label>
+                <label className="text-[11px] text-[var(--text-secondary)]">RM consumed ({uom})
+                  <input className="form-input mt-0.5" type="number" min="0" step="0.001" value={r.rm}
+                    onChange={(e) => patch(i, { rm: e.target.value })} onWheel={(e) => e.currentTarget.blur()} />
+                </label>
+                <label className="text-[11px] text-[var(--text-secondary)]">Wastage ({uom})
+                  <input className="form-input mt-0.5" type="number" min="0" step="0.001" value={r.wastage}
+                    onChange={(e) => patch(i, { wastage: e.target.value })} onWheel={(e) => e.currentTarget.blur()} />
+                </label>
+                <label className="text-[11px] text-[var(--text-secondary)]">Extra give away ({uom})
+                  <input className="form-input mt-0.5" type="number" min="0" step="0.001" value={r.ega}
+                    onChange={(e) => patch(i, { ega: e.target.value })} onWheel={(e) => e.currentTarget.blur()} />
+                </label>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <label className="block text-[11px] text-[var(--text-secondary)] mt-3">Notes (optional)
+        <input className="form-input mt-0.5" value={notes} onChange={(e) => setNotes(e.target.value)} />
+      </label>
+      {requested ? (
+        <div className="mt-3 rounded-md border border-[#b6dbb1] bg-[#eaf6ed] px-3 py-2 text-[13px] text-[#1d8102]">
+          Promote requested — awaiting inventory-manager + requestor acceptance.
+        </div>
+      ) : (
+        <div className="mt-3">
+          {/* Require at least one article's output — promote fans out to N irreversible BOMs,
+              so guard against a stray empty submit (an all-blank promote is undispatchable). */}
+          <button disabled={busy || !rows.some((r) => Number(r.output_qty) > 0)} onClick={submit}
+            className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Record output & request promote</button>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ── Per-article dispatch (083): one article's finalized output issued out in parts,
+// each bounded by ITS own output balance, each part printing its own outpass. ───────
+function PerArticleDispatchPanel({ jc, article, busy, onDispatch, onOutpass }: {
+  jc: DevJobCard; article: DevArticle; busy: boolean;
+  onDispatch: (articleId: number, qty: string, uom: string, recipient: string, reset: () => void) => void;
+  onOutpass: (dispatchId?: number) => void;
+}) {
+  const uom = article.output_uom || jc.uom || "kg";   // the balance unit (Output/Remaining)
+  const out = Number(article.output_qty) || 0;
+  const dispatches = article.dispatches ?? [];
+  const total = article.dispatched_total != null ? Number(article.dispatched_total)
+    : dispatches.reduce((s, d) => s + (Number(d.qty) || 0), 0);
+  const remaining = article.remaining_qty != null ? Number(article.remaining_qty) : out - total;
+  const [qty, setQty] = useState("");
+  const [dispUom, setDispUom] = useState(uom);   // custom unit for THIS part (084); default = balance unit
+  const [recipient, setRecipient] = useState("");
+  const qn = qty === "" ? NaN : Number(qty);
+  const invalid = qty !== "" && (!Number.isFinite(qn) || qn <= 0 || qn > remaining + 1e-6);
+  const canDispatch = !busy && remaining > 1e-6 && !invalid;
+  const f = (v: number) => Number(v.toFixed(3)).toLocaleString("en-IN");
+  return (
+    <Card title={`Dispatch / outpass — ${article.name}`}>
+      <dl className="grid grid-cols-3 gap-x-4 gap-y-1 text-[13px] mb-3">
+        <Field label={`Output (${uom})`} value={f(out)} />
+        <Field label={`Dispatched (${uom})`} value={f(total)} />
+        <Field label={`Remaining (${uom})`} value={f(remaining)} />
+      </dl>
+      {out <= 1e-6 ? (
+        <div className="mb-3 rounded-md border border-[var(--aws-border)] bg-[var(--surface-subtle)] px-3 py-2 text-[13px] text-[var(--text-secondary)]">
+          No finalized output to dispatch for this article.
+        </div>
+      ) : remaining > 1e-6 ? (
+        <div className="flex flex-wrap items-end gap-2 mb-1">
+          <label className="text-[11px] text-[var(--text-secondary)]">Qty
+            <input className="form-input mt-0.5 !w-24" type="number" min="0" step="0.001" max={remaining}
+              placeholder={`${f(remaining)} (all)`} value={qty} onChange={(e) => setQty(e.target.value)} onWheel={(e) => e.currentTarget.blur()} />
+          </label>
+          <label className="text-[11px] text-[var(--text-secondary)]">Unit
+            <UomSelect className="mt-0.5 !w-24" value={dispUom} onChange={setDispUom} />
+          </label>
+          <label className="text-[11px] text-[var(--text-secondary)] flex-1 min-w-[140px]">Recipient / driver
+            <input className="form-input mt-0.5" value={recipient} placeholder="Name…" onChange={(e) => setRecipient(e.target.value)} />
+          </label>
+          <button disabled={!canDispatch} onClick={() => onDispatch(article.article_id as number, qty, dispUom, recipient, () => { setQty(""); setDispUom(uom); setRecipient(""); })}
+            className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">
+            Dispatch part
+          </button>
+        </div>
+      ) : (
+        <div className="mb-3 rounded-md border border-[#b6dbb1] bg-[#eaf6ed] px-3 py-2 text-[13px] text-[#1d8102]">
+          Fully dispatched — this article&apos;s entire finalized output has been issued out.
+        </div>
+      )}
+      {invalid && (
+        <p className="text-[12px] text-[var(--aws-error)] mb-3">Enter a quantity between 0 and the remaining {f(remaining)} {uom}, or leave blank to send the rest.</p>
+      )}
+      <div className="mt-3">
+        {dispatches.length === 0 ? (
+          <Empty>No parts dispatched yet.</Empty>
+        ) : (
+          <ul className="border border-[var(--aws-border)] rounded-md divide-y divide-[var(--surface-divider)]">
+            {dispatches.map((d) => (
+              <li key={d.dispatch_id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-[13px]">
+                <span className="text-[11px] w-6 h-6 rounded-full bg-[var(--surface-divider)] text-[var(--text-secondary)] flex items-center justify-center shrink-0">{d.seq}</span>
+                <span className="font-medium text-[var(--text-primary)] tabular-nums">{f(Number(d.qty) || 0)} {d.uom || uom}</span>
+                <span className="text-[var(--text-secondary)]">{d.recipient || "—"}</span>
+                <span className="text-[var(--text-muted)] text-[12px]">{(d.dispatched_at ?? "").slice(0, 10)}</span>
+                {d.mat_doc_id && <span className="text-[var(--text-muted)] text-[12px]">GI {d.mat_doc_id}</span>}
+                <div className="flex-1" />
+                <button onClick={() => onOutpass(d.dispatch_id)}
+                  className="h-7 px-2.5 rounded-[2px] text-[12px] font-medium border border-[var(--aws-border-strong)] bg-white hover:bg-[var(--surface-subtle)]">
+                  Outpass #{d.dev_jc_id}-{d.seq}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 // Partial-out panel (CLOSED card): issue the finalized FG sample in parts. Shows
 // output / dispatched / remaining, a qty+recipient form bounded by the remaining
 // balance, and the ledger of parts already sent — each with its own outpass.
@@ -1045,7 +1345,7 @@ function DispatchPanel({ jc, busy, qty, setQty, recipient, setRecipient, onDispa
             {dispatches.map((d) => (
               <li key={d.dispatch_id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-[13px]">
                 <span className="text-[11px] w-6 h-6 rounded-full bg-[var(--surface-divider)] text-[var(--text-secondary)] flex items-center justify-center shrink-0">{d.seq}</span>
-                <span className="font-medium text-[var(--text-primary)] tabular-nums">{f(Number(d.qty) || 0)} {uom}</span>
+                <span className="font-medium text-[var(--text-primary)] tabular-nums">{f(Number(d.qty) || 0)} {d.uom || uom}</span>
                 <span className="text-[var(--text-secondary)]">{d.recipient || "—"}</span>
                 <span className="text-[var(--text-muted)] text-[12px]">{(d.dispatched_at ?? "").slice(0, 10)}</span>
                 {d.mat_doc_id && <span className="text-[var(--text-muted)] text-[12px]">GI {d.mat_doc_id}</span>}

@@ -191,7 +191,7 @@ export const MODULES: ModuleItem[] = [
     stat: "Requests · Review · Dev job cards",
     route: "npd-development",
     implemented: true,
-    allowedRoles: ["npd_team", "business_head", "inventory_manager"],
+    allowedRoles: ["npd_team", "business_head", "inventory_manager", "sales"],
     Icon: NpdDevIcon,
   },
   {
