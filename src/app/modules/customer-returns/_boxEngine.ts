@@ -81,15 +81,28 @@ export function addArticleBox(boxes: CRBoxForm[], article: string, uom: string |
   return [...boxes, newBox(article, next, uom)];
 }
 
-// Drop one box and renumber the article's remaining boxes 1..N (keeps order).
+// A box is "committed" once it has a QR box_id (printed/saved). Its box_number is
+// its DB identity (bulk_save matches rows by article_description + box_number), so
+// it must never be removed or renumbered by the box-count controls.
+const isCommitted = (b: CRBoxForm): boolean => b.is_printed || !!b.box_id;
+
+// Drop one box. Committed (printed) boxes are frozen in the DB — removing one is a
+// no-op. Remaining boxes renumber 1..N only while NONE is committed (keeps the
+// create flow contiguous); once any box is printed, all box_numbers are pinned.
 export function removeArticleBox(boxes: CRBoxForm[], article: string, boxNumber: number): CRBoxForm[] {
+  const target = boxes.find((b) => b.article_description === article && b.box_number === boxNumber);
+  if (!target || isCommitted(target)) return boxes;
   const kept = boxes.filter((b) => !(b.article_description === article && b.box_number === boxNumber));
+  if (boxesForArticle(kept, article).some(isCommitted)) return kept;
   let i = 0;
   return kept.map((b) => (b.article_description === article ? { ...b, box_number: ++i } : b));
 }
 
-// Set the article's box count to `desired`: append blanks or drop from the end,
-// then renumber 1..desired. Non-article boxes are untouched and keep their order.
+// Set the article's box count to `desired`. Growing appends new boxes above the
+// current high-water box_number (never colliding with a committed one). Shrinking
+// drops only UNPRINTED boxes, highest number first — committed boxes are the floor
+// (qty can't go below the printed count, even at 0) and keep their identities.
+// Renumbering to 1..N happens only when the article has no committed box.
 export function setArticleBoxCount(
   boxes: CRBoxForm[],
   article: string,
@@ -98,20 +111,26 @@ export function setArticleBoxCount(
 ): CRBoxForm[] {
   if (desired < 0 || isNaN(desired)) return boxes;
   if (desired > MAX_BOXES_PER_ARTICLE) desired = MAX_BOXES_PER_ARTICLE;
-  const current = boxesForArticle(boxes, article).length;
+  const mine = boxesForArticle(boxes, article);
+  const current = mine.length;
   if (desired === current) return boxes;
 
   if (desired > current) {
+    const maxNum = mine.reduce((m, b) => Math.max(m, b.box_number), 0);
     const added: CRBoxForm[] = [];
-    for (let i = current; i < desired; i++) added.push(newBox(article, i + 1, uom));
+    for (let i = 0; i < desired - current; i++) added.push(newBox(article, maxNum + 1 + i, uom));
     return [...boxes, ...added];
   }
-  // desired < current: remove from the end (highest indices) then renumber.
+  // Shrink: remove unprinted boxes from the end (highest number first); never a
+  // committed one, so the effective floor is the printed count.
   let toRemove = current - desired;
+  const anyCommitted = mine.some(isCommitted);
   const out = [...boxes];
   for (let i = out.length - 1; i >= 0 && toRemove > 0; i--) {
-    if (out[i].article_description === article) { out.splice(i, 1); toRemove--; }
+    const b = out[i];
+    if (b.article_description === article && !isCommitted(b)) { out.splice(i, 1); toRemove--; }
   }
+  if (anyCommitted) return out; // box_numbers are frozen once anything is printed
   let num = 0;
   return out.map((b) => (b.article_description === article ? { ...b, box_number: ++num } : b));
 }
@@ -145,6 +164,32 @@ export function updateBoxField(
 // Recompute an article's box conversions when the line UOM changes.
 export function recomputeArticleOnUom(boxes: CRBoxForm[], article: string, uom: string | number): CRBoxForm[] {
   return boxes.map((b) => (b.article_description === article ? { ...b, conversion: conv(b.count, uom) } : b));
+}
+
+// Stamp a lot number onto an article's boxes whose box_number is in [from, to].
+// Apply repeatedly for multiple ranges. (Legacy LotRangeDedicator.)
+export function applyLotToRange(boxes: CRBoxForm[], article: string, from: number, to: number, lot: string): CRBoxForm[] {
+  return boxes.map((b) =>
+    b.article_description === article && b.box_number >= from && b.box_number <= to ? { ...b, lot_number: lot } : b,
+  );
+}
+
+// Bulk-fill every box of an article with the provided net/gross/count (blank =
+// leave as-is). Runs each through updateBoxField so gross→net and count→conv
+// cascade; net is applied last so an explicit net overrides the gross-derived one.
+export function bulkFillArticle(
+  boxes: CRBoxForm[],
+  article: string,
+  patch: { net_weight?: string; gross_weight?: string; count?: string },
+  ctx: { uom: string | number; carton: string | number },
+): CRBoxForm[] {
+  let out = boxes;
+  for (const b of boxesForArticle(boxes, article)) {
+    if (patch.count) out = updateBoxField(out, article, b.box_number, "count", patch.count, ctx);
+    if (patch.gross_weight) out = updateBoxField(out, article, b.box_number, "gross_weight", patch.gross_weight, ctx);
+    if (patch.net_weight) out = updateBoxField(out, article, b.box_number, "net_weight", patch.net_weight, ctx);
+  }
+  return out;
 }
 
 // Recompute an article's box net weights when the line carton weight changes.
@@ -214,6 +259,31 @@ export function demo(): void {
   // box-count clamp: a huge desired count is capped, not materialized whole.
   const clamped = setArticleBoxCount([], "Z", 9_999_999, "1");
   assert(boxesForArticle(clamped, "Z").length === MAX_BOXES_PER_ARTICLE, "box count clamped to MAX");
+
+  // lot-range: only boxes 2..3 get the lot.
+  let lot = setArticleBoxCount([], "M", 4, "1");
+  lot = applyLotToRange(lot, "M", 2, 3, "L9");
+  assert(lot.map((b) => b.lot_number).join(",") === ",L9,L9,", "lot applied to [2,3] only");
+
+  // printed boxes are frozen: qty can't drop below them (even at 0) and their
+  // numbers don't shift; grow adds above the high-water; remove is a no-op.
+  let pr = setArticleBoxCount([], "P", 3, "10");
+  pr = pr.map((b) => (b.box_number === 2 ? { ...b, box_id: "X", is_printed: true } : b));
+  pr = setArticleBoxCount(pr, "P", 0, "10");
+  const pmine = boxesForArticle(pr, "P");
+  assert(pmine.length === 1 && pmine[0].box_number === 2 && pmine[0].is_printed, "printed box survives qty=0, number frozen");
+  pr = setArticleBoxCount(pr, "P", 2, "10");
+  assert(boxesForArticle(pr, "P").length === 2, "grow re-adds one unprinted box");
+  assert(boxesForArticle(pr, "P").some((b) => b.box_number === 2 && b.is_printed), "printed #2 still pinned after grow");
+  assert(boxesForArticle(pr, "P").some((b) => b.box_number > 2 && !b.is_printed), "new box numbered above high-water");
+  assert(boxesForArticle(removeArticleBox(pr, "P", 2), "P").some((b) => b.box_number === 2 && b.is_printed), "removeArticleBox no-ops on a printed box");
+
+  // bulk fill: gross fills net via carton; explicit net wins; count sets conv.
+  let bf = setArticleBoxCount([], "N", 2, "10");
+  bf = bulkFillArticle(bf, "N", { gross_weight: "5", count: "3" }, { uom: "10", carton: "1" });
+  assert(bf.every((b) => b.net_weight === "4" && b.conversion === "30"), "bulk gross→net & count→conv");
+  bf = bulkFillArticle(bf, "N", { net_weight: "2.5" }, { uom: "10", carton: "1" });
+  assert(bf.every((b) => b.net_weight === "2.5"), "bulk explicit net overrides");
 
   console.log("boxEngine demo: ALL ASSERTIONS PASSED");
 }

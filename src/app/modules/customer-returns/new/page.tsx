@@ -1,27 +1,27 @@
 "use client";
 
-// Create a Customer Return — sectioned form:
+// Create a Customer Return — sectioned form (faithful to the legacy create screen):
 //   1. CR Details        — header fields
 //   2. Line Items        — cascading SKU picker (Search/Browse over all_sku) that
 //                          auto-fills material_type/category/sub_category/sale_group/uom,
 //                          then UOM/Qty/Rate/Value/Carton/Net(+cold) line fields
-//   3. Box-wise Weights  — per resolved article: Qty Units → box count, per-box
-//                          Conversion(auto)/Net/Gross/Count (+cold Lot/Mark/…),
-//                          article net-sum, add/remove
+//   3. Box-wise Weights  — LOCKED here (banner). Weights & QR labels unlock only after
+//                          mail approval, on the edit screen; shown read-only for
+//                          continuity. The CR is saved with 0 boxes.
 //
-// The CR is created exactly ONCE, on submit: POST /{company} (header+lines) then
-// PUT /{company}/{cr}/boxes (bulk save). Box CAPTURE only — QR label printing lives
-// on the detail page (matches the legacy create screen, where boxes were entered
-// but never printed until the edit screen). Creating once removes the double-create
-// race and the printed-box renumber hazard.
+// Submit = "Send for Approval": POST /{company} (header + lines, NO boxes), leaving the
+// CR "Pending" = awaiting Business-Head approval (the `submitting` flag stays set through
+// the redirect, so it can't double-submit). Legacy also fired a threaded BH mail
+// (…/send-for-approval); the live backend has no such endpoint — a documented stub.
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { useRequireAuth, useIsAdmin } from "@/lib/user";
-import { createCustomerReturn, bulkSaveBoxes, type CRLineCreate } from "@/lib/customer-returns";
+import { useRequireAuth, useIsAdmin, useMe } from "@/lib/user";
+import { createCustomerReturn, sendCustomerReturnForApproval, listCustomerReturns, getCrEmailRouting, type CRLineCreate, type CrEmailRouting } from "@/lib/customer-returns";
 import { CustomerReturnsChrome } from "../_chrome";
-import { CompanyToggle, ErrorBanner, useCompany, isColdWarehouse, WAREHOUSES } from "../_shared";
-import { BUSINESS_HEAD_OPTIONS, SALES_POC_DROPDOWN_OPTIONS, SALES_POC_OTHER } from "../_fixtures";
+import { CompanyToggle, ErrorBanner, ConfirmDialog, useCompany, isColdWarehouse, WAREHOUSES } from "../_shared";
+import { SALES_POC_OTHER } from "../_fixtures";
+import { EMPTY_ROUTING } from "../_approvalMatrix";
 import { CustomerReturnLineEditor, emptyCrLine, type CRLineForm } from "../_LineEditor";
 import { CustomerReturnBoxSection } from "../_BoxSection";
 import {
@@ -30,7 +30,6 @@ import {
   addArticleBox,
   recomputeArticleOnUom,
   recomputeArticleOnCarton,
-  toBulkItems,
 } from "../_boxEngine";
 
 const inputCls = "h-8 rounded border border-[var(--aws-border)] px-2 text-[12px] bg-white w-full";
@@ -42,7 +41,41 @@ export default function NewCustomerReturnPage() {
   const router = useRouter();
   useRequireAuth(router.replace);
   const isAdmin = useIsAdmin();
+  const me = useMe();
   const [company, setCompany] = useCompany();
+
+  // Seed company from ?company= on first load (cold/shared links); the toggle
+  // takes over after. Mount-guard + deferred setState = runs once.
+  const seededCompany = useRef(false);
+  useEffect(() => {
+    if (seededCompany.current) return;
+    seededCompany.current = true;
+    const c = new URLSearchParams(window.location.search).get("company");
+    if ((c === "CFPL" || c === "CDPL") && c !== company) queueMicrotask(() => setCompany(c));
+  }, [company, setCompany]);
+
+  // Known-customer suggestions for the Customer datalist (legacy getCustomers).
+  const [customers, setCustomers] = useState<string[]>([]);
+  useEffect(() => {
+    if (!isAdmin) return;
+    let cancelled = false;
+    listCustomerReturns(company, { per_page: 100 }).then(
+      (r) => { if (!cancelled) setCustomers(Array.from(new Set(r.records.map((x) => x.customer).filter(Boolean))).sort()); },
+      () => {},
+    );
+    return () => { cancelled = true; };
+  }, [company, isAdmin]);
+
+  // Business-Head / Sales-POC dropdown names come from the DB routing (the same
+  // source as the approve screen's recipient matrix) — no hardcoded name lists.
+  const [routing, setRouting] = useState<CrEmailRouting>(EMPTY_ROUTING);
+  useEffect(() => {
+    let cancelled = false;
+    getCrEmailRouting().then((r) => { if (!cancelled) setRouting(r); }, () => {});
+    return () => { cancelled = true; };
+  }, []);
+  const businessHeadOptions = routing.business_head.map((x) => x.name);
+  const salesPocDropdown = [...routing.sales_poc.map((x) => x.name).sort((a, b) => a.localeCompare(b)), SALES_POC_OTHER];
 
   // Header
   const [factoryUnit, setFactoryUnit] = useState("");
@@ -60,14 +93,30 @@ export default function NewCustomerReturnPage() {
   const [inwardManager, setInwardManager] = useState("");
   const [remark, setRemark] = useState("");
 
+  // Inward Manager defaults to the logged-in user's profile name (fetched from
+  // the profile, editable). Seeded once, and only while the field is still empty
+  // so a manual entry is never clobbered.
+  const seededInward = useRef(false);
+  useEffect(() => {
+    if (seededInward.current) return;
+    const name = me?.full_name?.trim();
+    if (!name) return;
+    seededInward.current = true;
+    queueMicrotask(() => setInwardManager((prev) => prev || name));
+  }, [me]);
+
   const [lines, setLines] = useState<CRLineForm[]>([emptyCrLine()]);
   const [boxes, setBoxes] = useState<CRBoxForm[]>([]);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showDiscard, setShowDiscard] = useState(false);
 
   const cold = isColdWarehouse(factoryUnit);
-  const uomFor = (article: string) => lines.find((l) => l.item_description === article)?.uom || "";
+
+  // Box-wise entry is LOCKED on the create screen (legacy parity) — weights & QR
+  // unlock only after mail approval, on the edit screen. The CR is saved with 0 boxes.
+  const boxesLocked = true;
 
   // Patch a line. Rejects resolving to an article already used by another line
   // (the line PK is (rtv_id, item_description); two lines sharing an article would
@@ -101,8 +150,9 @@ export default function NewCustomerReturnPage() {
 
   const addLine = () => setLines((p) => [...p, emptyCrLine()]);
   const removeLine = (idx: number) => {
+    if (lines.length <= 1) return; // keep at least one line — gate line + box removal together (legacy parity)
     const article = lines[idx]?.item_description;
-    setLines((p) => (p.length <= 1 ? p : p.filter((_, i) => i !== idx)));
+    setLines((p) => p.filter((_, i) => i !== idx));
     if (article) setBoxes((b) => b.filter((x) => x.article_description !== article));
   };
 
@@ -143,6 +193,9 @@ export default function NewCustomerReturnPage() {
     }
     setSubmitting(true);
     try {
+      // Create header + lines with NO boxes — box-wise weights are captured on the
+      // edit screen after approval (legacy locks boxes on create). `submitting` stays
+      // true through the redirect below, so this can't double-submit.
       const created = await createCustomerReturn(company, {
         company,
         header: {
@@ -162,18 +215,14 @@ export default function NewCustomerReturnPage() {
         },
         lines: payloadLines,
       });
-      // Persist captured boxes for resolved articles (drops orphans of removed lines).
-      const valid = new Set(payloadLines.map((l) => l.item_description));
-      const validBoxes = boxes.filter((b) => valid.has(b.article_description));
-      if (validBoxes.length > 0) {
-        await bulkSaveBoxes(company, created.rtv_id, toBulkItems(validBoxes, uomFor), {
-          notifyDiscrepancy: false,
-          allowClear: true,
-        });
-      }
-      router.push(`/modules/customer-returns/${created.rtv_id}`);
+      // Fire the threaded Business-Head approval mail (the BH's copy carries the
+      // Approve/Reject/Hold magic-link buttons). Best-effort: a missing SMTP config
+      // just no-ops server-side, and the CR is already saved (Pending), so a send
+      // failure must not block the redirect.
+      await sendCustomerReturnForApproval(company, created.rtv_id).catch(() => undefined);
+      router.push(`/modules/customer-returns/${created.rtv_id}?company=${company}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to create customer return");
+      setError(e instanceof Error ? e.message : "Failed to send for approval");
       setSubmitting(false); // stay on the form so the operator can retry
     }
   }
@@ -192,20 +241,20 @@ export default function NewCustomerReturnPage() {
     <CustomerReturnsChrome title="New">
       <div className="flex items-center gap-3 mb-4 flex-wrap">
         <div>
-          <h1 className="text-[18px] font-bold text-[var(--text-primary)]">New Customer Return</h1>
-          <p className="text-[12px] text-[var(--text-secondary)]">Details · line items · box-wise weights. Print labels from the detail page after saving.</p>
+          <h1 className="text-[18px] sm:text-[22px] font-bold tracking-tight text-[var(--text-primary)]">New Customer Return</h1>
+          <p className="text-[12px] text-[var(--text-secondary)]">Enter header + line items, then send for approval. Box-wise weights &amp; QR labels unlock on the CR after approval.</p>
         </div>
         <div className="flex-1" />
         <CompanyToggle value={company} onChange={setCompany} />
-        <button onClick={() => router.push("/modules/customer-returns")} className="text-[13px] rounded-md border border-[var(--aws-border)] px-3 py-1.5 bg-white">
-          Cancel
+        <button onClick={() => setShowDiscard(true)} disabled={submitting} className="text-[13px] rounded-md border border-[var(--aws-border)] px-3 py-1.5 bg-white disabled:opacity-50">
+          Discard
         </button>
         <button
           onClick={handleSubmit}
           disabled={submitting}
           className="text-[13px] font-semibold rounded-md px-3 py-1.5 bg-[var(--aws-orange)] text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-50"
         >
-          {submitting ? "Saving…" : "Create CR"}
+          {submitting ? "Sending…" : "Send for Approval"}
         </button>
       </div>
 
@@ -223,7 +272,10 @@ export default function NewCustomerReturnPage() {
           </div>
           <div className="space-y-1">
             <label className={labelCls}>Customer <span className="text-[var(--aws-error)]">*</span></label>
-            <input value={customer} onChange={(e) => setCustomer(e.target.value)} placeholder="Customer name" className={inputCls} />
+            <input value={customer} onChange={(e) => setCustomer(e.target.value)} placeholder="Customer name" list="cr-customer-list" className={inputCls} />
+            <datalist id="cr-customer-list">
+              {customers.map((c) => (<option key={c} value={c} />))}
+            </datalist>
           </div>
           <div className="space-y-1">
             <label className={labelCls}>Invoice Number</label>
@@ -241,7 +293,7 @@ export default function NewCustomerReturnPage() {
             <label className={labelCls}>Sales POC</label>
             <select value={salesPoc} onChange={(e) => setSalesPoc(e.target.value)} className={inputCls}>
               <option value="">Select…</option>
-              {SALES_POC_DROPDOWN_OPTIONS.map((p) => (<option key={p} value={p}>{p}</option>))}
+              {salesPocDropdown.map((p) => (<option key={p} value={p}>{p}</option>))}
             </select>
             {salesPoc === SALES_POC_OTHER && (
               <div className="space-y-1 pt-1">
@@ -254,7 +306,7 @@ export default function NewCustomerReturnPage() {
             <label className={labelCls}>Business Head</label>
             <select value={businessHead} onChange={(e) => setBusinessHead(e.target.value)} className={inputCls}>
               <option value="">—</option>
-              {BUSINESS_HEAD_OPTIONS.map((b) => (<option key={b} value={b}>{b}</option>))}
+              {businessHeadOptions.map((b) => (<option key={b} value={b}>{b}</option>))}
             </select>
           </div>
           <div className="space-y-1">
@@ -283,13 +335,13 @@ export default function NewCustomerReturnPage() {
       {/* ── Section 2 · Line Items + Section 3 · Box-wise Weights (per line) ── */}
       <Section
         n={2}
-        title="Line Items"
+        title={`Line Items (${lines.length})`}
         right={
           <button onClick={addLine} className="text-[12px] rounded border border-[var(--aws-border)] px-2 py-1 bg-white hover:border-[var(--aws-orange)]">
             + Add Line
           </button>
         }
-        subtitle="Pick an article (Search or Browse), enter line values, then capture box-wise weights below each resolved article."
+        subtitle="Pick an article (Search or Browse) and enter line values. Box-wise weights are locked until the CR is approved."
       >
         <div className="space-y-4">
           {lines.map((line, idx) => (
@@ -315,6 +367,7 @@ export default function NewCustomerReturnPage() {
                     isCold={cold}
                     boxes={boxes}
                     onBoxesChange={setBoxes}
+                    locked={boxesLocked}
                   />
                 </div>
               )}
@@ -322,6 +375,17 @@ export default function NewCustomerReturnPage() {
           ))}
         </div>
       </Section>
+
+      {showDiscard && (
+        <ConfirmDialog
+          title="Discard changes?"
+          confirmLabel="Discard"
+          onCancel={() => setShowDiscard(false)}
+          onConfirm={() => router.push("/modules/customer-returns")}
+        >
+          Your unsaved changes will be lost.
+        </ConfirmDialog>
+      )}
     </CustomerReturnsChrome>
   );
 }

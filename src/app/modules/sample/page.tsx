@@ -9,7 +9,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial, useMe, useIsAdmin } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useMe, useIsAdmin, useHasPermission } from "@/lib/user";
 import { sampleCaps } from "@/lib/sample-roles";
 import { listRequisitions, WAREHOUSES, type Requisition } from "@/lib/sample";
 import { loadSampleListCache, saveSampleListCache } from "@/lib/sample-list-cache";
@@ -64,6 +64,7 @@ export default function SampleQueuePage() {
   const me = useMe();
   const isAdmin = useIsAdmin();
   const caps = useMemo(() => sampleCaps(me), [me]);
+  const canCreateReq = useHasPermission("sample", "requisition", null, "create");
 
   const [cache] = useState(() => loadSampleListCache());
   const [status, setStatus] = useState(() => cache?.status ?? "");
@@ -151,13 +152,13 @@ export default function SampleQueuePage() {
           onClick={() => router.push("/modules/npd-development")}
           className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:bg-[var(--surface-subtle)]"
         >NPD Development</button>
-        {caps.canRequest && (
+        {caps.canRequest && canCreateReq && (
           <button
             onClick={() => router.push("/modules/sample/npd/new")}
             className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:bg-[var(--surface-subtle)]"
           >+ New NPD request</button>
         )}
-        {caps.canRequest && (
+        {caps.canRequest && canCreateReq && (
           <button
             onClick={() => router.push("/modules/sample/new")}
             className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium hover:bg-[var(--aws-orange-hover)]"

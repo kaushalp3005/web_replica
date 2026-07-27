@@ -7,7 +7,7 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BackLink } from "@/components/BackLink";
-import { useUserScope } from "@/lib/user";
+import { useUserScope, useHasPermission } from "@/lib/user";
 import { userHasWarehouse, normaliseWarehouseCode } from "@/lib/warehouseScope";
 import { fmtNum, fmtDate } from "@/lib/po";
 import { getPurchasePo, addBoxes, updateBoxes, saveReceive, type PurchasePoDetail, type PurchaseLine } from "@/lib/purchase-receive";
@@ -59,6 +59,11 @@ function sectionSeeds(po: PurchasePoDetail, arrivals: ArrivalItem[]): SectionSee
 
 export function InwardEntry({ transactionNo }: { transactionNo: string }): React.JSX.Element {
   const router = useRouter();
+  // Permission gates (UX only — server still enforces + applies warehouse scope).
+  // Saving receiving data (receive/update boxes) → material_in/edit.
+  // Notifying QC (PO arrival intimation) → material_in/point/create.
+  const canReceive = useHasPermission("purchase", "material_in", null, "edit");
+  const canIntimate = useHasPermission("purchase", "material_in", "point", "create");
   const [po, setPo] = useState<PurchasePoDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -298,17 +303,19 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
       </div>
 
       <div className="mt-4 flex items-center justify-between gap-2 border-t border-[var(--aws-border)] pt-4">
-        {/* Notify QC — independent of receiving; pre-filled with the inward's data */}
-        <button
-          type="button"
-          onClick={() => setIntimateOpen(true)}
-          className="h-9 px-4 text-[13px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[#2c5fa8] hover:text-[#2c5fa8] inline-flex items-center gap-2"
-        >
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-            <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
-          </svg>
-          Intimate QC
-        </button>
+        {/* Notify QC — gated on material_in/point/create; pre-filled with the inward's data */}
+        {canIntimate ? (
+          <button
+            type="button"
+            onClick={() => setIntimateOpen(true)}
+            className="h-9 px-4 text-[13px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[#2c5fa8] hover:text-[#2c5fa8] inline-flex items-center gap-2"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
+            </svg>
+            Intimate QC
+          </button>
+        ) : <span />}
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -317,17 +324,20 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
           >
             Cancel
           </button>
-          <button
-            type="button"
-            disabled={busy !== null}
-            onClick={handleSave}
-            className="h-9 px-4 text-[13px] rounded-[2px] bg-[var(--aws-orange)] text-white font-semibold hover:bg-[var(--aws-orange-hover)] disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
-          >
-            {busy === "save" ? (
-              <span className="inline-block w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-            ) : null}
-            {busy === "save" ? "Saving…" : "Save Receiving Data"}
-          </button>
+          {/* Save receiving data — gated on material_in/edit */}
+          {canReceive ? (
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={handleSave}
+              className="h-9 px-4 text-[13px] rounded-[2px] bg-[var(--aws-orange)] text-white font-semibold hover:bg-[var(--aws-orange-hover)] disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
+            >
+              {busy === "save" ? (
+                <span className="inline-block w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+              ) : null}
+              {busy === "save" ? "Saving…" : "Save Receiving Data"}
+            </button>
+          ) : null}
         </div>
       </div>
 

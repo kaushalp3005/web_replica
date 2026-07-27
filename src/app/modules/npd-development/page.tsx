@@ -13,7 +13,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial, useMe, useIsAdmin } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useMe, useIsAdmin, useHasPermission } from "@/lib/user";
 import { sampleCaps, roleNamesOf } from "@/lib/sample-roles";
 import {
   listRequisitions, listRequestors, npdReview, cancelRequisition, updateRequisition, listBusinessHeads,
@@ -44,14 +44,17 @@ const PURPOSE_OPTIONS: { value: PurposeTag; label: string }[] = [
 // Which row actions are available given status + caps. The NPD reviewer's verbs
 // are Accept + Hold; Cancel/Edit are the Sales (business requestor) actions.
 // Develop/Open live on the request's detail page (reached via View).
-function rowActionFlags(r: Requisition, canNpd: boolean, canEdit: boolean) {
+function rowActionFlags(
+  r: Requisition, canNpd: boolean, canEdit: boolean,
+  canReview: boolean, canEditReq: boolean, canDeleteReq: boolean,
+) {
   const s = r.status;
   const terminal = s === "CLOSED" || s === "CANCELLED";
   return {
-    accept: canNpd && (s === "SUBMITTED" || s === "ON_HOLD"),
-    hold: canNpd && s === "SUBMITTED",
-    cancel: canEdit && !terminal,
-    edit: canEdit && (s === "DRAFT" || s === "SUBMITTED" || s === "BH_REJECTED"),
+    accept: canNpd && canReview && (s === "SUBMITTED" || s === "ON_HOLD"),
+    hold: canNpd && canReview && s === "SUBMITTED",
+    cancel: canEdit && canDeleteReq && !terminal,
+    edit: canEdit && canEditReq && (s === "DRAFT" || s === "SUBMITTED" || s === "BH_REJECTED"),
   };
 }
 
@@ -135,6 +138,10 @@ export default function NpdQueuePage() {
   const initial = useUserInitial();
   const me = useMe();
   const caps = useMemo(() => sampleCaps(me), [me]);
+  const canCreateReq = useHasPermission("sample", "requisition", null, "create");
+  const canNpdCreate = useHasPermission("sample", "npd", null, "create");
+  const canEditReq = useHasPermission("sample", "requisition", null, "edit");
+  const canDeleteReq = useHasPermission("sample", "requisition", null, "delete");
 
   // filters
   const [searchInput, setSearchInput] = useState("");
@@ -335,8 +342,8 @@ export default function NpdQueuePage() {
                 <>
                   <button type="button" aria-hidden tabIndex={-1} className="fixed inset-0 z-10 cursor-default" onClick={() => setMenuOpen(false)} />
                   <div className="absolute right-0 z-20 mt-1 w-64 max-w-[calc(100vw_-_2rem)] bg-white border border-[var(--aws-border-strong)] rounded-[2px] shadow-md py-1">
-                    <MenuItem title="Sample requisition" desc="NPD · Customer trial · Convert" onClick={() => { setMenuOpen(false); router.push("/modules/npd-development/new"); }} />
-                    {caps.canNpd && <MenuItem title="Development job card" desc="R&amp;D — build & promote a BOM" onClick={() => { setMenuOpen(false); router.push("/modules/npd-development/job-cards/new"); }} />}
+                    {canCreateReq && <MenuItem title="Sample requisition" desc="NPD · Customer trial · Convert" onClick={() => { setMenuOpen(false); router.push("/modules/npd-development/new"); }} />}
+                    {caps.canNpd && canNpdCreate && <MenuItem title="Development job card" desc="R&amp;D — build & promote a BOM" onClick={() => { setMenuOpen(false); router.push("/modules/npd-development/job-cards/new"); }} />}
                     <div className="my-1 border-t border-[var(--surface-divider)]" />
                     <MenuItem title="Browse job cards" desc="Open existing development job cards" onClick={() => { setMenuOpen(false); router.push("/modules/npd-development/job-cards"); }} />
                   </div>
@@ -414,7 +421,7 @@ export default function NpdQueuePage() {
           {/* Mobile: cards. md+: full table. */}
           <div className="grid grid-cols-1 gap-2 md:hidden">
             {rows.map((r) => {
-              const flags = rowActionFlags(r, caps.canNpd, caps.canEdit);
+              const flags = rowActionFlags(r, caps.canNpd, caps.canEdit, canNpdCreate, canEditReq, canDeleteReq);
               return (
                 <div key={r.id} className="bg-white border border-[var(--aws-border)] rounded-md p-3 hover:border-[var(--aws-orange)]">
                   <button type="button" onClick={() => openRow(r.id)} className="block w-full text-left">
@@ -464,7 +471,7 @@ export default function NpdQueuePage() {
               </thead>
               <tbody>
                 {rows.map((r) => {
-                  const flags = rowActionFlags(r, caps.canNpd, caps.canEdit);
+                  const flags = rowActionFlags(r, caps.canNpd, caps.canEdit, canNpdCreate, canEditReq, canDeleteReq);
                   const desc = r.description ?? "";
                   return (
                     <tr key={r.id} onClick={() => openRow(r.id)}

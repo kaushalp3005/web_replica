@@ -8,7 +8,7 @@
 
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
-import { useRequireAuth, useUserInitial, useMe, useIsAdmin } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useMe, useIsAdmin, useHasPermission } from "@/lib/user";
 import { roleNamesOf } from "@/lib/sample-roles";
 import { scopeAllowsRoute } from "@/lib/modules";
 import { BackLink } from "@/components/BackLink";
@@ -52,6 +52,18 @@ export default function ProductionLandingPage() {
   // sub-tiles it's allowed. Unscoped roles + admins see all (scopeAllowsRoute).
   const isAdmin = useIsAdmin();
   const roles = roleNamesOf(useMe());
+  // Fine-grained tile gates (UX only; server still enforces). Combined with
+  // the role-scope check below — a tile shows only when BOTH allow it. Admins
+  // pass both. "view" is enough to see a tile.
+  const canSeeSo = useHasPermission("so", null, null, "view");
+  const canSeePlans = useHasPermission("production", "plans", null, "view");
+  // Route → required permission for the tiles covered by the SO/Planning
+  // permission map. Tiles not listed here keep their role-scope gate only.
+  function tileAllowed(route: string): boolean {
+    if (route === "/modules/production/so-creation") return canSeeSo;
+    if (route === "/modules/production/planning" || route === "/modules/production/plan-list") return canSeePlans;
+    return true;
+  }
 
   function open(m: SubModule) {
     if (m.implemented) router.push(m.route);
@@ -95,7 +107,8 @@ export default function ProductionLandingPage() {
           // remains in it (e.g. Inventory now has every entry hidden).
           const items = SUB_MODULES.filter(
             (m) => m.group === group && !m.hidden &&
-                   scopeAllowsRoute(roles, isAdmin, m.route.replace("/modules/", "")),
+                   scopeAllowsRoute(roles, isAdmin, m.route.replace("/modules/", "")) &&
+                   tileAllowed(m.route),
           );
           if (items.length === 0) return null;
           return (

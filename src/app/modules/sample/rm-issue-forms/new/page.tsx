@@ -8,7 +8,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, SAMPLE_ROOT } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useHasPermission } from "@/lib/user";
 import { raiseRmForm, type RmLine } from "@/lib/rm-issue-form";
 import { getDevJobCard } from "@/lib/npd-dev";
 import { FormSection, ArticlePicker } from "../../_form";
@@ -28,6 +28,7 @@ export default function RaiseRmFormPage() {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
   const initial = useUserInitial();
+  const canRaiseIndent = useHasPermission("sample", "npd", null, "create");
 
   const [trialName, setTrialName] = useState("");
   const [productName, setProductName] = useState("");
@@ -211,9 +212,9 @@ export default function RaiseRmFormPage() {
           <button onClick={() => router.push("/modules/sample/rm-issue-forms")}
             className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] text-[13px] bg-white hover:bg-[var(--surface-subtle)]">Cancel</button>
           <div className="flex-1" />
-          <button disabled={saving || !canRaise} onClick={() => raise(false)}
+          <button disabled={saving || !canRaise || !canRaiseIndent} onClick={() => raise(false)}
             className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] text-[13px] bg-white hover:bg-[var(--surface-subtle)] disabled:opacity-50">Save draft</button>
-          <button disabled={saving || !canRaise} onClick={() => raise(true)}
+          <button disabled={saving || !canRaise || !canRaiseIndent} onClick={() => raise(true)}
             className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">{saving ? "Raising…" : "Raise indent"}</button>
         </div>
       </main>

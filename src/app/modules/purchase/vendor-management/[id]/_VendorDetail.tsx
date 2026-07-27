@@ -7,7 +7,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useHasRole, useMe } from "@/lib/user";
+import { useHasRole, useHasPermission, useMe } from "@/lib/user";
 import { BackLink } from "@/components/BackLink";
 import {
   approveVendor,
@@ -92,6 +92,11 @@ export function VendorDetail({ vendorId }: { vendorId: string }): React.JSX.Elem
   const router = useRouter();
   const me = useMe();
   const canManage = useHasRole("purchase_manager");
+  // Fine-grained action gates (UX only — server enforces). Editing basics →
+  // vendor/master/update; approve/delete → their own actions.
+  const canEdit = useHasPermission("purchase", "vendor", "master", "update");
+  const canApprove = useHasPermission("purchase", "vendor", "master", "approve");
+  const canDelete = useHasPermission("purchase", "vendor", "master", "delete");
 
   const { toast, showToast, clearToast } = useToast();
   const { confirm, confirmElement } = useConfirm();
@@ -246,6 +251,9 @@ export function VendorDetail({ vendorId }: { vendorId: string }): React.JSX.Elem
             onEdit={() => setEditOpen(true)}
             onApprove={() => void handleApprove()}
             onDelete={() => void handleDelete()}
+            canEdit={canEdit}
+            canApprove={canApprove}
+            canDelete={canDelete}
           />
 
           {/* Tab bar */}
@@ -370,6 +378,9 @@ function HeaderCard({
   onEdit,
   onApprove,
   onDelete,
+  canEdit,
+  canApprove,
+  canDelete,
 }: {
   vendor: VendorResponse;
   lookups: Record<string, LookupRow[]>;
@@ -377,6 +388,9 @@ function HeaderCard({
   onEdit: () => void;
   onApprove: () => void;
   onDelete: () => void;
+  canEdit: boolean;
+  canApprove: boolean;
+  canDelete: boolean;
 }): React.JSX.Element {
   const name = vendor.name || "—";
   const initial = (vendor.name || "V").charAt(0).toUpperCase();
@@ -406,22 +420,26 @@ function HeaderCard({
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button type="button" className={SECONDARY_BTN} onClick={onEdit} disabled={headerBusy}>
-            Edit basics
-          </button>
-          {showApprove && (
+          {canEdit && (
+            <button type="button" className={SECONDARY_BTN} onClick={onEdit} disabled={headerBusy}>
+              Edit basics
+            </button>
+          )}
+          {showApprove && canApprove && (
             <button type="button" className={PRIMARY_BTN} onClick={onApprove} disabled={headerBusy}>
               Approve
             </button>
           )}
-          <button
-            type="button"
-            onClick={onDelete}
-            disabled={headerBusy}
-            className="h-8 px-4 text-[13px] rounded-[2px] border border-[#f5c6bc] text-[var(--aws-error)] bg-white hover:bg-[#fdf3f1] disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Delete
-          </button>
+          {canDelete && (
+            <button
+              type="button"
+              onClick={onDelete}
+              disabled={headerBusy}
+              className="h-8 px-4 text-[13px] rounded-[2px] border border-[#f5c6bc] text-[var(--aws-error)] bg-white hover:bg-[#fdf3f1] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Delete
+            </button>
+          )}
         </div>
       </div>
     </div>

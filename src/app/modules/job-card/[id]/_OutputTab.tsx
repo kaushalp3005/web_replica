@@ -23,6 +23,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
 import { friendlyApiError } from "@/lib/apiErrors";
+import { useHasPermission } from "@/lib/user";
 
 // Minimal shape of the JC detail fields this tab reads. Kept local so the tab
 // has no import cycle with page.tsx (where the full JobCardDetail lives).
@@ -333,6 +334,10 @@ function OutputCell({ label, value, strong }: { label: string; value: string; st
 
 // ── 3. Cartons (SFG-box-style list + trace + sticker printing + create) ──────
 function CartonsPanel({ jcId, version, onChanged }: { jcId: number; version: number; onChanged: () => void }) {
+  // Fine-grained permission gates (UX only; server still enforces). Creating
+  // cartons → box_printing/create; printing/downloading labels → box_printing/view.
+  const canCreateBoxes = useHasPermission("production", "job_cards", "box_printing", "create");
+  const canViewLabels = useHasPermission("production", "job_cards", "box_printing", "view");
   const [cartons, setCartons] = useState<CartonRowT[]>([]);
   const [batches, setBatches] = useState<BatchOutputRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -408,12 +413,14 @@ function CartonsPanel({ jcId, version, onChanged }: { jcId: number; version: num
           {cartons.length > 0 ? (
             <span className="text-[11px] text-[var(--text-muted)]">{cartons.length} carton{cartons.length === 1 ? "" : "s"} · Σ {fmtKg(totalKg)} kg</span>
           ) : null}
-          {cartons.length > 0 ? (
+          {cartons.length > 0 && canViewLabels ? (
             <button type="button" onClick={() => void printAll()} className={btnPrimary}>Print all stickers</button>
           ) : null}
-          <button type="button" onClick={() => setShowCreate((v) => !v)} className={btnSecondary}>
-            {showCreate ? "Cancel" : "Create cartons"}
-          </button>
+          {canCreateBoxes ? (
+            <button type="button" onClick={() => setShowCreate((v) => !v)} className={btnSecondary}>
+              {showCreate ? "Cancel" : "Create cartons"}
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -438,7 +445,7 @@ function CartonsPanel({ jcId, version, onChanged }: { jcId: number; version: num
               <div className="col-span-3 text-right">Actions</div>
             </div>
             {cartons.map((c) => (
-              <CartonRow key={c.carton_id} carton={c} />
+              <CartonRow key={c.carton_id} carton={c} canViewLabels={canViewLabels} />
             ))}
           </div>
         )}
@@ -560,7 +567,7 @@ function CreateCartonsForm({ jcId, batches, onDone }: { jcId: number; batches: B
   );
 }
 
-function CartonRow({ carton }: { carton: CartonRowT }) {
+function CartonRow({ carton, canViewLabels }: { carton: CartonRowT; canViewLabels: boolean }) {
   const [open, setOpen] = useState(false);
   const [printErr, setPrintErr] = useState<string | null>(null);
 
@@ -579,7 +586,9 @@ function CartonRow({ carton }: { carton: CartonRowT }) {
         <div className="sm:col-span-2 font-mono text-[var(--text-secondary)]">{carton.batch_code || "—"}</div>
         <div className="sm:col-span-1 text-[var(--text-secondary)] capitalize">{(carton.status || "—").toLowerCase()}</div>
         <div className="sm:col-span-3 flex items-center justify-end gap-3">
-          <button type="button" className="text-[12px] text-[var(--aws-link)] hover:underline" onClick={() => void printOne()}>Sticker</button>
+          {canViewLabels ? (
+            <button type="button" className="text-[12px] text-[var(--aws-link)] hover:underline" onClick={() => void printOne()}>Sticker</button>
+          ) : null}
           <button type="button" className="text-[12px] text-[var(--aws-link)] hover:underline" onClick={() => setOpen((v) => !v)}>{open ? "Hide trace" : "Trace"}</button>
         </div>
       </div>

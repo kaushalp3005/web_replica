@@ -18,7 +18,8 @@
 import { useEffect, useRef, useState } from "react";
 import { lookupSku, type SkuLookupResponse } from "@/lib/so";
 import { CascadeDropdown } from "@/components/CascadeDropdown";
-import { cx, num } from "./_shared";
+import { cx } from "./_shared";
+import { deriveLine } from "./_lineEngine";
 
 export interface CRLineForm {
   material_type: string;
@@ -48,22 +49,6 @@ export function emptyCrLine(): CRLineForm {
   };
 }
 
-// value = qty × rate; net_weight = UOM × qty (3dp) — the legacy line rules.
-// Returns the derived fields to fold into a patch.
-function derive(line: CRLineForm, patch: Partial<CRLineForm>): Partial<CRLineForm> {
-  const next = { ...line, ...patch };
-  const out: Partial<CRLineForm> = { ...patch };
-  if ("qty" in patch || "rate" in patch) {
-    const q = num(next.qty), r = num(next.rate);
-    out.value = q > 0 && r > 0 ? String(q * r) : next.value;
-  }
-  if ("qty" in patch || "uom" in patch) {
-    const u = num(next.uom), q = num(next.qty);
-    out.net_weight = u > 0 && q > 0 ? String(parseFloat((u * q).toFixed(3))) : "";
-  }
-  return out;
-}
-
 const labelCls = "text-[11px] text-[var(--text-secondary)]";
 
 export function CustomerReturnLineEditor({
@@ -90,8 +75,8 @@ export function CustomerReturnLineEditor({
   const [loading, setLoading] = useState(false);
   const ctrl = useRef<AbortController | null>(null);
 
-  // Patch helper that also folds in derived value/net_weight.
-  const patch = (p: Partial<CRLineForm>) => onChange(index, derive(line, p));
+  // Patch helper that also folds in derived value/net_weight (+ integer qty).
+  const patch = (p: Partial<CRLineForm>) => onChange(index, deriveLine(line, p));
 
   // Browse cascade options refresh whenever a level changes (input mode only).
   useEffect(() => {
@@ -216,7 +201,7 @@ export function CustomerReturnLineEditor({
           {/* Editable numeric grid */}
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <Num label="UOM" step="0.01" value={line.uom} onChange={(v) => patch({ uom: v })} />
-            <Num label="Total Qty (Units/Kgs)" value={line.qty} onChange={(v) => patch({ qty: v })} />
+            <Num label="Total Qty (Units/Kgs)" step="1" value={line.qty} onChange={(v) => patch({ qty: v })} />
             <Num label="Rate" step="0.01" value={line.rate} onChange={(v) => patch({ rate: v })} />
             <RO label="Value (auto)" value={line.value || "—"} />
             <Num label="Carton Weight" step="0.001" value={line.carton_weight} onChange={(v) => patch({ carton_weight: v })} />
@@ -269,6 +254,11 @@ export function CustomerReturnLineEditor({
                   {!searching && query.trim().length >= 2 && results.length === 0 && (
                     <li className="px-3 py-2 text-[12px] text-[var(--text-muted)]">No matching items.</li>
                   )}
+                  {!searching && results.length > 0 && (
+                    <li className="px-3 py-1.5 text-[10px] text-[var(--text-muted)] text-center border-t border-[var(--aws-border)] bg-[var(--surface-subtle)]">
+                      Showing {results.length}{results.length >= 50 ? "+" : ""} result{results.length !== 1 ? "s" : ""}
+                    </li>
+                  )}
                 </ul>
               )}
             </div>
@@ -291,7 +281,7 @@ export function CustomerReturnLineEditor({
           {/* Numeric fields — always visible while resolving */}
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <Num label="UOM" step="0.01" value={line.uom} onChange={(v) => patch({ uom: v })} />
-            <Num label="Total Qty (Units/Kgs)" value={line.qty} onChange={(v) => patch({ qty: v })} />
+            <Num label="Total Qty (Units/Kgs)" step="1" value={line.qty} onChange={(v) => patch({ qty: v })} />
             <Num label="Rate" step="0.01" value={line.rate} onChange={(v) => patch({ rate: v })} />
             <RO label="Value (auto)" value={line.value || "—"} />
             <Num label="Carton Weight" step="0.001" value={line.carton_weight} onChange={(v) => patch({ carton_weight: v })} />

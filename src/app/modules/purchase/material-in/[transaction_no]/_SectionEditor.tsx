@@ -12,6 +12,7 @@
 // Range fetch the boxes from GET /{txn}/boxes/print (all, or a box_number range).
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useHasPermission } from "@/lib/user";
 import {
   listSectionBoxes,
   listSectionBoxesForPrint,
@@ -239,6 +240,11 @@ export function SectionEditor({
   onPrint: (resolve: PrintResolver) => void;
   printedIds: Set<string>;
 }) {
+  // Permission gates (UX only — server enforces). Adding boxes/sections →
+  // material_in/create; updating existing boxes → material_in/edit.
+  const canAddBoxes = useHasPermission("purchase", "material_in", null, "create");
+  const canUpdateBoxes = useHasPermission("purchase", "material_in", null, "edit");
+
   const carton = draft.cartonByLine[line.line_number] ?? "";
   const existingSections = line.sections ?? [];
   const totalExisting = existingSections.reduce((n, s) => n + (s.total_boxes ?? s.box_count ?? s.boxes?.length ?? 0), 0);
@@ -258,13 +264,15 @@ export function SectionEditor({
           Box Sections
           {totalExisting ? ` (${totalExisting} existing in ${existingSections.length} section${existingSections.length !== 1 ? "s" : ""})` : ""}
         </span>
-        <button
-          type="button"
-          onClick={addSection}
-          className="h-7 px-2 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)] inline-flex items-center gap-1"
-        >
-          + Add Section
-        </button>
+        {canAddBoxes ? (
+          <button
+            type="button"
+            onClick={addSection}
+            className="h-7 px-2 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)] inline-flex items-center gap-1"
+          >
+            + Add Section
+          </button>
+        ) : null}
       </div>
 
       {existingSections.map((sec) => (
@@ -282,6 +290,8 @@ export function SectionEditor({
           busy={busy}
           onPrint={onPrint}
           canPrint={canPrintLabels}
+          canAddBoxes={canAddBoxes}
+          canUpdateBoxes={canUpdateBoxes}
           printedIds={printedIds}
         />
       ))}
@@ -311,6 +321,8 @@ function ExistingSectionCard({
   busy,
   onPrint,
   canPrint,
+  canAddBoxes,
+  canUpdateBoxes,
   printedIds,
 }: {
   line: PurchaseLine;
@@ -325,6 +337,8 @@ function ExistingSectionCard({
   busy: string | null;
   onPrint: (resolve: PrintResolver) => void;
   canPrint: boolean;
+  canAddBoxes: boolean;
+  canUpdateBoxes: boolean;
   printedIds: Set<string>;
 }) {
   const [boxesOpen, setBoxesOpen] = useState(false);
@@ -423,21 +437,25 @@ function ExistingSectionCard({
       <div className="flex items-center justify-between gap-2 mb-2">
         <span className="text-[12px] font-semibold text-[var(--text-primary)]">Section {section.section_number}</span>
         <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => setAddOpen((v) => !v)}
-            className="h-7 px-2 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)]"
-          >
-            + Add Boxes
-          </button>
-          <button
-            type="button"
-            disabled={busy !== null}
-            onClick={() => onUpdate(line, section.section_number)}
-            className="h-7 px-2 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)] disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {busy === uKey ? "Updating…" : "Update"}
-          </button>
+          {canAddBoxes ? (
+            <button
+              type="button"
+              onClick={() => setAddOpen((v) => !v)}
+              className="h-7 px-2 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)]"
+            >
+              + Add Boxes
+            </button>
+          ) : null}
+          {canUpdateBoxes ? (
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => onUpdate(line, section.section_number)}
+              className="h-7 px-2 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {busy === uKey ? "Updating…" : "Update"}
+            </button>
+          ) : null}
           {canPrint ? (
             <>
               <PrintAllButton count={sectionTotal} resolve={() => resolvePrint()} onPrint={onPrint} />
@@ -534,14 +552,16 @@ function ExistingSectionCard({
             >
               Generate
             </button>
-            <button
-              type="button"
-              disabled={busy !== null || addRows.length === 0}
-              onClick={() => onAddBoxes(line, section.section_number)}
-              className="h-7 px-2 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)] disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {busy === aKey ? "Saving…" : "Save New Boxes"}
-            </button>
+            {canAddBoxes ? (
+              <button
+                type="button"
+                disabled={busy !== null || addRows.length === 0}
+                onClick={() => onAddBoxes(line, section.section_number)}
+                className="h-7 px-2 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)] disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {busy === aKey ? "Saving…" : "Save New Boxes"}
+              </button>
+            ) : null}
           </div>
           {addRows.length ? (
             <BoxTable

@@ -26,7 +26,7 @@ import {
 } from "./outputAccounting";
 import { useParams, useRouter } from "next/navigation";
 import { apiFetch, readApiErrorMessage, userStore } from "@/lib/auth";
-import { useIsAdmin, useMe, useRequireAuth, useUserInitial } from "@/lib/user";
+import { useHasPermission, useIsAdmin, useMe, useRequireAuth, useUserInitial } from "@/lib/user";
 import { BALANCE_TOLERANCE_KG, WEIGHT_SAMPLE_COUNT } from "@/lib/constants";
 import { classifyProcess, classifySteps, STAGE_CREATE_WIP } from "@/lib/processCatalog";
 import { friendlyApiError } from "@/lib/apiErrors";
@@ -1114,6 +1114,12 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
   const [busy, setBusy] = useState(false);
   const status = detail.status ?? "";
   const isLocked = !!detail.is_locked && !detail.force_unlocked;
+  // Fine-grained permission gates (UX only; server still enforces + scopes).
+  // The bar shows a single context button; `allowed` below picks the matching
+  // permission for whichever action is active.
+  const canStart = useHasPermission("production", "job_cards", "overview", "start");
+  const canComplete = useHasPermission("production", "job_cards", "overview", "complete");
+  const canClose = useHasPermission("production", "job_cards", "overview", "close");
 
   async function callAction(opts: {
     confirmTitle: string;
@@ -1156,9 +1162,12 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
   // Decide which button to show.
   let label: string | null = null;
   let onClick: (() => void) | null = null;
+  // Whether the current user is permitted for the active action (set per branch).
+  let allowed = false;
 
   if ((status === "assigned" || status === "material_received") && !isLocked) {
     label = "START";
+    allowed = canStart;
     onClick = () => callAction({
       confirmTitle: "Start Production",
       confirmMessage: "Start production for this job card? The timer will begin recording.",
@@ -1168,6 +1177,7 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
     });
   } else if (status === "in_progress") {
     label = "COMPLETE";
+    allowed = canComplete;
     onClick = () => callAction({
       confirmTitle: "Complete Production",
       confirmMessage: "Mark this job card as completed? End time will be recorded.",
@@ -1184,6 +1194,7 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
     // place can't simultaneously have a "Dispatch to next" button.
     if (detail.next_job_card_id && remaining > BALANCE_TOLERANCE_KG) {
       label = "DISPATCH TO NEXT";
+      allowed = canComplete;
       onClick = () => {
         const qtyStr = window.prompt(
           `Dispatch to next stage\n\nRemaining: ${remaining.toFixed(2)} kg\nEnter qty to dispatch (kg):`,
@@ -1210,6 +1221,7 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
       };
     } else {
       label = "CLOSE JC";
+      allowed = canClose;
       onClick = () => callAction({
         confirmTitle: "Close Job Card",
         confirmMessage: "Close this job card after sign-offs? It will become read-only.",
@@ -1220,7 +1232,8 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
     }
   }
 
-  if (!label || !onClick) return null;
+  // Hide the lifecycle CTA when the role lacks the matching permission.
+  if (!label || !onClick || !allowed) return null;
 
   // C10 (Wave 4) — migrated to LockableButton. Lock state goes through the
   // shared hook so the disabled / tooltip behaviour matches every other
@@ -1936,6 +1949,10 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
   const me = useMe();
   const isAdmin = useIsAdmin();
   const status = detail.status ?? "";
+  // Fine-grained permission gates (UX only; server still enforces). Close +
+  // Cancel both map to overview/close; force-unlock to its own sub-module.
+  const canClose = useHasPermission("production", "job_cards", "overview", "close");
+  const canForceUnlockPerm = useHasPermission("production", "job_cards", "force_unlock", "create");
 
   const editable    = status !== "completed" && status !== "closed" && status !== "cancelled";
   // R10 — Cancel JC is admin-only on the server (router gate added with
@@ -1943,14 +1960,14 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
   // menu item; eliminates the "Cancel" → 403 surprise. Status range
   // unchanged: a JC past 'assigned' must be closed, not cancelled.
   const cancellable = (status === "locked" || status === "unlocked" || status === "assigned")
-                       && isAdmin;
-  const closeable   = status === "completed";
+                       && isAdmin && canClose;
+  const closeable   = status === "completed" && canClose;
   // C3-H1 + H2 — use the shared util so the menu agrees with the LockBanner
   // CTA on who's allowed to force-unlock (admin / floor_manager /
   // plant_manager / inventory_manager). Previously this gated on `is_admin`
   // alone, so plant/floor/inventory managers saw the banner CTA but the
   // menu item was hidden — a confusing dead end.
-  const showForceUnlock = !!detail.is_locked && userMayForceUnlock(me);
+  const showForceUnlock = !!detail.is_locked && userMayForceUnlock(me) && canForceUnlockPerm;
 
   const items: { label: string; enabled: boolean; onClick: () => void }[] = [];
   items.push({
@@ -2396,6 +2413,9 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
   const jcId = detail.job_card_id;
   const isProducer = ["SFG", "WIP"].includes((detail.output_kind ?? "").toUpperCase());
   const isConsumer = (detail.input_kind ?? "").toUpperCase() === "SFG";
+  // Fine-grained permission gate (UX only; server still enforces) for the
+  // consumer scan-in flow.
+  const canScan = useHasPermission("production", "job_cards", "material_scan", "scan");
 
   const [boxes, setBoxes] = useState<SfgBoxRow[]>([]);
   const [batches, setBatches] = useState<BatchOpt[]>([]);
@@ -2530,9 +2550,12 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
             onChange={(e) => setScanText(e.target.value)}
           />
           {scanErr && <div className="text-[12px] text-[var(--aws-error)] mt-1">{scanErr}</div>}
-          <button type="button" className={`${btnCls} mt-2`} disabled={scanning} onClick={() => void scanBoxes()}>
-            {scanning ? "Scanning…" : "Scan boxes"}
-          </button>
+          {/* Scan submit hidden when the role lacks material_scan/scan. */}
+          {canScan ? (
+            <button type="button" className={`${btnCls} mt-2`} disabled={scanning} onClick={() => void scanBoxes()}>
+              {scanning ? "Scanning…" : "Scan boxes"}
+            </button>
+          ) : null}
           {scanResult && (
             <div className="mt-3 text-[12px] space-y-1">
               <div className="text-[var(--text-primary)] font-semibold">
@@ -2689,6 +2712,8 @@ function TeamPanel({ detail, onReload }: { detail: JobCardDetail; onReload: () =
   const canAssign =
     status === "unlocked" || status === "assigned" ||
     status === "material_received" || status === "in_progress";
+  // Fine-grained permission gate (UX only; server still enforces).
+  const canAssignPerm = useHasPermission("production", "job_cards", "overview", "assign");
   const hasTeam = !!(detail.assigned_to_team_leader && detail.assigned_to_team_leader.trim());
   const buttonLabel = hasTeam ? "Edit Team" : "Assign Team";
 
@@ -2764,7 +2789,7 @@ function TeamPanel({ detail, onReload }: { detail: JobCardDetail; onReload: () =
     <Panel
       title="Team"
       action={
-        canAssign ? (
+        canAssign && canAssignPerm ? (
           <button
             type="button"
             onClick={() => { setOpen((v) => !v); setFeedback(null); }}
@@ -2876,6 +2901,8 @@ function RemarksTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
   const lock = useLockState(detail);
   const lifecycleLocked = isLifecycleLocked(detail.status);
   const inputsDisabled = submitting || lock.isLocked || lifecycleLocked;
+  // Fine-grained permission gate (UX only; server still enforces).
+  const canAddRemark = useHasPermission("production", "job_cards", "remark", "create");
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -2918,6 +2945,8 @@ function RemarksTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           />
         )}
       </Panel>
+      {/* Add-remark form hidden entirely when the role lacks remark/create. */}
+      {canAddRemark ? (
       <Panel title="Add remark">
         <LockBanner
           isLocked={lock.isLocked}
@@ -2941,6 +2970,7 @@ function RemarksTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           <FormFooter feedback={feedback} submitting={submitting} submitLabel="Add remark" disabled={inputsDisabled} />
         </form>
       </Panel>
+      ) : null}
     </>
   );
 }
@@ -2979,6 +3009,8 @@ function SignOffsTab({ detail, onReload }: { detail: JobCardDetail; onReload: ()
   const isSigned = !!signedBy.trim();
   const status = detail.status ?? "";
   const canSign = status === "completed";
+  // Fine-grained permission gate (UX only; server still enforces).
+  const canSignOff = useHasPermission("production", "job_cards", "sign_offs", "create");
 
   // C1 (Wave 4) — useMe() so the cached name re-renders the form when
   // /me refreshes (admin renamed the operator, etc.).
@@ -3048,11 +3080,12 @@ function SignOffsTab({ detail, onReload }: { detail: JobCardDetail; onReload: ()
                 </>
               )}
             </div>
-            {!isSigned ? (
+            {!isSigned && canSignOff ? (
               // C10 (Wave 4) — Sign-off via ActionButton. canSign already
               // encodes status === "completed"; we keep that as the
               // disabled gate so the button stays visible (but inert) when
-              // production hasn't completed yet.
+              // production hasn't completed yet. Hidden entirely when the
+              // role lacks sign_offs/create.
               <ActionButton
                 busy={submitting}
                 busyLabel="Signing…"
@@ -3117,6 +3150,13 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   // server still 409s and we surface the message via the existing feedback
   // pipeline.
   const lock = useLockState(detail);
+
+  // Fine-grained permission gates (UX only; server still enforces + scopes).
+  //   accounting/edit → the Output & Accounting form (folded into inputsDisabled)
+  //   overview/start  → Open Batch ; overview/complete → Close Batch
+  const canEditAccounting = useHasPermission("production", "job_cards", "accounting", "edit");
+  const canStartBatch = useHasPermission("production", "job_cards", "overview", "start");
+  const canCompleteBatch = useHasPermission("production", "job_cards", "overview", "complete");
 
   // ── Stage 3: per-batch form binding ─────────────────────────────────
   // Fetches all batches for this JC so the BatchSelector dropdown can
@@ -4781,7 +4821,10 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   // clicks START (status flips to in_progress). Admin override does NOT
   // bypass this — the override is for closed-batch edits, not pre-start.
   const lifecycleLocked = isLifecycleLocked(detail.status);
-  const inputsDisabled = submitting || lock.isLocked || formGatedByBatch || lifecycleLocked;
+  // !canEditAccounting folds in the accounting/edit gate: the whole Output &
+  // Accounting form (inputs + the FormFooter submit) becomes read-only for
+  // roles that can view but not edit accounting.
+  const inputsDisabled = submitting || lock.isLocked || formGatedByBatch || lifecycleLocked || !canEditAccounting;
   // R10 — Has the selected batch ever been saved? Used to label the submit
   // button as "Save Batch" (first save) vs "Edit Batch" (subsequent edits).
   // produced_qty_kg is the canonical "Save Output ran" signal — set by the
@@ -4874,8 +4917,9 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
             />
           </dl>
         ) : null}
-        {/* Open a new batch — name is mandatory for packing stages only. */}
-        {detail.status !== "completed" || isAdmin ? (
+        {/* Open a new batch — name is mandatory for packing stages only.
+            Hidden when the role lacks overview/start (batch-open). */}
+        {(detail.status !== "completed" || isAdmin) && canStartBatch ? (
           <div className="flex items-center gap-2 mb-3 flex-wrap">
             <label className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)] sm:w-[110px]">
               New batch
@@ -4970,7 +5014,8 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                                 // produced/RM/EGA figures from THIS form's live state (scoped
                                 // to selectedBatchId). Closing a non-loaded batch would seed it
                                 // with the wrong batch's numbers → corrupt close. Load first.
-                                disabled={busy || !isOpen || !isLoaded}
+                                // !canCompleteBatch adds the overview/complete permission gate.
+                                disabled={busy || !isOpen || !isLoaded || !canCompleteBatch}
                                 title={
                                   !isOpen ? `Batch is ${b.status}`
                                   : !isLoaded ? "Load this batch first"
@@ -5595,7 +5640,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
         // is open. Modal pre-fill + post-close refresh are unchanged
         // — only the trigger's location moved.
         extraActions={
-          (detail.status !== "completed" || isAdmin) && selectedBatch ? (
+          (detail.status !== "completed" || isAdmin) && selectedBatch && canCompleteBatch ? (
             <button
               type="button"
               onClick={() => setCloseBatchModal(selectedBatch)}
@@ -6237,6 +6282,10 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
   // 409 when locked. Combine with the per-section busy flags so the existing
   // submit-in-flight UI keeps working unchanged when the JC is unlocked.
   const lock = useLockState(detail);
+  // Fine-grained permission gate (UX only; server still enforces). Quality
+  // annexure add + notify-qc both map to quality/create; when absent the
+  // annexure forms + Save/Notify controls go read-only.
+  const canAddQuality = useHasPermission("production", "job_cards", "quality", "create");
 
   // ── Metal Detection (single-add form) ──────────────────────────────────
   const [mdCheckType, setMdCheckType] = useState<string>(METAL_CHECK_TYPES[1].value); // post_packaging default
@@ -6508,8 +6557,8 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
   // Per-section disabled flags — combined with the lock state + R10
   // lifecycle gate (fields stay read-only until START is clicked).
   const lifecycleLocked = isLifecycleLocked(detail.status);
-  const metalDisabled = addingMetal || lock.isLocked || lifecycleLocked;
-  const qualityDisabled = savingQuality || lock.isLocked || lifecycleLocked;
+  const metalDisabled = addingMetal || lock.isLocked || lifecycleLocked || !canAddQuality;
+  const qualityDisabled = savingQuality || lock.isLocked || lifecycleLocked || !canAddQuality;
 
   return (
     <>
@@ -6533,7 +6582,7 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           POST /notify-qc fans out the in-app notification to QC users.
           W3-HIGH-4 — `notifyFeedback` is rendered next to the button so it
           doesn't clobber the shared `feedback` slot used by Save Quality. */}
-      {detail.status === "completed" ? (
+      {detail.status === "completed" && canAddQuality ? (
         <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-end gap-2">
           {notifyFeedback ? (
             <p
@@ -6611,7 +6660,7 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
             lockState={lock}
             busy={addingMetal}
             busyLabel="Saving…"
-            disabled={addingMetal}
+            disabled={addingMetal || !canAddQuality}
             onClick={addMetalCheck}
           >
             Add metal check
@@ -6755,7 +6804,7 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           lockState={lock}
           busy={savingQuality}
           busyLabel="Saving…"
-          disabled={savingQuality}
+          disabled={savingQuality || !canAddQuality}
           onClick={saveQuality}
           variant="primary"
           className="h-9 px-4 text-[13px] font-bold tracking-wide"

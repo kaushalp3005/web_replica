@@ -5,6 +5,7 @@
 // picker-cancel guard, same manual/append/edit/delete flow.
 
 import { useEffect, useRef, useState } from "react";
+import { useHasPermission } from "@/lib/user";
 import {
   addContract,
   appendContractFile,
@@ -61,6 +62,11 @@ export function ContractsTab({
   showToast: ShowToast;
   confirm: Confirm;
 }): React.JSX.Element {
+  // Contract action gates (UX only — server enforces).
+  const canCreate = useHasPermission("purchase", "vendor", "contract", "create");
+  const canUpdate = useHasPermission("purchase", "vendor", "contract", "update");
+  const canDelete = useHasPermission("purchase", "vendor", "contract", "delete");
+
   const [rows, setRows] = useState<ContractResponse[]>(initial);
   const [typeFilter, setTypeFilter] = useState("");
   const [loading, setLoading] = useState(false);
@@ -177,12 +183,16 @@ export function ContractsTab({
             </option>
           ))}
         </select>
-        <button type="button" className={SECONDARY_BTN} disabled={uploading} onClick={() => armContractAction({ mode: "upload-and-save" })}>
-          {uploading ? "Uploading…" : "Upload & extract"}
-        </button>
-        <button type="button" className={GHOST_BTN} onClick={() => setModal({ contract: null, extracted: null })}>
-          Manual entry
-        </button>
+        {canCreate ? (
+          <button type="button" className={SECONDARY_BTN} disabled={uploading} onClick={() => armContractAction({ mode: "upload-and-save" })}>
+            {uploading ? "Uploading…" : "Upload & extract"}
+          </button>
+        ) : null}
+        {canCreate ? (
+          <button type="button" className={GHOST_BTN} onClick={() => setModal({ contract: null, extracted: null })}>
+            Manual entry
+          </button>
+        ) : null}
         <input ref={fileInputRef} type="file" accept={UPLOAD_ACCEPT} className="hidden" onChange={(e) => void onFileChange(e)} />
       </div>
 
@@ -233,15 +243,21 @@ export function ContractsTab({
                       <Td><FileChips csv={c.s3_urls} /></Td>
                       <Td>
                         <div className="flex flex-wrap gap-1">
-                          <button type="button" className={GHOST_BTN} disabled={busy || uploading} onClick={() => armContractAction({ mode: "append", contractId: c.contract_id })}>
-                            Append file
-                          </button>
-                          <button type="button" className={GHOST_BTN} disabled={busy} onClick={() => setModal({ contract: c, extracted: null })}>
-                            Edit
-                          </button>
-                          <button type="button" className={DANGER_BTN} disabled={busy} onClick={() => void handleDelete(c)}>
-                            Delete
-                          </button>
+                          {canUpdate && (
+                            <button type="button" className={GHOST_BTN} disabled={busy || uploading} onClick={() => armContractAction({ mode: "append", contractId: c.contract_id })}>
+                              Append file
+                            </button>
+                          )}
+                          {canUpdate && (
+                            <button type="button" className={GHOST_BTN} disabled={busy} onClick={() => setModal({ contract: c, extracted: null })}>
+                              Edit
+                            </button>
+                          )}
+                          {canDelete && (
+                            <button type="button" className={DANGER_BTN} disabled={busy} onClick={() => void handleDelete(c)}>
+                              Delete
+                            </button>
+                          )}
                         </div>
                       </Td>
                     </tr>

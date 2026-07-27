@@ -8,7 +8,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useRequireAuth } from "@/lib/user";
+import { useRequireAuth, useHasPermission } from "@/lib/user";
 import { type PoListQuery } from "@/lib/po";
 import { BackLink } from "@/components/BackLink";
 import { PurchaseChrome } from "../_chrome";
@@ -31,6 +31,9 @@ const DEFAULT_QUERY: PoListQuery = {
 export default function MaterialInPage(): React.JSX.Element {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
+
+  // Sending a walk-in (no-PO) QC intimation maps to material_in/qcint/create.
+  const canWalkInIntimate = useHasPermission("purchase", "material_in", "qcint", "create");
 
   // ── Hydration guard (SSR/client match) ────────────────────────────────────
   // No sessionStorage cache for this page — simple mount guard avoids
@@ -106,16 +109,18 @@ export default function MaterialInPage(): React.JSX.Element {
             Browse purchase orders by article and send arrival intimations.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setWalkInOpen(true)}
-          className="h-9 px-4 text-[13px] rounded-[2px] bg-[var(--aws-orange)] text-white font-semibold hover:bg-[var(--aws-orange-hover)] whitespace-nowrap shrink-0 inline-flex items-center gap-2"
-        >
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-            <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
-          </svg>
-          Send Purchase Intimation
-        </button>
+        {canWalkInIntimate ? (
+          <button
+            type="button"
+            onClick={() => setWalkInOpen(true)}
+            className="h-9 px-4 text-[13px] rounded-[2px] bg-[var(--aws-orange)] text-white font-semibold hover:bg-[var(--aws-orange-hover)] whitespace-nowrap shrink-0 inline-flex items-center gap-2"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
+            </svg>
+            Send Purchase Intimation
+          </button>
+        ) : null}
       </div>
 
       {/* Listing */}

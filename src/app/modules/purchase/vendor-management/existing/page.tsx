@@ -16,7 +16,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useRequireAuth } from "@/lib/user";
+import { useRequireAuth, useHasPermission } from "@/lib/user";
 import { BackLink } from "@/components/BackLink";
 import { PurchaseChrome } from "../../_chrome";
 import {
@@ -58,6 +58,10 @@ const GHOST_BTN =
 export default function ExistingVendorsPage(): React.JSX.Element {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
+
+  // Row-action permission gates (UX only — server enforces).
+  const canApprove = useHasPermission("purchase", "vendor", "master", "approve");
+  const canDeleteVendor = useHasPermission("purchase", "vendor", "master", "delete");
 
   // Hydration gate — hold the auth branch until after mount so the SSR HTML and
   // the first client paint are byte-identical (mirrors the wizard / list pages).
@@ -439,6 +443,8 @@ export default function ExistingVendorsPage(): React.JSX.Element {
                     onView={onView}
                     onApprove={handleApprove}
                     onDelete={handleDelete}
+                    canApprove={canApprove}
+                    canDelete={canDeleteVendor}
                   />
                 ))
               )}
@@ -471,10 +477,12 @@ interface VendorRowProps {
   onView: (vendorId: string) => void;
   onApprove: (vendorId: string) => void;
   onDelete: (vendorId: string) => void;
+  canApprove: boolean;
+  canDelete: boolean;
 }
 
 const VendorRow = memo(function VendorRow(
-  { row: v, categories, busy, onView, onApprove, onDelete }: VendorRowProps,
+  { row: v, categories, busy, onView, onApprove, onDelete, canApprove, canDelete }: VendorRowProps,
 ): React.JSX.Element {
   const isApproved = v.is_approved ?? !!v.approved_at;
   const category = getLookupLabel(categories, typeof v.category_code_id === "string" ? v.category_code_id : null) || "—";
@@ -503,17 +511,19 @@ const VendorRow = memo(function VendorRow(
       <Td>
         <div className="flex flex-wrap gap-1">
           <button type="button" className={GHOST_BTN} onClick={() => onView(v.vendor_id)} title="Open detail">View</button>
-          {!isApproved && (
+          {!isApproved && canApprove && (
             <button type="button" className={GHOST_BTN} disabled={busy}
               onClick={() => onApprove(v.vendor_id)} title="SCM-Head approval">
               {busy ? "…" : "Approve"}
             </button>
           )}
-          <button type="button"
-            className="h-7 px-2.5 text-[12px] rounded-[2px] border border-[#f5c6bc] text-[var(--aws-error)] bg-white hover:bg-[#fdf3f1] disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled={busy} onClick={() => onDelete(v.vendor_id)} title="Soft-delete">
-            {busy ? "…" : "Delete"}
-          </button>
+          {canDelete && (
+            <button type="button"
+              className="h-7 px-2.5 text-[12px] rounded-[2px] border border-[#f5c6bc] text-[var(--aws-error)] bg-white hover:bg-[#fdf3f1] disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={busy} onClick={() => onDelete(v.vendor_id)} title="Soft-delete">
+              {busy ? "…" : "Delete"}
+            </button>
+          )}
         </div>
       </Td>
     </tr>

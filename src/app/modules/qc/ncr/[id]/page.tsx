@@ -28,7 +28,7 @@ import {
   updateNcr,
   deleteNcr,
 } from "@/lib/qc";
-import { useRequireAuth } from "@/lib/user";
+import { useRequireAuth, useHasPermission } from "@/lib/user";
 import { BackLink } from "@/components/BackLink";
 import { QcChrome } from "../../_chrome";
 
@@ -257,6 +257,10 @@ export default function NcrDetailPage(): React.JSX.Element {
   const params = useParams<{ id: string }>();
   const ncrId = Number(params?.id);
 
+  // Fine-grained permission gates (UX only; server still enforces).
+  const canEditNcr = useHasPermission("qc", "ncr", null, "edit");
+  const canDeleteNcr = useHasPermission("qc", "ncr", null, "delete");
+
   const [mounted, setMounted] = useState(false);
   useEffect(() => { queueMicrotask(() => setMounted(true)); }, []);
 
@@ -360,12 +364,14 @@ export default function NcrDetailPage(): React.JSX.Element {
           onUpdated={applyUpdated}
           onBanner={setBanner}
           onDeleted={() => router.push("/modules/qc/ncr")}
+          canEdit={canEditNcr}
+          canDelete={canDeleteNcr}
         />
-        <LotHeaderCard key={`lot-${fetchNonce}`} detail={detail} onUpdated={applyUpdated} onBanner={setBanner} />
-        <DispositionCard key={`disp-${fetchNonce}`} detail={detail} onUpdated={applyUpdated} onBanner={setBanner} />
-        <FailedParamsCard key={`fp-${fetchNonce}`} detail={detail} onUpdated={applyUpdated} onBanner={setBanner} />
-        <SupplierCapaCard key={`capa-${fetchNonce}`} detail={detail} onUpdated={applyUpdated} onBanner={setBanner} />
-        <SignOffCard key={`sign-${fetchNonce}`} detail={detail} onUpdated={applyUpdated} onBanner={setBanner} />
+        <LotHeaderCard key={`lot-${fetchNonce}`} detail={detail} onUpdated={applyUpdated} onBanner={setBanner} canEdit={canEditNcr} />
+        <DispositionCard key={`disp-${fetchNonce}`} detail={detail} onUpdated={applyUpdated} onBanner={setBanner} canEdit={canEditNcr} />
+        <FailedParamsCard key={`fp-${fetchNonce}`} detail={detail} onUpdated={applyUpdated} onBanner={setBanner} canEdit={canEditNcr} />
+        <SupplierCapaCard key={`capa-${fetchNonce}`} detail={detail} onUpdated={applyUpdated} onBanner={setBanner} canEdit={canEditNcr} />
+        <SignOffCard key={`sign-${fetchNonce}`} detail={detail} onUpdated={applyUpdated} onBanner={setBanner} canEdit={canEditNcr} />
         <RollupCard detail={detail} />
       </div>
     </QcChrome>
@@ -378,6 +384,9 @@ interface CardProps {
   detail: NcrDetail;
   onUpdated: (d: NcrDetail) => void;
   onBanner: (b: { kind: "ok" | "err"; text: string } | null) => void;
+  // Gates the per-card "Edit" entry point (qc.ncr.edit). When false, the card
+  // stays read-only — no way to reach the save/add/remove controls.
+  canEdit: boolean;
 }
 
 // ── Header card ──────────────────────────────────────────────────────────────
@@ -418,7 +427,9 @@ function StatusBar({
   onUpdated,
   onBanner,
   onDeleted,
-}: CardProps & { onDeleted: () => void }): React.JSX.Element {
+  canEdit,
+  canDelete,
+}: CardProps & { onDeleted: () => void; canDelete: boolean }): React.JSX.Element {
   const [busy, setBusy] = useState<NcrStatus | "delete" | null>(null);
 
   async function transition(status: NcrStatus) {
@@ -452,30 +463,32 @@ function StatusBar({
 
   return (
     <div className="flex flex-wrap gap-2 items-center">
-      {status === "open" ? (
+      {canEdit && status === "open" ? (
         <TransitionBtn label="→ In Supplier Action" busy={busy === "in_supplier_action"} onClick={() => void transition("in_supplier_action")} variant="primary" />
       ) : null}
-      {status === "in_supplier_action" ? (
+      {canEdit && status === "in_supplier_action" ? (
         <>
           <TransitionBtn label="← Re-open" busy={busy === "open"} onClick={() => void transition("open")} />
           <TransitionBtn label="→ Close" busy={busy === "closed"} onClick={() => void transition("closed")} variant="primary" />
         </>
       ) : null}
-      {status === "closed" ? (
+      {canEdit && status === "closed" ? (
         <TransitionBtn label="← Re-open" busy={busy === "open"} onClick={() => void transition("open")} />
       ) : null}
 
       <div className="flex-1" />
 
-      <button
-        type="button"
-        onClick={() => void handleDelete()}
-        disabled={busy != null}
-        className="h-8 px-3 text-[12px] rounded-[2px] border border-[#b1361e] bg-white text-[#b1361e] hover:bg-[#fdf3f1] disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-      >
-        {busy === "delete" ? <span className="inline-block w-3 h-3 border-2 border-[#b1361e]/40 border-t-[#b1361e] rounded-full animate-spin" /> : null}
-        Delete NCR
-      </button>
+      {canDelete ? (
+        <button
+          type="button"
+          onClick={() => void handleDelete()}
+          disabled={busy != null}
+          className="h-8 px-3 text-[12px] rounded-[2px] border border-[#b1361e] bg-white text-[#b1361e] hover:bg-[#fdf3f1] disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+        >
+          {busy === "delete" ? <span className="inline-block w-3 h-3 border-2 border-[#b1361e]/40 border-t-[#b1361e] rounded-full animate-spin" /> : null}
+          Delete NCR
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -510,7 +523,7 @@ function TransitionBtn({
 
 // ── Lot / header fields card ─────────────────────────────────────────────────
 
-function LotHeaderCard({ detail, onUpdated, onBanner }: CardProps): React.JSX.Element {
+function LotHeaderCard({ detail, onUpdated, onBanner, canEdit }: CardProps): React.JSX.Element {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -560,14 +573,16 @@ function LotHeaderCard({ detail, onUpdated, onBanner }: CardProps): React.JSX.El
     <Card
       title="Lot / header"
       actions={
-        editing ? (
-          <>
-            <EditBtn editing onClick={() => setEditing(false)} />
-            <SaveBtn busy={busy} onClick={() => void save()} />
-          </>
-        ) : (
-          <EditBtn editing={false} onClick={() => setEditing(true)} />
-        )
+        canEdit ? (
+          editing ? (
+            <>
+              <EditBtn editing onClick={() => setEditing(false)} />
+              <SaveBtn busy={busy} onClick={() => void save()} />
+            </>
+          ) : (
+            <EditBtn editing={false} onClick={() => setEditing(true)} />
+          )
+        ) : undefined
       }
     >
       {editing ? (
@@ -616,7 +631,7 @@ function LotHeaderCard({ detail, onUpdated, onBanner }: CardProps): React.JSX.El
 
 // ── Disposition card ─────────────────────────────────────────────────────────
 
-function DispositionCard({ detail, onUpdated, onBanner }: CardProps): React.JSX.Element {
+function DispositionCard({ detail, onUpdated, onBanner, canEdit }: CardProps): React.JSX.Element {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -650,14 +665,16 @@ function DispositionCard({ detail, onUpdated, onBanner }: CardProps): React.JSX.
     <Card
       title="Disposition"
       actions={
-        editing ? (
-          <>
-            <EditBtn editing onClick={() => setEditing(false)} />
-            <SaveBtn busy={busy} onClick={() => void save()} />
-          </>
-        ) : (
-          <EditBtn editing={false} onClick={() => setEditing(true)} />
-        )
+        canEdit ? (
+          editing ? (
+            <>
+              <EditBtn editing onClick={() => setEditing(false)} />
+              <SaveBtn busy={busy} onClick={() => void save()} />
+            </>
+          ) : (
+            <EditBtn editing={false} onClick={() => setEditing(true)} />
+          )
+        ) : undefined
       }
     >
       {editing ? (
@@ -710,7 +727,7 @@ function emptyFailedParam(): FailedParameter {
   };
 }
 
-function FailedParamsCard({ detail, onUpdated, onBanner }: CardProps): React.JSX.Element {
+function FailedParamsCard({ detail, onUpdated, onBanner, canEdit }: CardProps): React.JSX.Element {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [rows, setRows] = useState<FailedParameter[]>(detail.failed_parameters);
@@ -755,15 +772,17 @@ function FailedParamsCard({ detail, onUpdated, onBanner }: CardProps): React.JSX
       title="Failed parameters"
       count={editing ? rows.length : detail.failed_parameters.length}
       actions={
-        editing ? (
-          <>
-            <button type="button" onClick={addRow} className="h-7 px-3 text-[12px] rounded-[2px] border border-(--aws-border-strong) bg-white hover:border-(--aws-navy) text-(--text-primary)">+ Row</button>
-            <EditBtn editing onClick={() => setEditing(false)} />
-            <SaveBtn busy={busy} onClick={() => void save()} />
-          </>
-        ) : (
-          <EditBtn editing={false} onClick={startEdit} />
-        )
+        canEdit ? (
+          editing ? (
+            <>
+              <button type="button" onClick={addRow} className="h-7 px-3 text-[12px] rounded-[2px] border border-(--aws-border-strong) bg-white hover:border-(--aws-navy) text-(--text-primary)">+ Row</button>
+              <EditBtn editing onClick={() => setEditing(false)} />
+              <SaveBtn busy={busy} onClick={() => void save()} />
+            </>
+          ) : (
+            <EditBtn editing={false} onClick={startEdit} />
+          )
+        ) : undefined
       }
     >
       {!editing ? (
@@ -845,7 +864,7 @@ function emptySupplierAction(): SupplierAction {
   };
 }
 
-function SupplierCapaCard({ detail, onUpdated, onBanner }: CardProps): React.JSX.Element {
+function SupplierCapaCard({ detail, onUpdated, onBanner, canEdit }: CardProps): React.JSX.Element {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [rows, setRows] = useState<SupplierAction[]>(detail.supplier_actions);
@@ -889,15 +908,17 @@ function SupplierCapaCard({ detail, onUpdated, onBanner }: CardProps): React.JSX
       title="Supplier CAPA"
       count={editing ? rows.length : detail.supplier_actions.length}
       actions={
-        editing ? (
-          <>
-            <button type="button" onClick={addRow} className="h-7 px-3 text-[12px] rounded-[2px] border border-(--aws-border-strong) bg-white hover:border-(--aws-navy) text-(--text-primary)">+ Action</button>
-            <EditBtn editing onClick={() => setEditing(false)} />
-            <SaveBtn busy={busy} onClick={() => void save()} />
-          </>
-        ) : (
-          <EditBtn editing={false} onClick={startEdit} />
-        )
+        canEdit ? (
+          editing ? (
+            <>
+              <button type="button" onClick={addRow} className="h-7 px-3 text-[12px] rounded-[2px] border border-(--aws-border-strong) bg-white hover:border-(--aws-navy) text-(--text-primary)">+ Action</button>
+              <EditBtn editing onClick={() => setEditing(false)} />
+              <SaveBtn busy={busy} onClick={() => void save()} />
+            </>
+          ) : (
+            <EditBtn editing={false} onClick={startEdit} />
+          )
+        ) : undefined
       }
     >
       {!editing ? (
@@ -971,7 +992,7 @@ function SupplierCapaCard({ detail, onUpdated, onBanner }: CardProps): React.JSX
 
 // ── Sign-off card ────────────────────────────────────────────────────────────
 
-function SignOffCard({ detail, onUpdated, onBanner }: CardProps): React.JSX.Element {
+function SignOffCard({ detail, onUpdated, onBanner, canEdit }: CardProps): React.JSX.Element {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -1007,14 +1028,16 @@ function SignOffCard({ detail, onUpdated, onBanner }: CardProps): React.JSX.Elem
     <Card
       title="Sign-off"
       actions={
-        editing ? (
-          <>
-            <EditBtn editing onClick={() => setEditing(false)} />
-            <SaveBtn busy={busy} onClick={() => void save()} />
-          </>
-        ) : (
-          <EditBtn editing={false} onClick={() => setEditing(true)} />
-        )
+        canEdit ? (
+          editing ? (
+            <>
+              <EditBtn editing onClick={() => setEditing(false)} />
+              <SaveBtn busy={busy} onClick={() => void save()} />
+            </>
+          ) : (
+            <EditBtn editing={false} onClick={() => setEditing(true)} />
+          )
+        ) : undefined
       }
     >
       {editing ? (

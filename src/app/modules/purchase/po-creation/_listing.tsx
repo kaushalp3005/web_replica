@@ -5,6 +5,7 @@
 // The parent (Task 2.3) owns query/search/expanded state and passes them in as props.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useHasPermission } from "@/lib/user";
 import {
   type PoListItem,
   type PoLineOut,
@@ -36,6 +37,9 @@ export interface PoListingProps {
 
 export function PoListing(props: PoListingProps): React.JSX.Element {
   const { query, onQueryChange, search, onSearch, expanded, onToggleExpand, reloadKey } = props;
+
+  // Deleting a PO maps to purchase/po/delete (UX gate; server enforces).
+  const canDelete = useHasPermission("purchase", "po", null, "delete");
 
   // ── Local state ────────────────────────────────────────────────────────────
   const [loading, setLoading] = useState(true);
@@ -262,6 +266,7 @@ export function PoListing(props: PoListingProps): React.JSX.Element {
                       onToggle={() => onToggleExpand(txn)}
                       onDelete={() => setDeleteModal({ txn, poNumber: row.po_number })}
                       linesState={linesCache.get(txn)}
+                      canDelete={canDelete}
                     />
                   );
                 })
@@ -299,6 +304,7 @@ export function PoListing(props: PoListingProps): React.JSX.Element {
                 onToggle={() => onToggleExpand(txn)}
                 onDelete={() => setDeleteModal({ txn, poNumber: row.po_number })}
                 linesState={linesCache.get(txn)}
+                canDelete={canDelete}
               />
             );
           })
@@ -840,7 +846,7 @@ function EntityPill({ entity }: { entity?: string | null }) {
 
 // ── Action buttons ────────────────────────────────────────────────────────────
 
-function ActionBtns({ onToggle, onDelete, isOpen }: { onToggle: () => void; onDelete: () => void; isOpen: boolean }) {
+function ActionBtns({ onToggle, onDelete, isOpen, canDelete }: { onToggle: () => void; onDelete: () => void; isOpen: boolean; canDelete: boolean }) {
   return (
     <div className="flex items-center gap-1">
       {/* Eye / view */}
@@ -858,18 +864,20 @@ function ActionBtns({ onToggle, onDelete, isOpen }: { onToggle: () => void; onDe
           }
         </svg>
       </button>
-      {/* Trash / delete */}
-      <button
-        type="button"
-        onClick={onDelete}
-        title="Delete PO"
-        aria-label="Delete PO"
-        className="p-1 rounded hover:bg-[#fdf3f1] text-[var(--text-secondary)] hover:text-[#b1361e]"
-      >
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2}>
-          <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4h6v2" />
-        </svg>
-      </button>
+      {/* Trash / delete — gated on purchase/po/delete */}
+      {canDelete ? (
+        <button
+          type="button"
+          onClick={onDelete}
+          title="Delete PO"
+          aria-label="Delete PO"
+          className="p-1 rounded hover:bg-[#fdf3f1] text-[var(--text-secondary)] hover:text-[#b1361e]"
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2}>
+            <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14H6L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4h6v2" />
+          </svg>
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -877,13 +885,14 @@ function ActionBtns({ onToggle, onDelete, isOpen }: { onToggle: () => void; onDe
 // ── Table Row + Detail ─────────────────────────────────────────────────────────
 
 function PoTableRow({
-  row, isOpen, onToggle, onDelete, linesState,
+  row, isOpen, onToggle, onDelete, linesState, canDelete,
 }: {
   row: PoListItem;
   isOpen: boolean;
   onToggle: () => void;
   onDelete: () => void;
   linesState?: { lines?: PoLineOut[]; loading: boolean; error?: string };
+  canDelete: boolean;
 }) {
   return (
     <>
@@ -908,7 +917,7 @@ function PoTableRow({
         <td className="px-3 py-2 whitespace-nowrap"><EntityPill entity={row.entity} /></td>
         <td className="px-3 py-2 whitespace-nowrap font-mono text-[12px]">{fmtCur(row.gross_total)}</td>
         <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
-          <ActionBtns onToggle={onToggle} onDelete={onDelete} isOpen={isOpen} />
+          <ActionBtns onToggle={onToggle} onDelete={onDelete} isOpen={isOpen} canDelete={canDelete} />
         </td>
       </tr>
       {isOpen ? (
@@ -925,13 +934,14 @@ function PoTableRow({
 // ── Mobile Card ───────────────────────────────────────────────────────────────
 
 function PoMobileCard({
-  row, isOpen, onToggle, onDelete, linesState,
+  row, isOpen, onToggle, onDelete, linesState, canDelete,
 }: {
   row: PoListItem;
   isOpen: boolean;
   onToggle: () => void;
   onDelete: () => void;
   linesState?: { lines?: PoLineOut[]; loading: boolean; error?: string };
+  canDelete: boolean;
 }) {
   return (
     <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
@@ -962,7 +972,7 @@ function PoMobileCard({
           </div>
         </div>
         <div className="shrink-0">
-          <ActionBtns onToggle={onToggle} onDelete={onDelete} isOpen={isOpen} />
+          <ActionBtns onToggle={onToggle} onDelete={onDelete} isOpen={isOpen} canDelete={canDelete} />
         </div>
       </div>
       {isOpen ? (

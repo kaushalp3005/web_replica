@@ -248,6 +248,9 @@ export const MODULES: ModuleItem[] = [
 // scoped. A user holding several scoped roles gets the union of their routes.
 export const ROLE_MODULE_SCOPE: Record<string, string[]> = {
   purchase_manager: ["purchase"],
+  // store_head = stores/Material-In clerk. Scope to the Purchase tile (Material
+  // In lives under it); the scope also overrides Purchase's adminOnly flag.
+  store_head:    ["purchase"],
   // Scoped production roles. Keys are either a top-level module route
   // ("job-card") or a "<module>/<sub>" sub-route for finer gating WITHIN a
   // landing page — SO Creation / Planning / Plan List all live under the one
@@ -257,6 +260,11 @@ export const ROLE_MODULE_SCOPE: Record<string, string[]> = {
   // planner can bring in demand before building a plan.
   planner:       ["production/so-creation", "production/planning", "production/plan-list", "job-card"],
   floor_manager: ["job-card"],
+  // QC roles see only the standalone QC module (inward inspection / NCR /
+  // parameters). The scope overrides the QC tile's adminOnly flag (like
+  // purchase); the QC landing page admits qc_manager/qc_inspector to match.
+  qc_manager:    ["qc"],
+  qc_inspector:  ["qc"],
 };
 
 /** The routes a scoped user may see, or `null` when the user is not scoped (in

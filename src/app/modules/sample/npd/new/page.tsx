@@ -11,7 +11,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, SAMPLE_ROOT } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useHasPermission } from "@/lib/user";
 import {
   createNpdRequisition, NPD_SAMPLE_TYPES, NPD_WAREHOUSES,
   type NpdSampleType, type PurposeTag,
@@ -33,6 +33,7 @@ export default function NewNpdRequisitionPage() {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
   const initial = useUserInitial();
+  const canCreateReq = useHasPermission("sample", "requisition", null, "create");
 
   const [sampleType, setSampleType] = useState<NpdSampleType | "">("");
   const [targets, setTargets] = useState<TargetRow[]>([{ ...EMPTY_TARGET }]);
@@ -221,7 +222,7 @@ export default function NewNpdRequisitionPage() {
           <button onClick={() => router.push("/modules/sample")}
             className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] text-[13px] bg-white hover:bg-[var(--surface-subtle)]">Cancel</button>
           <div className="flex-1" />
-          <button disabled={saving || !canSubmit} onClick={save}
+          <button disabled={saving || !canSubmit || !canCreateReq} onClick={save}
             className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">
             {saving ? "Submitting…" : "Submit request"}
           </button>

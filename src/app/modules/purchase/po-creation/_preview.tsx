@@ -6,6 +6,7 @@
 // sub-components are purely presentational / receive callbacks.
 
 import { useState } from "react";
+import { useHasPermission } from "@/lib/user";
 import {
   type PreviewResponse,
   type PreviewPo,
@@ -126,6 +127,9 @@ function stripMeta(po: WorkPo): CommitPo {
 
 export function PoPreview(props: PreviewProps): React.JSX.Element {
   const { fileName, entity, preview, requestId, onCancel, onCommitted } = props;
+
+  // Committing (saving) a PO maps to purchase/po/edit (UX gate; server enforces).
+  const canCommit = useHasPermission("purchase", "po", null, "edit");
 
   // Cloned once on mount. The parent remounts PoPreview with key={fileName} per upload,
   // so a new parse always gets a fresh instance (no prop-driven reset needed here).
@@ -335,6 +339,7 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
         commitError={commitError}
         onCommit={handleCommit}
         onCancel={onCancel}
+        canCommit={canCommit}
       />
     </div>
   );
@@ -982,6 +987,7 @@ function CommitBar({
   commitError,
   onCommit,
   onCancel,
+  canCommit,
 }: {
   mode: CommitMode;
   onMode: (m: CommitMode) => void;
@@ -994,6 +1000,7 @@ function CommitBar({
   commitError: string | null;
   onCommit: () => void;
   onCancel: () => void;
+  canCommit: boolean;
 }): React.JSX.Element {
   const modes: { value: CommitMode; label: string }[] = [
     { value: "create_only", label: "Create only" },
@@ -1053,18 +1060,20 @@ function CommitBar({
           Cancel
         </button>
 
-        {/* Commit */}
-        <button
-          type="button"
-          onClick={onCommit}
-          disabled={committing || selected === 0}
-          className="h-8 px-4 text-[12px] font-semibold rounded-[2px] bg-[var(--aws-navy)] text-white hover:bg-[#002244] disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-        >
-          {committing && (
-            <span className="inline-block w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-          )}
-          {btnLabel}
-        </button>
+        {/* Commit — gated on purchase/po/edit */}
+        {canCommit ? (
+          <button
+            type="button"
+            onClick={onCommit}
+            disabled={committing || selected === 0}
+            className="h-8 px-4 text-[12px] font-semibold rounded-[2px] bg-[var(--aws-navy)] text-white hover:bg-[#002244] disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          >
+            {committing && (
+              <span className="inline-block w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            )}
+            {btnLabel}
+          </button>
+        ) : null}
       </div>
     </div>
   );

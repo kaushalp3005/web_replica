@@ -9,7 +9,7 @@ import {
   getInspection,
   getInspectionAudit,
 } from "@/lib/qc";
-import { useIsQcManager } from "@/lib/user";
+import { useIsQcManager, useHasPermission } from "@/lib/user";
 import { AddReadingsModal } from "./_modals/AddReadingsModal";
 import { EditReadingModal } from "./_modals/EditReadingModal";
 import { DeleteReadingModal } from "./_modals/DeleteReadingModal";
@@ -296,6 +296,10 @@ export function InwardInspectionDetail({
 }): React.JSX.Element {
   const router = useRouter();
   const isManager = useIsQcManager();
+  // Fine-grained permission gates (UX only; server still enforces). Verdict
+  // set/override keeps the useIsQcManager gate ALONGSIDE the edit permission.
+  const canEditInsp = useHasPermission("qc", "inspection", null, "edit");
+  const canRaiseNcr = useHasPermission("qc", "ncr", null, "create");
   const [detail, setDetail] = useState<InspectionDetail | null>(null);
   const [audit, setAudit]   = useState<AuditEvent[]>([]);
   const [loading, setLoading]   = useState(false);
@@ -402,9 +406,11 @@ export function InwardInspectionDetail({
   // readings; AFTER approval, only a QC manager may. The verdict itself is the
   // manager's sign-off, so only managers may set or change it.
   const isApproved = status === "verdict_passed" || status === "verdict_failed";
-  const canEditReadings = isApproved
-    ? isManager
-    : status === "in_progress" || status === "readings_submitted";
+  const canEditReadings =
+    canEditInsp &&
+    (isApproved
+      ? isManager
+      : status === "in_progress" || status === "readings_submitted");
 
   // ── Helpers for the spec display ──────────────────────────────────────────
 
@@ -460,19 +466,23 @@ export function InwardInspectionDetail({
       <div className="flex flex-wrap gap-2 items-center">
         {/* Status-driven actions */}
         {status === "in_progress" ? (
-          <>
-            <ActionBtn label="Update header" onClick={() => setActiveModal({ kind: "updateHeader" })} />
-            <ActionBtn label="Cancel inspection" onClick={() => setActiveModal({ kind: "cancelInspection" })} variant="danger" />
-            <ActionBtn label="Add readings" onClick={() => setActiveModal({ kind: "addReadings" })} variant="primary" />
-          </>
+          canEditInsp ? (
+            <>
+              <ActionBtn label="Update header" onClick={() => setActiveModal({ kind: "updateHeader" })} />
+              <ActionBtn label="Cancel inspection" onClick={() => setActiveModal({ kind: "cancelInspection" })} variant="danger" />
+              <ActionBtn label="Add readings" onClick={() => setActiveModal({ kind: "addReadings" })} variant="primary" />
+            </>
+          ) : null
         ) : status === "readings_submitted" ? (
           <>
-            <ActionBtn label="Update header" onClick={() => setActiveModal({ kind: "updateHeader" })} />
+            {canEditInsp ? (
+              <ActionBtn label="Update header" onClick={() => setActiveModal({ kind: "updateHeader" })} />
+            ) : null}
             {canEditReadings ? (
               <ActionBtn label="Add readings" onClick={() => setActiveModal({ kind: "addReadings" })} />
             ) : null}
-            {/* Verdict is the QC manager's sign-off — managers only. */}
-            {isManager ? (
+            {/* Verdict is the QC manager's sign-off — managers only (kept), plus edit permission. */}
+            {isManager && canEditInsp ? (
               <ActionBtn label="Set verdict" onClick={() => setActiveModal({ kind: "setVerdict" })} variant="primary" />
             ) : null}
           </>
@@ -482,12 +492,14 @@ export function InwardInspectionDetail({
             {canEditReadings ? (
               <ActionBtn label="Add readings" onClick={() => setActiveModal({ kind: "addReadings" })} />
             ) : null}
-            {isManager ? (
+            {isManager && canEditInsp ? (
               <ActionBtn label="Change verdict" onClick={() => setActiveModal({ kind: "overrideVerdict" })} />
             ) : null}
           </>
         ) : status === "cancelled" ? (
-          <ActionBtn label="Reopen" onClick={() => setActiveModal({ kind: "reopenInspection" })} variant="primary" />
+          canEditInsp ? (
+            <ActionBtn label="Reopen" onClick={() => setActiveModal({ kind: "reopenInspection" })} variant="primary" />
+          ) : null
         ) : null}
 
         {/* Raise NCR — shown for a failed verdict. If an NCR already exists,
@@ -497,13 +509,13 @@ export function InwardInspectionDetail({
             <span className="inline-flex items-center gap-1.5 h-8 px-3 text-[12px] rounded-[2px] border border-[#f0c7be] bg-[#fdf3f1] text-[#b1361e] font-semibold">
               NCR: <span className="font-mono">{detail.ncr_no}</span>
             </span>
-          ) : (
+          ) : canRaiseNcr ? (
             <ActionBtn
               label="Raise NCR"
               onClick={() => setActiveModal({ kind: "raiseNcr" })}
               variant="danger"
             />
-          )
+          ) : null
         ) : null}
 
         {/* Always-present reload */}

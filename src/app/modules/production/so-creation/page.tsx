@@ -10,7 +10,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useRequireAuth, useUserScope, useRequireModuleAccess } from "@/lib/user";
+import { useRequireAuth, useUserScope, useRequireModuleAccess, useHasPermission } from "@/lib/user";
 import { useSeesCost } from "@/lib/cost-gate";
 import { friendlyApiError } from "@/lib/apiErrors";
 import {
@@ -242,6 +242,14 @@ export default function SoCreationPage() {
   // Auth scope (warehouses + floors) drives the plan-builder's factory /
   // floor pickers, same as the planning page.
   const scope = useUserScope();
+  // Fine-grained action gates (UX only — the server still enforces). Admins
+  // pass everything. Computed once here at the top per the hook rules, then
+  // threaded into the toolbar / table so row-dense children don't each
+  // subscribe to /me.
+  const canCreateSO = useHasPermission("so", null, null, "create");
+  const canEditSO = useHasPermission("so", null, null, "edit");
+  const canExportSO = useHasPermission("so", null, null, "view");
+  const canCreatePlan = useHasPermission("production", "plans", null, "create");
 
   // Upload drop-zone visibility. SOs are upload-only now (manual creation was
   // removed) so there's no method picker — a header "Upload Excel" button
@@ -756,6 +764,7 @@ export default function SoCreationPage() {
             Plan button mirrors planning's header CTA: orange, disabled with no
             selection or while a plan is in flight. */}
         <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+          {canCreateSO ? (
           <button
             type="button"
             onClick={() => { setUploadOpen((v) => !v); setUploadMsg(null); }}
@@ -772,7 +781,9 @@ export default function SoCreationPage() {
             </svg>
             Upload Excel
           </button>
+          ) : null}
           <EntitySelector value={company} onChange={onEntityChange} />
+          {canCreatePlan ? (
           <button
             type="button"
             onClick={async () => {
@@ -798,6 +809,7 @@ export default function SoCreationPage() {
                 ? `Create Plan · ${pb.selectedIds.size}`
                 : "Create Plan"}
           </button>
+          ) : null}
         </div>
       </div>
 
@@ -862,6 +874,7 @@ export default function SoCreationPage() {
         }}
         filterOptions={data?.filter_options}
         onExport={onExport}
+        canExport={canExportSO}
         onRefresh={() => { setExpanded(new Set()); setPage(1); }}
         onSync={onSync}
         syncing={syncing}
@@ -959,6 +972,7 @@ export default function SoCreationPage() {
         expanded={expanded}
         onToggle={toggleExpanded}
         seesCost={seesCost}
+        canEdit={canEditSO}
         selectedLineIds={selectedLineIds}
         onToggleLine={onToggleLine}
         syncVersion={syncVersion}
@@ -1078,7 +1092,7 @@ function Toolbar({
   article, onArticleChange,
   onClearAllFilters,
   filterOptions,
-  onExport, onRefresh,
+  onExport, canExport, onRefresh,
   onSync, syncing,
 }: {
   search: string;
@@ -1103,6 +1117,7 @@ function Toolbar({
   onClearAllFilters: () => void;
   filterOptions?: SoFilterOptions;
   onExport: (only?: "mismatch" | "warning") => void;
+  canExport: boolean;
   onRefresh: () => void;
   onSync: () => void;
   syncing: boolean;
@@ -1331,6 +1346,7 @@ function Toolbar({
       </div>
 
       {/* Export */}
+      {canExport ? (
       <div className="relative">
         <button
           type="button"
@@ -1350,6 +1366,7 @@ function Toolbar({
           </div>
         ) : null}
       </div>
+      ) : null}
 
       {/* Sync — pushes SO lines into so_fulfillment_v2 (idempotent). Uses a
           distinct exchange glyph so it doesn't read as a second Refresh sitting
@@ -1645,7 +1662,7 @@ function AdvancedFilterPanel({
 
 function SoTable({
   rows, loading, error, sortBy, sortOrder, onSort,
-  expanded, onToggle, seesCost,
+  expanded, onToggle, seesCost, canEdit,
   selectedLineIds, onToggleLine, syncVersion,
   onEditHeader, onEditLines,
 }: {
@@ -1662,6 +1679,10 @@ function SoTable({
   // both the mobile-card branch and the desktop-table branch read the
   // same value.
   seesCost: boolean;
+  // so/edit gate — hides the per-row Edit affordance for roles that
+  // can't edit SOs. Threaded from the page so the 50 rows don't each
+  // re-run the permission hook.
+  canEdit: boolean;
   // Page-level article selection (so_line_id) + toggler — threaded down to
   // every LineCard so the checkbox state feeds the plan-builder panel.
   selectedLineIds: Set<number>;
@@ -1702,6 +1723,7 @@ function SoTable({
               isOpen={row.so_id != null && expanded.has(row.so_id)}
               onToggle={() => row.so_id != null && onToggle(row.so_id)}
               seesCost={seesCost}
+              canEdit={canEdit}
               selectedLineIds={selectedLineIds}
               onToggleLine={onToggleLine}
               syncVersion={syncVersion}
@@ -1754,6 +1776,7 @@ function SoTable({
                     isOpen={!!isOpen}
                     onToggle={() => row.so_id != null && onToggle(row.so_id)}
                     seesCost={seesCost}
+                    canEdit={canEdit}
                     selectedLineIds={selectedLineIds}
                     onToggleLine={onToggleLine}
                     syncVersion={syncVersion}
@@ -1778,7 +1801,7 @@ function SoTable({
 // the same data into one card per SO with a tap-to-expand affordance.
 
 function SoMobileCard({
-  row, isOpen, onToggle, seesCost,
+  row, isOpen, onToggle, seesCost, canEdit,
   selectedLineIds, onToggleLine, syncVersion,
   onEditHeader, onEditLines,
 }: {
@@ -1786,6 +1809,7 @@ function SoMobileCard({
   isOpen: boolean;
   onToggle: () => void;
   seesCost: boolean;
+  canEdit: boolean;
   selectedLineIds: Set<number>;
   onToggleLine: (soLineId: number, line: SoLine) => void;
   syncVersion: number;
@@ -1828,6 +1852,7 @@ function SoMobileCard({
             <div className="shrink-0"><GstSegBar row={row} /></div>
           </div>
         </div>
+        {canEdit ? (
         <div className="relative shrink-0">
           <button
             type="button"
@@ -1846,6 +1871,7 @@ function SoMobileCard({
             </div>
           ) : null}
         </div>
+        ) : null}
       </div>
       {isOpen ? (
         <div className="border-t border-[var(--aws-border)] p-3 bg-[var(--surface-subtle)]">
@@ -1894,7 +1920,7 @@ function Th({
 }
 
 function SoTableRow({
-  row, isOpen, onToggle, seesCost,
+  row, isOpen, onToggle, seesCost, canEdit,
   selectedLineIds, onToggleLine, syncVersion,
   onEditHeader, onEditLines,
 }: {
@@ -1902,6 +1928,7 @@ function SoTableRow({
   isOpen: boolean;
   onToggle: () => void;
   seesCost: boolean;
+  canEdit: boolean;
   selectedLineIds: Set<number>;
   onToggleLine: (soLineId: number, line: SoLine) => void;
   syncVersion: number;
@@ -1945,6 +1972,8 @@ function SoTableRow({
         <td className="px-3 py-2 whitespace-nowrap">{row.total_lines ?? row.line_count ?? row.lines?.length ?? 0}</td>
         <td className="px-3 py-2"><GstSegBar row={row} /></td>
         <td className="px-3 py-2 relative">
+          {canEdit ? (
+          <>
           <button
             type="button"
             onClick={() => setMenuOpen((v) => !v)}
@@ -1961,6 +1990,8 @@ function SoTableRow({
               <button type="button" onClick={() => { setMenuOpen(false); onEditHeader(); }} className="w-full text-left px-2 py-1.5 text-[13px] hover:bg-[var(--surface-disabled)] rounded-sm">Edit Header</button>
               <button type="button" onClick={() => { setMenuOpen(false); onEditLines(); }} className="w-full text-left px-2 py-1.5 text-[13px] hover:bg-[var(--surface-disabled)] rounded-sm">Edit Lines</button>
             </div>
+          ) : null}
+          </>
           ) : null}
         </td>
       </tr>

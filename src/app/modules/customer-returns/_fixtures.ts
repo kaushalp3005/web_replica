@@ -1,50 +1,15 @@
-// Customer-Returns reference data + approval-flow fixtures.
+// Customer-Returns reference data for the approval screen.
 //
-// The approve/reject/hold + send-for-approval + email endpoints are NOT live yet
-// (backend Phase 3 unbuilt). The approval screen is wired to these fixtures now
-// and swaps to the real client when the endpoints land — same fixtures-now /
-// API-later seam the inventory-ledger module uses.
-//
-// The dropdown option lists mirror the backend's BUSINESS_HEAD_EMAILS /
-// SALES_POC_EMAILS (backend/shared/email_notifier.py) and are also used by the
-// live create form.
+// Approve/Reject/Hold + send-for-approval + the magic-link email are now LIVE
+// (lib/customer-returns decideCustomerReturn / sendCustomerReturnForApproval +
+// the backend customer_returns router). This file keeps only the small static
+// bits the UI still needs: the "Other" POC sentinel, the action→status map, and a
+// SAMPLE_CR the approve screen falls back to when a live record can't be loaded.
+// Business-Head / Sales-POC NAMES come from the DB routing (getCrEmailRouting).
 
 import type { CRStatus, CRWithDetails } from "@/lib/customer-returns";
 
-export const BUSINESS_HEAD_OPTIONS = [
-  "Prashant Pal",
-  "Ajay Bajaj",
-  "Rakesh Ratra",
-  "Yash Gawdi",
-  "Satyendra Garg",
-  "R M Patil",
-] as const;
-
 export const SALES_POC_OTHER = "Other" as const;
-
-export const SALES_POC_OPTIONS = [
-  "Ashwin Baghul",
-  "B Hrithik",
-  "Dashrath Birajdar",
-  "Mayuresh Mahadik",
-  "Sachin More",
-  "Shubham Seth",
-  "Shubham Shivekar",
-  "Suraj Salunkhe",
-  "Suresh Luthra",
-  "Swadhin Joshi",
-  "Ajay Bajaj",
-  "Prashant Pal",
-  "R M Patil",
-  "Rakesh Ratra",
-  "Satyendra Garg",
-  "Yash Gawdi",
-] as const;
-
-export const SALES_POC_DROPDOWN_OPTIONS: string[] = [
-  ...[...SALES_POC_OPTIONS].sort((a, b) => a.localeCompare(b)),
-  SALES_POC_OTHER,
-];
 
 export type ApprovalAction = "approve" | "reject" | "hold";
 
@@ -53,15 +18,6 @@ export const ACTION_TO_STATUS: Record<ApprovalAction, CRStatus> = {
   reject: "Rejected",
   hold: "On Hold",
 };
-
-// Placeholder for the Phase-3 approval endpoint. Resolves with the status the
-// backend WOULD set, so the UI can update optimistically. Swap the body for
-// `updateCustomerReturn(company, crId, { status })` (or a dedicated /approve
-// call) once the backend lands.
-export async function mockApplyApproval(action: ApprovalAction): Promise<{ status: CRStatus }> {
-  await new Promise((r) => setTimeout(r, 400));
-  return { status: ACTION_TO_STATUS[action] };
-}
 
 // A demo record so the approval screen renders even with no live CR selected.
 export const SAMPLE_CR: CRWithDetails = {

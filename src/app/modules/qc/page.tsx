@@ -3,7 +3,7 @@
 // QC module landing. Card grid for QC sub-modules.
 
 import { useRouter } from "next/navigation";
-import { useRequireAuth, useIsAdmin } from "@/lib/user";
+import { useRequireAuth, useHasRole } from "@/lib/user";
 import { BackLink } from "@/components/BackLink";
 import { QcChrome } from "./_chrome";
 
@@ -33,7 +33,13 @@ const SUB_MODULES: SubModule[] = [
 export default function QcLandingPage() {
   const router = useRouter();
   useRequireAuth(router.replace);
-  const isAdmin = useIsAdmin();
+  // Admins, QC managers, and QC inspectors may use the QC module. useHasRole
+  // returns true for admins too. Keep in sync with ROLE_MODULE_SCOPE["qc"].
+  // Call both hooks unconditionally (|| short-circuits, which would make the
+  // second call conditional and violate the rules of hooks), then combine.
+  const isQcManager = useHasRole("qc_manager");
+  const isQcInspector = useHasRole("qc_inspector");
+  const canAccess = isQcManager || isQcInspector;
 
   return (
     <QcChrome title="QC">
@@ -46,7 +52,7 @@ export default function QcLandingPage() {
           Inspect inward goods, capture readings, and gate stock release on QC outcomes.
         </p>
       </div>
-      {!isAdmin ? (
+      {!canAccess ? (
         <section className="bg-white border border-[var(--aws-border)] rounded-md p-6 text-[13px] text-[var(--text-secondary)]">
           You don&rsquo;t have access to the QC module. Ask an administrator to grant you access, or switch to a different account.
         </section>

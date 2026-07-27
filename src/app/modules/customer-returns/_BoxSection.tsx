@@ -22,7 +22,7 @@ const roCls = "h-8 rounded border border-[var(--aws-border)] px-2 text-[12px] bg
 const labelCls = "text-[11px] text-[var(--text-secondary)]";
 
 export function CustomerReturnBoxSection({
-  article, uom, carton, isCold, boxes, onBoxesChange, onPrint, printingKey, disabled,
+  article, uom, carton, isCold, boxes, onBoxesChange, onPrint, printingKey, disabled: disabledProp, locked,
 }: {
   article: string;
   uom: string;
@@ -33,7 +33,11 @@ export function CustomerReturnBoxSection({
   onPrint?: (article: string, boxNumber: number) => void;
   printingKey?: string | null;
   disabled?: boolean;
+  // Locked = legacy create-screen state: box weights & QR unlock only after mail
+  // approval. Shows the banner and disables every control (implies disabled).
+  locked?: boolean;
 }) {
+  const disabled = disabledProp || locked;
   const mine = boxesForArticle(boxes, article);
   const ctx = { uom, carton };
 
@@ -46,6 +50,15 @@ export function CustomerReturnBoxSection({
 
   return (
     <div className="mt-3 pt-3 border-t border-[var(--aws-border)] space-y-3">
+      {locked && (
+        <div className="flex items-start gap-2 rounded-md border border-dashed border-[#f0cf9a] bg-[#fdf6ec] px-3 py-2 text-[11px] text-[#9a6b1f]">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
+          <span>
+            Box-wise net/gross weights &amp; QR labels unlock after mail approval. This entry is
+            saved with <strong>0 boxes</strong>; enter box weights from the CR once it is approved.
+          </span>
+        </div>
+      )}
       {/* Controls */}
       <div className="flex flex-wrap items-end gap-3">
         <div className="space-y-1">

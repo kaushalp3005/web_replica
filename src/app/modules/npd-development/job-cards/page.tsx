@@ -9,7 +9,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useMe, useHasPermission } from "@/lib/user";
 import { sampleCaps } from "@/lib/sample-roles";
 import { listDevJobCards, type DevJobCard } from "@/lib/npd-dev";
 import { DEV_JC_STATUS_STYLES, DevJcStatusPill } from "../../sample/_shared";
@@ -49,6 +49,7 @@ export default function NpdDevJobCardsPage() {
   const initial = useUserInitial();
   const me = useMe();
   const caps = useMemo(() => sampleCaps(me), [me]);
+  const canCreateJc = useHasPermission("sample", "npd", null, "create");
 
   const [status, setStatus] = useState("");
   const [rows, setRows] = useState<DevJobCard[]>([]);
@@ -102,7 +103,7 @@ export default function NpdDevJobCardsPage() {
           <p className="text-[12px] text-[var(--text-secondary)] mt-0.5">{rows.length} shown · standalone product development</p>
         </div>
         <div className="flex-1" />
-        {caps.canNpd && (
+        {caps.canNpd && canCreateJc && (
           <button
             onClick={() => router.push("/modules/npd-development/job-cards/new")}
             className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium hover:bg-[var(--aws-orange-hover)]"

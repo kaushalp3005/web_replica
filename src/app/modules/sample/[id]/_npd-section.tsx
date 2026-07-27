@@ -11,6 +11,7 @@ import {
   type Requisition, type NpdDraft, type NpdLine,
 } from "@/lib/sample";
 import { sampleCaps } from "@/lib/sample-roles";
+import { useHasPermission } from "@/lib/user";
 import { ArticlePicker } from "../_form";
 
 export function NpdSection({ req, caps, onChange }: {
@@ -20,6 +21,9 @@ export function NpdSection({ req, caps, onChange }: {
   const [lines, setLines] = useState<NpdLine[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const canNpdCreate = useHasPermission("sample", "npd", null, "create");
+  const canNpdEdit = useHasPermission("sample", "npd", null, "edit");
+  const canNpdPromote = useHasPermission("sample", "npd", "promote", "create");
 
   const load = useCallback(async () => {
     if (req.npd_draft_bom_id == null) { setDraft(null); return; }
@@ -43,7 +47,7 @@ export function NpdSection({ req, caps, onChange }: {
     <Card title="NPD draft BOM">
       {err && <div className="mb-2 text-[12px] text-[var(--aws-error)]">{err}</div>}
       {req.npd_draft_bom_id == null ? (
-        caps.canNpd ? (
+        caps.canNpd && canNpdCreate ? (
           <div className="flex flex-wrap gap-2">
             <button disabled={busy} onClick={() => wrap(() => createNpdDraft(req.id, { base_bom_id: req.base_bom_id ?? undefined, fg_sku_name: req.npd_target_name ?? undefined, clone_from_base: !!req.base_bom_id }))}
               className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">
@@ -99,12 +103,16 @@ export function NpdSection({ req, caps, onChange }: {
           )}
           {editable && (
             <div className="flex flex-wrap gap-2 pt-1">
-              <button disabled={busy} onClick={() => wrap(() => replaceNpdLines(draft.id, lines.map((l) => ({
-                ...l, qty: Number(l.qty) || 0, ownership: l.ownership ?? "OWN", is_off_master: !!l.is_off_master,
-              }))))}
-                className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] disabled:opacity-50 hover:bg-[var(--surface-subtle)]">Save lines</button>
-              <button disabled={busy || lines.length === 0} onClick={() => wrap(() => promoteNpdDraft(draft.id))}
-                className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Promote to live BOM</button>
+              {canNpdEdit && (
+                <button disabled={busy} onClick={() => wrap(() => replaceNpdLines(draft.id, lines.map((l) => ({
+                  ...l, qty: Number(l.qty) || 0, ownership: l.ownership ?? "OWN", is_off_master: !!l.is_off_master,
+                }))))}
+                  className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] disabled:opacity-50 hover:bg-[var(--surface-subtle)]">Save lines</button>
+              )}
+              {canNpdPromote && (
+                <button disabled={busy || lines.length === 0} onClick={() => wrap(() => promoteNpdDraft(draft.id))}
+                  className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Promote to live BOM</button>
+              )}
             </div>
           )}
           <p className="text-[11px] text-[var(--text-muted)]">Customer-supplied lines are recorded for traceability — no stock is issued for them.</p>

@@ -14,6 +14,7 @@ import {
   listNcrs,
 } from "@/lib/qc";
 import { CreateNcrModal } from "./_CreateNcrModal";
+import { useHasPermission } from "@/lib/user";
 
 // ── Public interface ─────────────────────────────────────────────────────────
 
@@ -97,6 +98,9 @@ export function NcrList(props: NcrListProps): React.JSX.Element {
   const { query, onQueryChange, search, onSearch, reloadKey } = props;
   const router = useRouter();
 
+  // Fine-grained permission gate for the "Raise NCR" CTA (UX only).
+  const canCreateNcr = useHasPermission("qc", "ncr", null, "create");
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<NcrListResponse | null>(null);
@@ -142,16 +146,18 @@ export function NcrList(props: NcrListProps): React.JSX.Element {
   return (
     <div>
       {/* Header actions */}
-      <div className="flex justify-end mb-3">
-        <button
-          type="button"
-          onClick={() => setCreateOpen(true)}
-          className="h-8 px-3 text-[12px] rounded-[2px] bg-(--aws-navy) text-white hover:bg-[var(--aws-navy-hover,#0d2535)] flex items-center gap-1.5"
-        >
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
-          Raise NCR
-        </button>
-      </div>
+      {canCreateNcr ? (
+        <div className="flex justify-end mb-3">
+          <button
+            type="button"
+            onClick={() => setCreateOpen(true)}
+            className="h-8 px-3 text-[12px] rounded-[2px] bg-(--aws-navy) text-white hover:bg-[var(--aws-navy-hover,#0d2535)] flex items-center gap-1.5"
+          >
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+            Raise NCR
+          </button>
+        </div>
+      ) : null}
 
       {/* Status pills */}
       <StatusPills status={query.status ?? ""} onStatus={(s) => onQueryChange({ status: s, page: 1 })} />

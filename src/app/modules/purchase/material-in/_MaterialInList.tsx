@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useHasPermission } from "@/lib/user";
 import {
   type PoListItem,
   type PoLineOut,
@@ -114,6 +115,9 @@ const SORTABLE_COLS = ["po_number", "vendor_supplier_name", "transaction_no"] as
 export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
   const { query, onQueryChange, search, onSearch, expanded, onToggleExpand } = props;
   const router = useRouter();
+
+  // Sending a PO arrival intimation maps to material_in/point/create (UX gate).
+  const canSendIntimation = useHasPermission("purchase", "material_in", "point", "create");
 
   // ── Per-section state (each section fetched + paginated independently) ──────
   const [sections, setSections] = useState<Record<GroupKey, SectionState>>(() => ({
@@ -503,6 +507,7 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
               expanded={expanded}
               onToggleExpand={onToggleExpand}
               onSendClick={handleSendClick}
+              canSend={canSendIntimation}
               onInward={(txn) => router.push(`/modules/purchase/material-in/${encodeURIComponent(txn)}`)}
               linesCache={linesCache}
               qcSummary={qcSummary}
@@ -1180,12 +1185,13 @@ function ArticlesSummary({
 // ── Action buttons (view + send — no delete) ──────────────────────────────────
 
 function ActionBtns({
-  onToggle, onSend, onInward, isOpen,
+  onToggle, onSend, onInward, isOpen, canSend,
 }: {
   onToggle: () => void;
   onSend: () => void;
   onInward: () => void;
   isOpen: boolean;
+  canSend: boolean;
 }) {
   return (
     <div className="flex items-center gap-1">
@@ -1216,19 +1222,21 @@ function ActionBtns({
           <line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" />
         </svg>
       </button>
-      {/* Send intimation */}
-      <button
-        type="button"
-        onClick={onSend}
-        title="Send intimation"
-        aria-label="Send intimation"
-        className="p-1 rounded hover:bg-[#eaf0fb] text-[var(--text-secondary)] hover:text-[#2c5fa8]"
-      >
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-          <line x1="22" y1="2" x2="11" y2="13" />
-          <polygon points="22 2 15 22 11 13 2 9 22 2" />
-        </svg>
-      </button>
+      {/* Send intimation — gated on material_in/point/create */}
+      {canSend ? (
+        <button
+          type="button"
+          onClick={onSend}
+          title="Send intimation"
+          aria-label="Send intimation"
+          className="p-1 rounded hover:bg-[#eaf0fb] text-[var(--text-secondary)] hover:text-[#2c5fa8]"
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13" />
+            <polygon points="22 2 15 22 11 13 2 9 22 2" />
+          </svg>
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -1247,7 +1255,7 @@ type ReceiptState = { summary?: ReceiptSummary; loading: boolean; error?: string
 
 function SectionPanel({
   meta, section, sort, onSort, collapsed, onToggle, onPage, onRetry,
-  expanded, onToggleExpand, onSendClick, onInward,
+  expanded, onToggleExpand, onSendClick, onInward, canSend,
   linesCache, qcSummary, arrivalsCache, receiptCache,
 }: {
   meta: GroupMeta;
@@ -1262,6 +1270,7 @@ function SectionPanel({
   onToggleExpand: (txn: string) => void;
   onSendClick: (txn: string) => void;
   onInward: (txn: string) => void;
+  canSend: boolean;
   linesCache: Map<string, LinesState>;
   qcSummary: Map<string, ArrivalSummaryItem>;
   arrivalsCache: Map<string, ArrivalsState>;
@@ -1332,6 +1341,7 @@ function SectionPanel({
                       onToggle={() => onToggleExpand(txn)}
                       onSend={() => onSendClick(txn)}
                       onInward={() => onInward(txn)}
+                      canSend={canSend}
                       linesState={linesCache.get(txn)}
                       qcSummaryItem={qcSummary.get(txn)}
                       arrivalsState={arrivalsCache.get(txn)}
@@ -1355,6 +1365,7 @@ function SectionPanel({
                   onToggle={() => onToggleExpand(txn)}
                   onSend={() => onSendClick(txn)}
                   onInward={() => onInward(txn)}
+                  canSend={canSend}
                   linesState={linesCache.get(txn)}
                   qcSummaryItem={qcSummary.get(txn)}
                   arrivalsState={arrivalsCache.get(txn)}
@@ -1386,13 +1397,14 @@ function SectionPanel({
 // ── Table Row + Detail ─────────────────────────────────────────────────────────
 
 function MaterialInTableRow({
-  row, isOpen, onToggle, onSend, onInward, linesState, qcSummaryItem, arrivalsState, receiptState,
+  row, isOpen, onToggle, onSend, onInward, canSend, linesState, qcSummaryItem, arrivalsState, receiptState,
 }: {
   row: PoListItem;
   isOpen: boolean;
   onToggle: () => void;
   onSend: () => void;
   onInward: () => void;
+  canSend: boolean;
   linesState?: { lines?: PoLineOut[]; loading: boolean; error?: string };
   qcSummaryItem?: ArrivalSummaryItem;
   arrivalsState?: { arrivals?: ArrivalItem[]; loading: boolean; error?: string };
@@ -1424,7 +1436,7 @@ function MaterialInTableRow({
           <QcTxnBadge summary={qcSummaryItem} />
         </td>
         <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
-          <ActionBtns onToggle={onToggle} onSend={onSend} onInward={onInward} isOpen={isOpen} />
+          <ActionBtns onToggle={onToggle} onSend={onSend} onInward={onInward} isOpen={isOpen} canSend={canSend} />
         </td>
       </tr>
       {isOpen ? (
@@ -1441,13 +1453,14 @@ function MaterialInTableRow({
 // ── Mobile Card ───────────────────────────────────────────────────────────────
 
 function MaterialInMobileCard({
-  row, isOpen, onToggle, onSend, onInward, linesState, qcSummaryItem, arrivalsState, receiptState,
+  row, isOpen, onToggle, onSend, onInward, canSend, linesState, qcSummaryItem, arrivalsState, receiptState,
 }: {
   row: PoListItem;
   isOpen: boolean;
   onToggle: () => void;
   onSend: () => void;
   onInward: () => void;
+  canSend: boolean;
   linesState?: { lines?: PoLineOut[]; loading: boolean; error?: string };
   qcSummaryItem?: ArrivalSummaryItem;
   arrivalsState?: { arrivals?: ArrivalItem[]; loading: boolean; error?: string };
@@ -1493,7 +1506,7 @@ function MaterialInMobileCard({
         </div>
         {/* Actions */}
         <div className="shrink-0">
-          <ActionBtns onToggle={onToggle} onSend={onSend} onInward={onInward} isOpen={isOpen} />
+          <ActionBtns onToggle={onToggle} onSend={onSend} onInward={onInward} isOpen={isOpen} canSend={canSend} />
         </div>
       </div>
       {/* Expanded detail */}

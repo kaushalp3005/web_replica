@@ -15,6 +15,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
 import { friendlyApiError } from "@/lib/apiErrors";
+import { useHasPermission } from "@/lib/user";
 import { printSfgBoxLabels } from "./_sfgBoxLabelPrint";
 
 const DISPLAY = 10; // boxes shown per page in a group
@@ -164,6 +165,10 @@ function BatchGroupCard({
   focused?: boolean;
   onFocusConsumed?: () => void;
 }) {
+  // Fine-grained permission gate (UX only; server still enforces). Every
+  // write here (add / update / print-which-marks-printed) persists box state,
+  // so all of it maps to box_printing/create.
+  const canManageBoxes = useHasPermission("production", "job_cards", "box_printing", "create");
   const [open, setOpen] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
   const [edits, setEdits] = useState<Record<string, BoxEdit>>({});
@@ -416,14 +421,14 @@ function BatchGroupCard({
           ) : null}
         </button>
         <div className="flex items-center gap-1.5 flex-wrap">
-          <button type="button" className={smallBtn} disabled={group.batchId == null}
+          <button type="button" className={smallBtn} disabled={group.batchId == null || !canManageBoxes}
             title={group.batchId == null ? "Unlinked boxes — assign each a batch (Batch column → Update) before adding more" : undefined}
             onClick={() => { setAddOpen((v) => !v); setOpen(true); }}>+ Add Boxes</button>
-          <button type="button" className={smallBtn} disabled={busy !== null || Object.keys(edits).length === 0 || overCap} onClick={() => void doUpdate()}>
+          <button type="button" className={smallBtn} disabled={busy !== null || Object.keys(edits).length === 0 || overCap || !canManageBoxes} onClick={() => void doUpdate()}>
             {busy === "update" ? "Updating…" : "Update"}
           </button>
           <button
-            type="button" onClick={() => void saveAndPrint(gboxes)} disabled={total === 0 || busy !== null}
+            type="button" onClick={() => void saveAndPrint(gboxes)} disabled={total === 0 || busy !== null || !canManageBoxes}
             title="Print all boxes in this batch (saves + marks printed)"
             className="h-7 px-2 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[#2c5fa8] hover:text-[#2c5fa8] inline-flex items-center gap-1 disabled:opacity-50"
           >
@@ -431,7 +436,7 @@ function BatchGroupCard({
           </button>
           <div className="relative">
             <button
-              type="button" disabled={total === 0} onClick={() => { setRangeOpen((v) => !v); setRangeFrom(String(minNum)); setRangeTo(String(maxNum)); }}
+              type="button" disabled={total === 0 || !canManageBoxes} onClick={() => { setRangeOpen((v) => !v); setRangeFrom(String(minNum)); setRangeTo(String(maxNum)); }}
               title="Print a box-number range"
               className="h-7 px-2 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[#2c5fa8] hover:text-[#2c5fa8] inline-flex items-center gap-1 disabled:opacity-50"
             >
@@ -483,7 +488,8 @@ function BatchGroupCard({
               </thead>
               <tbody>
                 {pageBoxes.map((b) => {
-                  const locked = !isEditable(b); // PENDING/PRINTED editable; received/consumed locked
+                  // Editable when the box status allows AND the role has box_printing/create.
+                  const locked = !isEditable(b) || !canManageBoxes; // PENDING/PRINTED editable; received/consumed locked
                   // A field ever edited (per the JC edit log) gets a light-red input.
                   const red = (field: string) =>
                     changedKeys?.has(`box:${b.box_id}.${field}`) ? " bg-[#fbeced]" : "";
@@ -491,7 +497,7 @@ function BatchGroupCard({
                     <tr key={b.box_id} className={"border-b border-[var(--aws-border)] last:border-b-0" + (b.status === "PRINTED" ? " bg-[#eaf6ed]" : "")}>
                       <td className="px-1.5 py-1">
                         <button type="button" title="Print this box (saves it + marks printed)" aria-label="Print box"
-                          disabled={busy !== null} onClick={() => void saveAndPrint([b])}
+                          disabled={busy !== null || !canManageBoxes} onClick={() => void saveAndPrint([b])}
                           className="p-1 rounded hover:bg-[#eaf0fb] text-[var(--text-secondary)] hover:text-[#2c5fa8] disabled:opacity-50 disabled:cursor-not-allowed">
                           <PrinterIcon size={11} />
                         </button>
@@ -557,8 +563,8 @@ function BatchGroupCard({
                 onChange={(e) => setAddCount(e.target.value)}
                 className="block w-24 h-7 px-1.5 mt-0.5 text-[12px] font-mono rounded-[2px] border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e]" />
             </label>
-            <button type="button" className={smallBtn} disabled={!(parseInt(addCount, 10) >= 1)} onClick={genAdd}>Generate</button>
-            <button type="button" className={smallBtn} disabled={busy !== null || !addRows?.length || addOverCap} onClick={() => void doAdd()}>
+            <button type="button" className={smallBtn} disabled={!(parseInt(addCount, 10) >= 1) || !canManageBoxes} onClick={genAdd}>Generate</button>
+            <button type="button" className={smallBtn} disabled={busy !== null || !addRows?.length || addOverCap || !canManageBoxes} onClick={() => void doAdd()}>
               {busy === "add" ? "Saving…" : "Save New Boxes"}
             </button>
           </div>

@@ -17,7 +17,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useRequireAuth } from "@/lib/user";
+import { useRequireAuth, useHasPermission } from "@/lib/user";
 import { BackLink } from "@/components/BackLink";
 import { PurchaseChrome } from "../../_chrome";
 import {
@@ -197,6 +197,9 @@ interface StepError { message: string; focusKey?: FormKey }
 export default function VendorNewPage(): React.JSX.Element {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
+
+  // Onboarding (extract + submit) maps to vendor/master/create (UX gate).
+  const canCreateVendor = useHasPermission("purchase", "vendor", "master", "create");
 
   // Hydration gate. This page is server-rendered, where useRequireAuth returns
   // true (no token store) but the first browser render starts authed=false — so
@@ -780,7 +783,7 @@ export default function VendorNewPage(): React.JSX.Element {
             filesQueue={filesQueue} extraction={extraction} extracting={extracting} drag={drag}
             fileInputRef={fileInputRef}
             onDrag={setDrag} onAddFiles={addFiles} onRemoveFile={removeFile} onSetDocType={setFileDocType}
-            onRun={runExtract} onCancel={cancelExtract}
+            onRun={runExtract} onCancel={cancelExtract} canExtract={canCreateVendor}
             onSkip={() => { setSkipped(true); setError(null); setStep(2); }}
             onPickConflict={(field, value) => {
               // Write the picked value, then re-add the key to autoFilled so the
@@ -851,7 +854,7 @@ export default function VendorNewPage(): React.JSX.Element {
             </button>
             <button
               type="button" onClick={goNext}
-              disabled={submitting || (step === 1 && !canAdvanceStep1)}
+              disabled={submitting || (step === 1 && !canAdvanceStep1) || (step === TOTAL_STEPS && !canCreateVendor)}
               className="h-9 px-5 text-[13px] font-semibold rounded-[2px] bg-[var(--aws-navy)] text-white hover:bg-[#002244] disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
               {submitting && <span className="inline-block w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
@@ -982,7 +985,7 @@ const SECTION_TITLE = "text-[10px] uppercase tracking-wide font-bold text-[var(-
 // ── Step 1: Upload + Extract ───────────────────────────────────────────────
 function Step1({
   filesQueue, extraction, extracting, drag, fileInputRef,
-  onDrag, onAddFiles, onRemoveFile, onSetDocType, onRun, onCancel, onSkip, onPickConflict,
+  onDrag, onAddFiles, onRemoveFile, onSetDocType, onRun, onCancel, onSkip, onPickConflict, canExtract,
 }: {
   filesQueue: QueuedFile[]; extraction: ExtractBulkResult | null; extracting: boolean; drag: boolean;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
@@ -990,6 +993,7 @@ function Step1({
   onRemoveFile: (id: string) => void; onSetDocType: (id: string, dt: string) => void;
   onRun: () => void; onCancel: () => void; onSkip: () => void;
   onPickConflict: (field: string, value: string) => void;
+  canExtract: boolean;
 }): React.JSX.Element {
   const conflicts = extraction?.conflicts ?? [];
   // Which candidate the user picked per conflicting field — drives the selected/
@@ -1079,13 +1083,13 @@ function Step1({
               <span className="inline-block w-3 h-3 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" />
               Cancel
             </button>
-          ) : (
+          ) : canExtract ? (
             <button type="button" onClick={onRun}
               className="h-8 px-4 text-[12px] font-semibold rounded-[2px] bg-[var(--aws-navy)] text-white hover:bg-[#002244] flex items-center gap-2">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth={2}><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg>
               Extract &amp; fill form
             </button>
-          )}
+          ) : null}
         </div>
       )}
 

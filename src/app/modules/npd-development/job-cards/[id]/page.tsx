@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useMe, useHasPermission } from "@/lib/user";
 import { sampleCaps, roleNamesOf, isAdminMe } from "@/lib/sample-roles";
 import type { MeResponse } from "@/lib/auth";
 import {
@@ -52,6 +52,10 @@ export default function DevJobCardDetailPage() {
   const initial = useUserInitial();
   const me = useMe();
   const caps = useMemo(() => sampleCaps(me), [me]);
+  const canNpdEdit = useHasPermission("sample", "npd", null, "edit");
+  const canNpdDelete = useHasPermission("sample", "npd", null, "delete");
+  const canNpdPromote = useHasPermission("sample", "npd", "promote", "create");
+  const canGatePass = useHasPermission("sample", "gate_pass", null, "create");
 
   const [jc, setJc] = useState<DevJobCard | null>(null);
   const [lines, setLines] = useState<EditLine[]>([]);
@@ -172,7 +176,7 @@ export default function DevJobCardDetailPage() {
 
   const isDraft = jc?.status === "DRAFT";
   // Base recipe is editable while DRAFT or IN_DEVELOPMENT (same as phase recipes).
-  const editable = (isDraft || jc?.status === "IN_DEVELOPMENT") && caps.canNpd;
+  const editable = (isDraft || jc?.status === "IN_DEVELOPMENT") && caps.canNpd && canNpdEdit;
   // Per-article cards (082) carry the recipe on each article, not the card base recipe.
   // article_id != null distinguishes a real article row from the legacy header synthesis.
   const hasArticles = (jc?.articles ?? []).some((a) => a.article_id != null);
@@ -381,12 +385,14 @@ export default function DevJobCardDetailPage() {
             {/* Action bar */}
             {caps.canNpd && (jc.status === "DRAFT" || jc.status === "IN_DEVELOPMENT") && (
               <div className="flex flex-wrap gap-2">
-                {jc.status === "DRAFT" && (
+                {jc.status === "DRAFT" && canNpdEdit && (
                   <button disabled={busy} onClick={() => run(() => startDevJobCard(id))}
                     className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Start development</button>
                 )}
-                <button disabled={busy} onClick={cancelCard}
-                  className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] disabled:opacity-50 hover:bg-[var(--surface-subtle)]">Cancel job card</button>
+                {canNpdDelete && (
+                  <button disabled={busy} onClick={cancelCard}
+                    className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] disabled:opacity-50 hover:bg-[var(--surface-subtle)]">Cancel job card</button>
+                )}
               </div>
             )}
 
@@ -399,7 +405,7 @@ export default function DevJobCardDetailPage() {
                 ) : (
                   <ul className="space-y-3">
                     {jc.phases!.map((p) => {
-                      const canEditPhase = caps.canNpd && (jc.status === "DRAFT" || jc.status === "IN_DEVELOPMENT") && p.status !== "COMPLETED";
+                      const canEditPhase = caps.canNpd && canNpdEdit && (jc.status === "DRAFT" || jc.status === "IN_DEVELOPMENT") && p.status !== "COMPLETED";
                       // Collapsible, but expanded by default so each phase's output +
                       // accounting stays visible (collapse on click to declutter).
                       const isExpanded = expanded[p.phase_id] ?? true;
@@ -423,15 +429,15 @@ export default function DevJobCardDetailPage() {
                               <button disabled={busy} onClick={() => { setRecipePhaseId(p.phase_id); setExpanded((m) => ({ ...m, [p.phase_id]: true })); }}
                                 className="h-7 px-2.5 rounded-[2px] text-[12px] font-medium border border-[var(--aws-border-strong)] bg-white disabled:opacity-50 hover:bg-[var(--surface-subtle)]">Edit recipe</button>
                             )}
-                            {jc.status === "IN_DEVELOPMENT" && caps.canNpd && p.status === "PENDING" && (
+                            {jc.status === "IN_DEVELOPMENT" && caps.canNpd && canNpdEdit && p.status === "PENDING" && (
                               <button disabled={busy} onClick={() => run(() => startDevPhase(id, p.phase_id))}
                                 className="h-7 px-2.5 rounded-[2px] text-[12px] font-medium bg-[var(--aws-orange)] text-white disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Start</button>
                             )}
-                            {jc.status === "IN_DEVELOPMENT" && caps.canNpd && p.status === "IN_PROGRESS" && completingPhaseId !== p.phase_id && (
+                            {jc.status === "IN_DEVELOPMENT" && caps.canNpd && canNpdEdit && p.status === "IN_PROGRESS" && completingPhaseId !== p.phase_id && (
                               <button disabled={busy} onClick={() => { setCompletingPhaseId(p.phase_id); setExpanded((m) => ({ ...m, [p.phase_id]: true })); }}
                                 className="h-7 px-2.5 rounded-[2px] text-[12px] font-medium border border-[var(--aws-border-strong)] bg-white disabled:opacity-50 hover:bg-[var(--surface-subtle)]">Complete</button>
                             )}
-                            {caps.canNpd && (jc.status === "DRAFT" || jc.status === "IN_DEVELOPMENT") && (
+                            {caps.canNpd && canNpdEdit && (jc.status === "DRAFT" || jc.status === "IN_DEVELOPMENT") && (
                               <button disabled={busy} onClick={() => setPhaseToDelete(p)} aria-label="Delete phase" title="Delete phase"
                                 className="w-7 h-7 flex items-center justify-center rounded-[2px] text-[var(--aws-error)] hover:bg-[#fdf3f1] disabled:opacity-50">✕</button>
                             )}
@@ -475,7 +481,7 @@ export default function DevJobCardDetailPage() {
                     })}
                   </ul>
                 )}
-                {caps.canNpd && jc.status === "IN_DEVELOPMENT" && (
+                {caps.canNpd && canNpdEdit && jc.status === "IN_DEVELOPMENT" && (
                   <div className="mt-3 flex items-end gap-2">
                     <input className="form-input flex-1" value={phaseName}
                       placeholder="Phase name — e.g. Trial batch 1, Sensory evaluation…"
@@ -582,7 +588,7 @@ export default function DevJobCardDetailPage() {
             {/* Request promote (IN_DEVELOPMENT) — only once EVERY trial phase is completed.
                 Pick the final trial; its recipe is promoted and its recorded output
                 is inherited (no second accounting entry). */}
-            {!hasArticles && caps.canNpd && jc.status === "IN_DEVELOPMENT" && allPhasesClosed && !jc.promote_gate && (
+            {!hasArticles && caps.canNpd && canNpdPromote && jc.status === "IN_DEVELOPMENT" && allPhasesClosed && !jc.promote_gate && (
               <Card title="Request promote">
                 <p className="text-[12px] text-[var(--text-muted)] mb-3">Pick the final trial. Its recipe will be promoted into a live BOM once the inventory manager and original requestor both accept the promote request.</p>
                 {completedPhases.length === 0 ? (
@@ -622,7 +628,7 @@ export default function DevJobCardDetailPage() {
             {/* Per-article card (082): each article records its OWN output → its own FG
                 batch → its own dispatchable balance. One request-promote for the whole card
                 fans out to N BOMs once both gates accept. */}
-            {hasArticles && caps.canNpd && jc.status === "IN_DEVELOPMENT" && !jc.promote_gate && (
+            {hasArticles && caps.canNpd && canNpdPromote && jc.status === "IN_DEVELOPMENT" && !jc.promote_gate && (
               // key on the article-id set so editing articles (which re-mints ids) re-seeds
               // the output rows — else entered outputs would map to stale ids and be dropped.
               <PerArticlePromoteCard key={(jc.articles ?? []).map((a) => a.article_id).join(",")}
@@ -630,7 +636,7 @@ export default function DevJobCardDetailPage() {
             )}
 
             {/* Record output & request promote — legacy no-phase single-product card. */}
-            {!hasArticles && caps.canNpd && jc.status === "IN_DEVELOPMENT" && !hasPhases && !jc.promote_gate && (
+            {!hasArticles && caps.canNpd && canNpdPromote && jc.status === "IN_DEVELOPMENT" && !hasPhases && !jc.promote_gate && (
               <Card title="Record output & request promote">
                 <p className="text-[12px] text-[var(--text-muted)] mb-3">Requesting promote locks the output and opens a dual-approval gate — both inventory manager and the original requestor must accept before the recipe is promoted to a live BOM.</p>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
@@ -727,7 +733,7 @@ export default function DevJobCardDetailPage() {
                     npd_team + admin only; BH/IM may view the card but not download.
                     Hidden once any partial out exists — the per-part outpasses below
                     then authorize movement, so a full-qty doc can't double-count. */}
-                {caps.canOutpass && (jc.dispatches?.length ?? 0) === 0 && (
+                {caps.canOutpass && canGatePass && (jc.dispatches?.length ?? 0) === 0 && (
                 <div className="mt-3">
                   <button onClick={() => openGatePass()}
                     className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium hover:bg-[var(--aws-orange-hover)] inline-flex items-center gap-1.5">
@@ -741,7 +747,7 @@ export default function DevJobCardDetailPage() {
 
             {/* Partial out — issue the finalized FG sample in parts, each part its
                 own 265 goods issue + its own outpass. npd_team + admin only. */}
-            {jc.status === "CLOSED" && caps.canOutpass && !hasArticles && (
+            {jc.status === "CLOSED" && caps.canOutpass && canGatePass && !hasArticles && (
               <DispatchPanel jc={jc} busy={busy}
                 qty={dispQty} setQty={setDispQty}
                 recipient={dispRecipient} setRecipient={setDispRecipient}
@@ -750,7 +756,7 @@ export default function DevJobCardDetailPage() {
 
             {/* Per-article output & dispatch (083) — each article dispatches its OWN
                 finalized output from its own FG batch, each part its own outpass. */}
-            {jc.status === "CLOSED" && caps.canOutpass && hasArticles && (
+            {jc.status === "CLOSED" && caps.canOutpass && canGatePass && hasArticles && (
               <>
                 {/* One combined outpass for the whole card — every article on its own line. */}
                 {(jc.articles ?? []).some((a) => a.article_id != null && Number(a.output_qty) > 0) && (
@@ -1409,6 +1415,9 @@ function PromoteGatePanel({ gate, devJcId, me, busy, onAction }: {
   // uses. An admin can act on either gate (mirrors the backend admin bypass).
   const isInvMgr = roleNamesOf(me).includes("inventory_manager");
   const isAdmin = isAdminMe(me);
+  // Fine-grained gate: INV_MGR row → inventory sign-off; REQUESTOR_BH row → BH approve.
+  const canInvSignoff = useHasPermission("sample", "inv_signoff", null, "create");
+  const canBhApprove = useHasPermission("sample", "approve", null, "create");
 
   return (
     <Card title="Promote approval gate">
@@ -1432,8 +1441,8 @@ function PromoteGatePanel({ gate, devJcId, me, busy, onAction }: {
         {gate.approvals.map((appr) => {
           const canAct =
             appr.status === "PENDING" &&
-            ((appr.approver_kind === "INV_MGR" && (isInvMgr || isAdmin)) ||
-             (appr.approver_kind === "REQUESTOR_BH" && (isAdmin ||
+            ((appr.approver_kind === "INV_MGR" && (isInvMgr || isAdmin) && canInvSignoff) ||
+             (appr.approver_kind === "REQUESTOR_BH" && canBhApprove && (isAdmin ||
               (me?.user_id != null && appr.approver_user_id != null
                && String(me.user_id) === String(appr.approver_user_id)))));
 

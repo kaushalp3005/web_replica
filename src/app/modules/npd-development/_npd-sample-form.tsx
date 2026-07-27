@@ -13,7 +13,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial, useMe, useIsAdmin } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useMe, useIsAdmin, useHasPermission } from "@/lib/user";
 import {
   createNpdRequisition, submitRequisition, listBusinessHeads, NPD_SAMPLE_TYPES, NPD_WAREHOUSES,
   type NpdSampleType, type PurposeTag,
@@ -41,6 +41,7 @@ export function NpdSampleForm({ defaultType, heading }: {
   const initial = useUserInitial();
   const me = useMe();
   const isAdmin = useIsAdmin();
+  const canCreateReq = useHasPermission("sample", "requisition", null, "create");
   const profileName = (me?.full_name ?? "").trim();
   // sales (like admin) raises on behalf of a business head → pick the requestor from a
   // dropdown of BHs, rather than defaulting to the signed-in user's own name.
@@ -249,9 +250,9 @@ export function NpdSampleForm({ defaultType, heading }: {
           <button onClick={() => router.push("/modules/npd-development")}
             className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] text-[13px] bg-white hover:bg-[var(--surface-subtle)]">Cancel</button>
           <div className="flex-1" />
-          <button disabled={saving || !canSave} onClick={() => save(false)}
+          <button disabled={saving || !canSave || !canCreateReq} onClick={() => save(false)}
             className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] text-[13px] bg-white hover:bg-[var(--surface-subtle)] disabled:opacity-50">Save draft</button>
-          <button disabled={saving || !canSave} onClick={() => save(true)}
+          <button disabled={saving || !canSave || !canCreateReq} onClick={() => save(true)}
             className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">{saving ? "Saving…" : "Save & submit"}</button>
         </div>
       </main>

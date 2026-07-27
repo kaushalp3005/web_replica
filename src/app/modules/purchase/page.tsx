@@ -19,9 +19,15 @@ const SUB_MODULES: SubModule[] = [
 export default function PurchaseLandingPage() {
   const router = useRouter();
   useRequireAuth(router.replace);
-  // Admins AND purchase managers may use the Purchase module. useHasRole
-  // returns true for admins too, so this covers both.
-  const canAccess = useHasRole("purchase_manager");
+  // Admins, purchase managers, and stores (Material-In) clerks may use the
+  // Purchase module. useHasRole returns true for admins too, so this covers
+  // all three. Keep this role list in sync with ROLE_MODULE_SCOPE["purchase"]
+  // in lib/modules.tsx (both admit the same set into the Purchase tile).
+  // Call both hooks unconditionally (|| short-circuits, which would make the
+  // second call conditional and violate the rules of hooks), then combine.
+  const isPurchaseManager = useHasRole("purchase_manager");
+  const isStoreHead = useHasRole("store_head");
+  const canAccess = isPurchaseManager || isStoreHead;
 
   return (
     <PurchaseChrome title="Purchase">

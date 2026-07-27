@@ -5,6 +5,7 @@
 // never silently vanishes.
 
 import { useEffect, useRef, useState } from "react";
+import { useHasPermission } from "@/lib/user";
 import {
   addBanking,
   deleteBanking,
@@ -53,6 +54,11 @@ export function BankingTab({
   showToast: ShowToast;
   confirm: Confirm;
 }): React.JSX.Element {
+  // Banking action gates (UX only — server enforces).
+  const canAdd = useHasPermission("purchase", "vendor", "banking", "create");
+  const canUpdate = useHasPermission("purchase", "vendor", "banking", "update");
+  const canDelete = useHasPermission("purchase", "vendor", "banking", "delete");
+
   const [rows, setRows] = useState<BankingResponse[]>(initial);
   const [activeOnly, setActiveOnly] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -141,9 +147,11 @@ export function BankingTab({
           Active only
         </label>
         <div className="flex-1" />
-        <button type="button" className={PRIMARY_BTN} onClick={() => setModal({ row: null })}>
-          + Add account
-        </button>
+        {canAdd ? (
+          <button type="button" className={PRIMARY_BTN} onClick={() => setModal({ row: null })}>
+            + Add account
+          </button>
+        ) : null}
       </div>
 
       {/* Table */}
@@ -193,17 +201,21 @@ export function BankingTab({
                       <Td>{b.is_active ? <Badge tone="success">Active</Badge> : <Badge tone="neutral">Inactive</Badge>}</Td>
                       <Td>
                         <div className="flex flex-wrap gap-1">
-                          {!b.is_primary && (
+                          {!b.is_primary && canUpdate && (
                             <button type="button" className={GHOST_BTN} disabled={busy} onClick={() => void handleSetPrimary(b)}>
                               Set primary
                             </button>
                           )}
-                          <button type="button" className={GHOST_BTN} disabled={busy} onClick={() => setModal({ row: b })}>
-                            Edit
-                          </button>
-                          <button type="button" className={DANGER_BTN} disabled={busy} onClick={() => void handleDelete(b)}>
-                            Delete
-                          </button>
+                          {canUpdate && (
+                            <button type="button" className={GHOST_BTN} disabled={busy} onClick={() => setModal({ row: b })}>
+                              Edit
+                            </button>
+                          )}
+                          {canDelete && (
+                            <button type="button" className={DANGER_BTN} disabled={busy} onClick={() => void handleDelete(b)}>
+                              Delete
+                            </button>
+                          )}
                         </div>
                       </Td>
                     </tr>

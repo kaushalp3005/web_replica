@@ -8,7 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, SAMPLE_ROOT } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useMe, useHasPermission } from "@/lib/user";
 import { sampleCaps } from "@/lib/sample-roles";
 import {
   getRmForm, approveRmForm, issueRmForm, cancelRmForm, printRmFormBlob,
@@ -32,6 +32,8 @@ export default function RmFormDetailPage() {
   const initial = useUserInitial();
   const me = useMe();
   const caps = useMemo(() => sampleCaps(me), [me]);
+  const canRmIssue = useHasPermission("sample", "inv_signoff", null, "create");
+  const canRmCancel = useHasPermission("sample", "npd", null, "create");
 
   const [form, setForm] = useState<RmForm | null>(null);
   const [issueRows, setIssueRows] = useState<Record<number, IssueRow>>({});
@@ -149,11 +151,11 @@ export default function RmFormDetailPage() {
 
             {/* Actions */}
             <div className="flex flex-wrap gap-2">
-              {form.status === "SUBMITTED" && caps.canInventory && (
+              {form.status === "SUBMITTED" && caps.canInventory && canRmIssue && (
                 <button disabled={busy} onClick={() => run(() => approveRmForm(id))}
                   className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Approve</button>
               )}
-              {editable && (
+              {editable && canRmIssue && (
                 <button disabled={busy} onClick={recordIssue}
                   className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Record issue & post GI</button>
               )}
@@ -161,7 +163,7 @@ export default function RmFormDetailPage() {
                 <button disabled={busy} onClick={printForm}
                   className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] disabled:opacity-50 hover:bg-[var(--surface-subtle)]">Print (Doc 015)</button>
               )}
-              {!["ISSUED", "CLOSED", "CANCELLED"].includes(form.status) && caps.canNpd && (
+              {!["ISSUED", "CLOSED", "CANCELLED"].includes(form.status) && caps.canNpd && canRmCancel && (
                 <button disabled={busy} onClick={cancelForm}
                   className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] disabled:opacity-50 hover:bg-[var(--surface-subtle)]">Cancel</button>
               )}

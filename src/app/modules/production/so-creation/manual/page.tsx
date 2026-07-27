@@ -7,7 +7,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useRequireAuth } from "@/lib/user";
+import { useRequireAuth, useHasPermission } from "@/lib/user";
 import { useSeesCost, seesCostFor } from "@/lib/cost-gate";
 import { createSo, COMPANY_OPTIONS, VOUCHER_TYPE_OPTIONS } from "@/lib/so";
 import { registerOnSignOut, userStore } from "@/lib/auth";
@@ -45,6 +45,10 @@ interface ManualSoDraft {
 export default function ManualSoEntryPage() {
   const router = useRouter();
   useRequireAuth(router.replace);
+  // so/create gate (UX only — server still enforces). Disables Submit for
+  // roles that can't create SOs. Disable rather than hide so the form stays
+  // coherent on this dedicated, deep-link-only page.
+  const canCreateSO = useHasPermission("so", null, null, "create");
   // C12 cost-metric gate. Deny-list roles never see the rate / amount
   // inputs (the editor hides them), so we can't require `rate_inr` from
   // them. The validation block below branches on this flag.
@@ -230,10 +234,11 @@ export default function ManualSoEntryPage() {
           </button>
           <button
             type="submit"
-            disabled={submitting}
+            disabled={submitting || !canCreateSO}
+            title={canCreateSO ? undefined : "You don't have permission to create Sales Orders."}
             className={[
               "h-9 px-4 rounded-[2px] text-[13px] font-bold border tracking-wide",
-              submitting
+              submitting || !canCreateSO
                 ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
                 : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
             ].join(" ")}

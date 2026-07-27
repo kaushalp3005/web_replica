@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, SAMPLE_ROOT, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial, useMe, useIsAdmin } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useMe, useIsAdmin, useHasPermission } from "@/lib/user";
 import { sampleCaps, roleNamesOf } from "@/lib/sample-roles";
 import {
   getRequisition, submitRequisition, cancelRequisition, closeRequisition,
@@ -46,6 +46,9 @@ export default function SampleDetailPage() {
   const initial = useUserInitial();
   const me = useMe();
   const caps = useMemo(() => sampleCaps(me), [me]);
+  const canEditReq = useHasPermission("sample", "requisition", null, "edit");
+  const canDeleteReq = useHasPermission("sample", "requisition", null, "delete");
+  const canNpd = useHasPermission("sample", "npd", null, "create");
 
   const [req, setReq] = useState<Requisition | null>(null);
   const [loading, setLoading] = useState(true);
@@ -186,14 +189,14 @@ export default function SampleDetailPage() {
                         Open
                       </button>
                     )}
-                    {isNpdTrial && caps.canNpd && req.linked_dev_jc_id == null && req.status === "BH_APPROVED" && (
+                    {isNpdTrial && caps.canNpd && canNpd && req.linked_dev_jc_id == null && req.status === "BH_APPROVED" && (
                       <button onClick={() => router.push(`/modules/npd-development/job-cards/new?req=${id}`)}
                         className="h-9 px-3.5 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:bg-[var(--surface-subtle)] inline-flex items-center gap-1.5">
                         <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2.5l2.7 6.1 6.6.6-5 4.4 1.5 6.5L12 17.3 6.2 20.6l1.5-6.5-5-4.4 6.6-.6z" /></svg>
                         Develop
                       </button>
                     )}
-                    {canEdit && !editing && (
+                    {canEdit && canEditReq && !editing && (
                       <button onClick={() => setEditing(true)}
                         className="h-9 px-3.5 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:bg-[var(--surface-subtle)] inline-flex items-center gap-1.5">
                         <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" /></svg>
@@ -201,7 +204,7 @@ export default function SampleDetailPage() {
                       </button>
                     )}
                     {/* Cancel — Sales / BH only, while the request is still live. */}
-                    {isNpdTrial && caps.canEdit && !editing && req.status !== "CANCELLED" && req.status !== "CLOSED" && (
+                    {isNpdTrial && caps.canEdit && canDeleteReq && !editing && req.status !== "CANCELLED" && req.status !== "CLOSED" && (
                       <button onClick={() => setModal("cancel")}
                         className="h-9 px-3.5 rounded-[2px] border border-[#f0c7be] bg-[#fdf3f1] text-[#b1361e] text-[13px] font-medium hover:bg-[#fbe9e4] inline-flex items-center gap-1.5">
                         <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
@@ -284,7 +287,7 @@ export default function SampleDetailPage() {
             )}
 
             {/* NPD review of a BH-sent request — the NPD team's verdict. */}
-            {isNpdTrial && caps.canNpd && (req.status === "SUBMITTED" || req.status === "ON_HOLD") && (
+            {isNpdTrial && caps.canNpd && canNpd && (req.status === "SUBMITTED" || req.status === "ON_HOLD") && (
               <Card title="NPD review">
                 <p className="-mt-1 mb-3 text-[12px] text-[var(--text-muted)]">Record the NPD team&apos;s decision on this request — a reason is required to hold.</p>
                 <div className="flex flex-wrap gap-2">
@@ -487,6 +490,15 @@ function ActionBar({ req, caps, busy, run, setModal, printGatePass }: {
   req: Requisition; caps: ReturnType<typeof sampleCaps>; busy: boolean;
   run: (fn: () => Promise<unknown>) => void; setModal: (m: ModalMode) => void; printGatePass: () => void;
 }) {
+  // Fine-grained action permissions (UX mirror; server still enforces). Computed
+  // once at the top level of this component so the hooks obey the rules of hooks.
+  const canReq = useHasPermission("sample", "requisition", null, "create");
+  const canApproveReq = useHasPermission("sample", "approve", null, "create");
+  const canInvSignoff = useHasPermission("sample", "inv_signoff", null, "create");
+  const canProdAck = useHasPermission("sample", "production_ack", null, "create");
+  const canGatePass = useHasPermission("sample", "gate_pass", null, "create");
+  const canConvertReq = useHasPermission("sample", "convert", null, "create");
+  const canDeleteReq = useHasPermission("sample", "requisition", null, "delete");
   const s = req.status, t = req.sample_type;
   const btns: React.ReactNode[] = [];
   const P = (key: string, label: string, onClick: () => void, primary = false) => btns.push(
@@ -494,33 +506,33 @@ function ActionBar({ req, caps, busy, run, setModal, printGatePass }: {
       className={`h-9 px-4 rounded-[2px] text-[13px] font-medium disabled:opacity-50 ${primary ? "bg-[var(--aws-orange)] text-white hover:bg-[var(--aws-orange-hover)]" : "border border-[var(--aws-border-strong)] bg-white hover:bg-[var(--surface-subtle)]"}`}>{label}</button>
   );
 
-  if (s === "DRAFT" && caps.canRequest) P("submit", "Submit", () => run(() => submitRequisition(req.id)), true);
-  if (s === "BH_REJECTED" && caps.canRequest) P("resubmit", "Re-submit", () => run(() => submitRequisition(req.id)), true);
-  if (s === "SUBMITTED" && caps.canApprove) {
+  if (s === "DRAFT" && caps.canRequest && canReq) P("submit", "Submit", () => run(() => submitRequisition(req.id)), true);
+  if (s === "BH_REJECTED" && caps.canRequest && canReq) P("resubmit", "Re-submit", () => run(() => submitRequisition(req.id)), true);
+  if (s === "SUBMITTED" && caps.canApprove && canApproveReq) {
     P("approve", "Approve", () => run(() => approveRequisition(req.id, "APPROVED")), true);
     P("reject", "Reject", () => setModal("reject"));
   }
   if (s === "BH_APPROVED") {
-    if ((t === "BASIS_RM" || t === "INTERNAL") && caps.canInventory) P("outward", "Issue outward", () => run(() => issueOutward(req.id)), true);
-    if ((t === "BASIS_FG" || t === "NPD" || t === "TRIAL") && caps.canProduction) P("startprod", "Start production", () => run(() => startProduction(req.id)), true);
+    if ((t === "BASIS_RM" || t === "INTERNAL") && caps.canInventory && canInvSignoff) P("outward", "Issue outward", () => run(() => issueOutward(req.id)), true);
+    if ((t === "BASIS_FG" || t === "NPD" || t === "TRIAL") && caps.canProduction && canProdAck) P("startprod", "Start production", () => run(() => startProduction(req.id)), true);
   }
-  if (s === "IN_PRODUCTION" && caps.canProduction) P("packing", "Mark packing", () => run(() => markPacking(req.id)), true);
-  if (s === "PACKING" && caps.canInventory) P("ready", "Mark ready", () => run(() => markReady(req.id)), true);
+  if (s === "IN_PRODUCTION" && caps.canProduction && canProdAck) P("packing", "Mark packing", () => run(() => markPacking(req.id)), true);
+  if (s === "PACKING" && caps.canInventory && canInvSignoff) P("ready", "Mark ready", () => run(() => markReady(req.id)), true);
   if (s === "READY_FOR_DISPATCH" && caps.canInventory) {
-    P("verify", "Inv verify", () => run(() => invVerify(req.id)));
-    P("gp", "Issue gate pass", () => setModal("gatePass"), true);
-    if (t === "INTERNAL") P("dispatch", "Dispatch internal", () => run(() => dispatchInternal(req.id)));
+    if (canInvSignoff) P("verify", "Inv verify", () => run(() => invVerify(req.id)));
+    if (canGatePass) P("gp", "Issue gate pass", () => setModal("gatePass"), true);
+    if (t === "INTERNAL" && canInvSignoff) P("dispatch", "Dispatch internal", () => run(() => dispatchInternal(req.id)));
   }
   if (s === "INTERNALLY_DISPATCHED") {
-    if (caps.canConvert) { P("cfull", "Convert (full)", () => setModal("convertFull"), true); P("cpart", "Convert (partial)", () => setModal("convertPartial")); }
+    if (caps.canConvert && canConvertReq) { P("cfull", "Convert (full)", () => setModal("convertFull"), true); P("cpart", "Convert (partial)", () => setModal("convertPartial")); }
     if (caps.canInventory) P("close1", "Close", () => run(() => closeRequisition(req.id)));
   }
   if (s === "PARTIALLY_CONVERTED" && caps.canInventory) P("close2", "Close", () => run(() => closeRequisition(req.id)));
   if (s === "GATE_PASS_ISSUED" && caps.canInventory) P("close3", "Close", () => run(() => closeRequisition(req.id)));
 
-  if (req.linked_gate_pass_id && caps.canInventory) P("print", "Print gate pass", printGatePass);
+  if (req.linked_gate_pass_id && caps.canInventory && canGatePass) P("print", "Print gate pass", printGatePass);
   const CANCELLABLE = ["DRAFT", "SUBMITTED", "BH_REJECTED", "BH_APPROVED", "IN_PRODUCTION", "PACKING", "READY_FOR_DISPATCH"];
-  if (CANCELLABLE.includes(s) && caps.canRequest) P("cancel", "Cancel", () => setModal("cancel"));
+  if (CANCELLABLE.includes(s) && caps.canRequest && canDeleteReq) P("cancel", "Cancel", () => setModal("cancel"));
 
   if (btns.length === 0) return null;
   return <div className="flex flex-wrap gap-2">{btns}</div>;

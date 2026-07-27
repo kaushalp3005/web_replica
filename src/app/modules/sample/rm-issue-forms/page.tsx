@@ -8,7 +8,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, SAMPLE_ROOT } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial, useMe } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useMe, useHasPermission } from "@/lib/user";
 import { sampleCaps } from "@/lib/sample-roles";
 import { listRmForms, type RmForm } from "@/lib/rm-issue-form";
 import { RM_FORM_STATUS_STYLES, RmFormStatusPill } from "../_shared";
@@ -42,6 +42,7 @@ export default function RmIssueFormsPage() {
   const initial = useUserInitial();
   const me = useMe();
   const caps = useMemo(() => sampleCaps(me), [me]);
+  const canRaiseIndent = useHasPermission("sample", "npd", null, "create");
 
   const [status, setStatus] = useState("");
   const [rows, setRows] = useState<RmForm[]>([]);
@@ -89,7 +90,7 @@ export default function RmIssueFormsPage() {
           <p className="text-[12px] text-[var(--text-secondary)] mt-0.5">{rows.length} shown · Document 015</p>
         </div>
         <div className="flex-1" />
-        {caps.canNpd && (
+        {caps.canNpd && canRaiseIndent && (
           <button onClick={() => router.push("/modules/sample/rm-issue-forms/new")}
             className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium hover:bg-[var(--aws-orange-hover)]">+ Raise indent</button>
         )}

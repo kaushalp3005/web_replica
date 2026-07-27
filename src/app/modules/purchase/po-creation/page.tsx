@@ -9,7 +9,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useRequireAuth } from "@/lib/user";
+import { useRequireAuth, useHasPermission } from "@/lib/user";
 import {
   type PreviewResponse,
   type CommitResponse,
@@ -57,6 +57,10 @@ function advKey(q: PoListQuery): string {
 export default function PoCreationPage(): React.JSX.Element {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
+
+  // Permission gate (UX only — server still enforces). Upload/preview a PO
+  // maps to purchase/po/create.
+  const canCreatePO = useHasPermission("purchase", "po", null, "create");
 
   // ── Mode: landing or preview ──────────────────────────────────────────────
 
@@ -307,21 +311,24 @@ export default function PoCreationPage(): React.JSX.Element {
       {/* ── Landing mode ────────────────────────────────────────────────── */}
       {mode === "landing" ? (
         <>
-          {/* Entity selector */}
-          <EntitySelector entity={entity} onEntity={setEntity} />
+          {/* Entity selector + upload zone — gated on purchase/po/create */}
+          {canCreatePO ? (
+            <>
+              <EntitySelector entity={entity} onEntity={setEntity} />
 
-          {/* Upload zone */}
-          <UploadZone
-            uploading={uploading}
-            error={uploadError}
-            drag={drag}
-            fileInputRef={fileInputRef}
-            onDragOver={() => setDrag(true)}
-            onDragLeave={() => setDrag(false)}
-            onDrop={(file) => { setDrag(false); void handleFile(file); }}
-            onFileChosen={(file) => void handleFile(file)}
-            onBrowse={() => fileInputRef.current?.click()}
-          />
+              <UploadZone
+                uploading={uploading}
+                error={uploadError}
+                drag={drag}
+                fileInputRef={fileInputRef}
+                onDragOver={() => setDrag(true)}
+                onDragLeave={() => setDrag(false)}
+                onDrop={(file) => { setDrag(false); void handleFile(file); }}
+                onFileChosen={(file) => void handleFile(file)}
+                onBrowse={() => fileInputRef.current?.click()}
+              />
+            </>
+          ) : null}
 
           {/* Recent PO listing */}
           <PoListing

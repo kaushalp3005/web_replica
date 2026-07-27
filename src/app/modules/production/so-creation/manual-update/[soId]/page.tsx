@@ -9,7 +9,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useRequireAuth } from "@/lib/user";
+import { useRequireAuth, useHasPermission } from "@/lib/user";
 import { useSeesCost, seesCostFor } from "@/lib/cost-gate";
 import {
   COMPANY_OPTIONS, VOUCHER_TYPE_OPTIONS,
@@ -73,6 +73,10 @@ function draftKeyFor(soId: number): string {
 export default function ManualSoUpdatePage() {
   const router = useRouter();
   useRequireAuth(router.replace);
+  // so/edit gate (UX only — server still enforces). Disables Submit for
+  // roles that can't edit SOs; the row-level Edit affordance that reaches
+  // this page is already hidden for them on the listing.
+  const canEditSO = useHasPermission("so", null, null, "edit");
   // C12 cost-metric gate. Same reasoning as manual entry — deny-list
   // roles can't edit Rate (the input is hidden by `_SoLineForm`), so we
   // can't require it on submit.
@@ -344,10 +348,11 @@ export default function ManualSoUpdatePage() {
             </button>
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || !canEditSO}
+              title={canEditSO ? undefined : "You don't have permission to edit Sales Orders."}
               className={[
                 "h-9 px-4 rounded-[2px] text-[13px] font-bold border tracking-wide",
-                submitting
+                submitting || !canEditSO
                   ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
                   : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
               ].join(" ")}

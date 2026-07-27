@@ -332,6 +332,48 @@ export function logBoxEdits(body: CRBoxEditLogRequest): Promise<CRBoxEditLogResp
   );
 }
 
+// Approval e-mail routing (DB-backed; replaces the old hardcoded maps). Company-
+// agnostic. Feeds the approve screen's recipient matrix (via _approvalMatrix) AND
+// the create form's Business-Head / Sales-POC dropdown names.
+export interface CrEmailRouting {
+  business_head: { name: string; email: string }[];
+  sales_poc: { name: string; email: string }[];
+  warehouse_cc: { match_key: string; match_type: string; email: string }[];
+  constant_cc: string[];
+  notify_to: string | null;
+}
+
+export function getCrEmailRouting(): Promise<CrEmailRouting> {
+  return jsonOrThrow(apiFetch(`${BASE}/email-routing`), "Failed to load approval email routing");
+}
+
+// Fire the threaded Business-Head approval mail (with in-email Approve/Reject/Hold
+// magic-link buttons). Best-effort server-side — no-op if SMTP is unconfigured.
+export interface CRSendForApprovalResponse {
+  status: string;
+  approver: { name: string; email: string } | null;
+  to: string[];
+  cc_count: number;
+}
+export function sendCustomerReturnForApproval(company: Company, crId: string): Promise<CRSendForApprovalResponse> {
+  return jsonOrThrow(
+    apiFetch(`${BASE}/${company}/${enc(crId)}/send-for-approval`, { method: "POST" }),
+    "Failed to send for approval",
+  );
+}
+
+// In-app Approve/Reject/Hold — persists the status + audit and sends the threaded
+// status mail. (The emailed buttons hit the public /email-action route instead.)
+export type CRApprovalAction = "approve" | "reject" | "hold";
+export function decideCustomerReturn(
+  company: Company, crId: string, action: CRApprovalAction, remark?: string,
+): Promise<{ rtv_id: string; status: CRStatus; already_actioned: boolean }> {
+  return jsonOrThrow(
+    apiFetch(`${BASE}/${company}/${enc(crId)}/approve`, { method: "POST", body: JSON.stringify({ action, remark }) }),
+    "Failed to apply the decision",
+  );
+}
+
 // Server-built styled .xlsx (edited cells highlighted). Returns a Blob to download.
 export async function exportCustomerReturns(
   company: Company,

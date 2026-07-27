@@ -5,6 +5,7 @@
 // expiry badges and file chips.
 
 import { useEffect, useRef, useState } from "react";
+import { useHasPermission } from "@/lib/user";
 import {
   addDocument,
   appendDocumentFile,
@@ -67,6 +68,11 @@ export function DocumentsTab({
   showToast: ShowToast;
   confirm: Confirm;
 }): React.JSX.Element {
+  // Document action gates (UX only — server enforces).
+  const canCreate = useHasPermission("purchase", "vendor", "document", "create");
+  const canUpdate = useHasPermission("purchase", "vendor", "document", "update");
+  const canDelete = useHasPermission("purchase", "vendor", "document", "delete");
+
   const [rows, setRows] = useState<DocumentResponse[]>(initial);
   const [typeFilter, setTypeFilter] = useState("");
   const [uploadType, setUploadType] = useState("");
@@ -197,20 +203,26 @@ export function DocumentsTab({
             </option>
           ))}
         </select>
-        <select value={uploadType} onChange={(e) => setUploadType(e.target.value)} aria-label="Upload document type" className={SELECT_CLS}>
-          <option value="">Type to upload…</option>
-          {DOC_TYPE.map((d) => (
-            <option key={d.code} value={d.code}>
-              {d.label}
-            </option>
-          ))}
-        </select>
-        <button type="button" className={SECONDARY_BTN} disabled={uploading} onClick={onUploadClick}>
-          {uploading ? "Uploading…" : "Upload & extract"}
-        </button>
-        <button type="button" className={GHOST_BTN} onClick={() => setModal({ doc: null, extracted: null })}>
-          Manual entry
-        </button>
+        {canCreate ? (
+          <select value={uploadType} onChange={(e) => setUploadType(e.target.value)} aria-label="Upload document type" className={SELECT_CLS}>
+            <option value="">Type to upload…</option>
+            {DOC_TYPE.map((d) => (
+              <option key={d.code} value={d.code}>
+                {d.label}
+              </option>
+            ))}
+          </select>
+        ) : null}
+        {canCreate ? (
+          <button type="button" className={SECONDARY_BTN} disabled={uploading} onClick={onUploadClick}>
+            {uploading ? "Uploading…" : "Upload & extract"}
+          </button>
+        ) : null}
+        {canCreate ? (
+          <button type="button" className={GHOST_BTN} onClick={() => setModal({ doc: null, extracted: null })}>
+            Manual entry
+          </button>
+        ) : null}
         <input ref={fileInputRef} type="file" accept={UPLOAD_ACCEPT} className="hidden" onChange={(e) => void onFileChange(e)} />
       </div>
 
@@ -257,15 +269,21 @@ export function DocumentsTab({
                       <Td><FileChips csv={d.s3_urls} /></Td>
                       <Td>
                         <div className="flex flex-wrap gap-1">
-                          <button type="button" className={GHOST_BTN} disabled={busy || uploading} onClick={() => armDocAction({ mode: "append", docId: d.doc_id })}>
-                            Append file
-                          </button>
-                          <button type="button" className={GHOST_BTN} disabled={busy} onClick={() => setModal({ doc: d, extracted: null })}>
-                            Edit
-                          </button>
-                          <button type="button" className={DANGER_BTN} disabled={busy} onClick={() => void handleDelete(d)}>
-                            Delete
-                          </button>
+                          {canUpdate && (
+                            <button type="button" className={GHOST_BTN} disabled={busy || uploading} onClick={() => armDocAction({ mode: "append", docId: d.doc_id })}>
+                              Append file
+                            </button>
+                          )}
+                          {canUpdate && (
+                            <button type="button" className={GHOST_BTN} disabled={busy} onClick={() => setModal({ doc: d, extracted: null })}>
+                              Edit
+                            </button>
+                          )}
+                          {canDelete && (
+                            <button type="button" className={DANGER_BTN} disabled={busy} onClick={() => void handleDelete(d)}>
+                              Delete
+                            </button>
+                          )}
                         </div>
                       </Td>
                     </tr>

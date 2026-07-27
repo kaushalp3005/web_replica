@@ -5,6 +5,7 @@
 // history_not_found / forbidden error branches.
 
 import { useEffect, useState } from "react";
+import { useHasPermission } from "@/lib/user";
 import {
   listVendorHistory,
   revertHistory,
@@ -62,6 +63,8 @@ export function HistoryTab({
   showToast: ShowToast;
   onReloadVendor: () => Promise<void>;
 }): React.JSX.Element {
+  // Reverting a history entry maps to vendor/master/revert (UX gate).
+  const canRevert = useHasPermission("purchase", "vendor", "master", "revert");
   const [entries, setEntries] = useState<VendorHistoryEntry[]>([]);
   const [opFilter, setOpFilter] = useState("");
   const [loading, setLoading] = useState(false);
@@ -141,7 +144,7 @@ export function HistoryTab({
       ) : (
         <div className="space-y-3">
           {entries.map((e) => (
-            <HistoryEntryCard key={e.history_id} entry={e} onRevert={setRevertTarget} />
+            <HistoryEntryCard key={e.history_id} entry={e} onRevert={canRevert ? setRevertTarget : undefined} />
           ))}
         </div>
       )}

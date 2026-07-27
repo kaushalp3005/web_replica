@@ -11,7 +11,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, SAMPLE_ROOT } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useHasPermission } from "@/lib/user";
 import {
   createRequisition, submitRequisition, WAREHOUSES,
   type SampleType, type ArticleRole, type PurposeTag, type Warehouse,
@@ -55,6 +55,7 @@ export default function SampleFormPage() {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
   const initial = useUserInitial();
+  const canCreateReq = useHasPermission("sample", "requisition", null, "create");
 
   const [sampleType, setSampleType] = useState<SampleType | "">("");
   const [warehouse, setWarehouse] = useState<Warehouse | "">("");
@@ -289,9 +290,9 @@ export default function SampleFormPage() {
           <button onClick={() => router.push("/modules/sample")}
             className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] text-[13px] bg-white hover:bg-[var(--surface-subtle)]">Cancel</button>
           <div className="flex-1" />
-          <button disabled={saving || !canCreate} onClick={() => save(false)}
+          <button disabled={saving || !canCreate || !canCreateReq} onClick={() => save(false)}
             className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] text-[13px] bg-white hover:bg-[var(--surface-subtle)] disabled:opacity-50">Save draft</button>
-          <button disabled={saving || !canSubmit} onClick={() => save(true)}
+          <button disabled={saving || !canSubmit || !canCreateReq} onClick={() => save(true)}
             className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">{saving ? "Saving…" : "Save & submit"}</button>
         </div>
       </main>
