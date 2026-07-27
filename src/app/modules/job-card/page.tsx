@@ -15,7 +15,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
-import { useRequireAuth, deriveRowLockIndicator, useUserInitial, useUserScope, useRequireModuleAccess } from "@/lib/user";
+import { useHasPermission, useRequireAuth, deriveRowLockIndicator, useUserInitial, useUserScope, useRequireModuleAccess } from "@/lib/user";
 import { userHasWarehouse } from "@/lib/warehouseScope";
 // W4-MED-3/M10 — single context-driven subscription point.
 import { UserProvider, useUserCtx } from "./_UserContext";
@@ -129,6 +129,9 @@ const FLOORS_BY_PLANT: Record<"W-202" | "A-185", readonly string[]> = {
     "Cheese Floor", "FG store", "FFS Packing Area",
   ],
 };
+
+// The two plants (warehouse codes) the Plant filter offers.
+const PLANTS = ["W-202", "A-185"] as const;
 
 // Flat (Plant, Floor) tuple list for the unfiltered floor select. Used when
 // no Plant filter is selected so an admin can still pick any floor — the
@@ -280,6 +283,48 @@ function JobCardListingPageBody() {
   const userScope = useUserScope();
   // W4-MED-3/M10 — consume the single context value rather than re-subscribing.
   const { isAdmin } = useUserCtx();
+
+  // ── Plant + Floor filters locked to the user's assigned access ──────────
+  // Admins (and users with no warehouse scope) keep the full picker. A
+  // warehouse-scoped user only sees their plant(s); a single assigned plant
+  // is pinned and can't be changed. A floor-scoped user's Floor dropdown is
+  // limited to their assigned floors, and pinned when only one is valid for
+  // the locked plant. The server already scopes the result set — this makes
+  // the filter honest and un-spoofable in the UI too.
+  const scopedByWh = !isAdmin && userScope.warehouses.length > 0;
+  const allowedPlants = useMemo<readonly ("W-202" | "A-185")[]>(() => {
+    if (!scopedByWh) return PLANTS;
+    const hit = PLANTS.filter((p) => userHasWarehouse(userScope.warehouses, p));
+    return hit.length ? hit : PLANTS;  // never lock a user out on an unrecognised code
+  }, [scopedByWh, userScope.warehouses]);
+  const plantLocked = scopedByWh && allowedPlants.length === 1;
+
+  const scopedByFloor = !isAdmin && userScope.floors.length > 0;
+  const allowedFloors = useMemo<string[]>(() => {
+    const base = factory ? [...FLOORS_BY_PLANT[factory]] : ALL_FLOOR_OPTIONS.map((o) => o.floor);
+    if (!scopedByFloor) return base;
+    const norm = (s: string) => s.trim().toLowerCase();
+    return base.filter((f) => userScope.floors.some((af) => norm(af) === norm(f)));
+  }, [factory, scopedByFloor, userScope.floors]);
+  const floorLocked = plantLocked && scopedByFloor && allowedFloors.length === 1;
+
+  // Pin the plant to the single assigned plant once /me scope has loaded.
+  useEffect(() => {
+    if (plantLocked && factory !== allowedPlants[0]) {
+      queueMicrotask(() => setFactory(allowedPlants[0]));
+    }
+  }, [plantLocked, allowedPlants, factory]);
+  // Keep the floor within the assigned set; pin it when only one is valid.
+  useEffect(() => {
+    if (!scopedByFloor) return;
+    const norm = (s: string) => s.trim().toLowerCase();
+    const inSet = !!floor && allowedFloors.some((f) => norm(f) === norm(floor));
+    if (floorLocked && floor !== allowedFloors[0]) {
+      queueMicrotask(() => setFloor(allowedFloors[0]));
+    } else if (!floorLocked && floor && !inSet) {
+      queueMicrotask(() => setFloor(""));
+    }
+  }, [scopedByFloor, floorLocked, allowedFloors, floor]);
   // Populated only when we hit /search; null when we hit the paginated list.
   const [searchMeta, setSearchMeta] = useState<{
     total: number;
@@ -594,33 +639,47 @@ function JobCardListingPageBody() {
               ]}
               onChange={(v) => changeEntity(v as typeof entity)}
             />
-            {/* C2 (Wave 4) — plant filter is admin-only. Non-admin operators
-                are server-scoped to their assigned plant via /me anyway, so
-                surfacing the filter for them is misleading (they can't pick
-                a plant outside their warehouses list — the server returns
-                empty). The banner below already explains the scope. */}
-            {isAdmin ? (
+            {/* Plant filter — locked to the user's assigned plant(s). One
+                assigned plant → a pinned, non-editable chip. Multiple → a
+                chip group of just those plants. Admin / unscoped → all
+                plants + All. */}
+            {plantLocked ? (
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] uppercase tracking-wide text-[var(--text-secondary)] font-semibold mr-1">
+                  Plant
+                </span>
+                <span
+                  title="Locked to your assigned plant"
+                  className="h-7 px-3 inline-flex items-center gap-1.5 text-[12px] rounded-full border bg-[var(--surface-subtle)] border-[var(--aws-border-strong)] text-[var(--text-secondary)] cursor-not-allowed"
+                >
+                  <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="11" width="18" height="11" rx="2" />
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                  </svg>
+                  {allowedPlants[0]}
+                </span>
+              </div>
+            ) : (isAdmin || scopedByWh) ? (
               <ChipGroup
                 label="Plant"
                 value={factory}
                 options={[
                   { value: "", label: "All" },
-                  { value: "W-202", label: "W-202" },
-                  { value: "A-185", label: "A-185" },
+                  ...allowedPlants.map((p) => ({ value: p, label: p })),
                 ]}
                 onChange={(v) => changeFactory(v as typeof factory)}
               />
             ) : null}
-            {/* Floor filter — narrows by `job_card_v2.floor`. The plant
-                dictates which floors are valid; when no plant is picked,
-                the dropdown lists every plant's floors with a "(W-202)"
-                / "(A-185)" suffix so the operator can still pick. Admin
-                only, mirroring the Plant chip group above (non-admins are
-                already auto-scoped to their assigned floors server-side). */}
-            {isAdmin ? (
+            {/* Floor filter — narrows by `job_card_v2.floor`, limited to the
+                user's assigned floors when scoped. Pinned + disabled when a
+                single floor is valid for a locked plant. Admin / unscoped →
+                every floor for the selected plant (or all, plant-suffixed). */}
+            {(isAdmin || scopedByWh || scopedByFloor) ? (
               <FloorSelect
                 value={floor}
                 plant={factory}
+                allowed={scopedByFloor ? allowedFloors : undefined}
+                locked={floorLocked}
                 onChange={changeFloor}
               />
             ) : null}
@@ -1191,6 +1250,9 @@ function JobCard({ jc, onReload }: { jc: JobCardRow; onReload: () => void }) {
 function ForceUnlockButton({ row, onReload }: { row: JobCardRow; onReload: () => void }) {
   // W4-MED-3/M10 — pure lock derivation off the context-provided me snapshot.
   const { me } = useUserCtx();
+  // Fine-grained permission gate (UX only; server still enforces). Combined
+  // with the existing role/lock capability below.
+  const canForceUnlock = useHasPermission("production", "job_cards", "force_unlock", "create");
   const lock = useMemo(
     () => deriveRowLockIndicator(row, userMayForceUnlock(me)),
     [row, me],
@@ -1230,7 +1292,7 @@ function ForceUnlockButton({ row, onReload }: { row: JobCardRow; onReload: () =>
     }
   }
 
-  if (!lock.shouldShowForceUnlock) return null;
+  if (!lock.shouldShowForceUnlock || !canForceUnlock) return null;
   // Server-side gate is still authoritative; roleAllow keeps the button
   // interactive for the already-vetted role list.
   return (
@@ -1308,11 +1370,17 @@ function FloorSelect({
   value,
   plant,
   onChange,
+  allowed,
+  locked,
 }: {
   value: string;
   plant: "" | "W-202" | "A-185";
   // Free-form string — backend expects the floor label as-is.
   onChange: (v: string) => void;
+  // When provided (floor-scoped user), the dropdown lists only these floors.
+  allowed?: readonly string[];
+  // Single assigned floor for a locked plant → pinned + disabled.
+  locked?: boolean;
 }) {
   // When a plant is chosen, only that plant's floors are valid. When no
   // plant is chosen, show every floor with a plant suffix so the operator
@@ -1327,19 +1395,28 @@ function FloorSelect({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="h-7 px-2 text-[12px] rounded-full bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
+        disabled={locked}
+        title={locked ? "Locked to your assigned floor" : undefined}
+        className={[
+          "h-7 px-2 text-[12px] rounded-full bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]",
+          locked ? "opacity-70 cursor-not-allowed" : "",
+        ].join(" ")}
         aria-label="Filter by floor"
       >
-        <option value="">All</option>
-        {scoped
-          ? scoped.map((f) => (
+        {locked ? null : <option value="">All</option>}
+        {allowed
+          ? allowed.map((f) => (
               <option key={f} value={f}>{f}</option>
             ))
-          : ALL_FLOOR_OPTIONS.map((o) => (
-              <option key={`${o.plant}|${o.floor}`} value={o.floor}>
-                {o.floor} ({o.plant})
-              </option>
-            ))}
+          : scoped
+            ? scoped.map((f) => (
+                <option key={f} value={f}>{f}</option>
+              ))
+            : ALL_FLOOR_OPTIONS.map((o) => (
+                <option key={`${o.plant}|${o.floor}`} value={o.floor}>
+                  {o.floor} ({o.plant})
+                </option>
+              ))}
       </select>
     </label>
   );
