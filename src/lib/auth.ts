@@ -86,6 +86,16 @@ export interface MeRoleEnvelope {
   is_admin?: boolean;
 }
 
+// One row of the /me `permissions` union (across all the user's roles). Mirrors
+// the backend auth_permission 4-tuple; sub_module / sub_sub_module are null for
+// module- or sub-module-level permissions. Consumed by useHasPermission().
+export interface MePermission {
+  module: string;
+  sub_module?: string | null;
+  sub_sub_module?: string | null;
+  action: string;
+}
+
 export interface MeResponse {
   user_id?: string;
   phone?: string;
@@ -100,7 +110,7 @@ export interface MeResponse {
   // both shapes.
   role_name?: string;
   roles?: (string | MeRoleEnvelope)[];
-  permissions?: unknown[];
+  permissions?: MePermission[];
   [key: string]: unknown;
 }
 

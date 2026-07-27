@@ -17,7 +17,7 @@
 // `useIsAdmin()` and `useSeesCost()` (cost-gate) all share the same store.
 
 import { useEffect, useMemo, useState } from "react";
-import { tokenStore, userStore, type MeResponse, type MeRoleEnvelope } from "./auth";
+import { tokenStore, userStore, type MeResponse, type MeRoleEnvelope, type MePermission } from "./auth";
 import { userMayForceUnlock } from "@/app/modules/job-card/_useLockState";
 import { scopeAllowsRoute } from "./modules";
 import { roleNamesOf } from "./sample-roles";
@@ -126,6 +126,48 @@ export function useHasRole(roleName: string): boolean {
 // post-approval readings edit/add/delete actions in the QC module.
 export function useIsQcManager(): boolean {
   return useHasRole("qc_manager");
+}
+
+// Fine-grained permission selector — the UI mirror of the server's
+// require_permission / check_permission gate. Returns true when the signed-in
+// user holds a permission that COVERS the requested (module, sub_module,
+// sub_sub_module, action): the exact tuple, a broader sub-module grant
+// (sub_sub_module null), or a module-level grant (sub_module null) — the same
+// hierarchical fallback the backend applies. Admins pass everything.
+//
+// Use it to hide/disable actions the user can't perform. The server STILL
+// enforces the real gate (including the warehouse/floor scope this hook
+// intentionally does NOT check — /me carries no per-record scope), so this is
+// UX only, never the security boundary.
+//
+//   const canClose = useHasPermission("production", "job_cards", "overview", "close");
+//   const canCreatePO = useHasPermission("purchase", "po", null, "create");
+export function useHasPermission(
+  module: string,
+  sub_module: string | null = null,
+  sub_sub_module: string | null = null,
+  action: string = "view",
+): boolean {
+  const me = useMe();
+  const isAdmin = useIsAdmin();
+  return useMemo(() => {
+    if (isAdmin) return true;
+    if (!me || !Array.isArray(me.permissions)) return false;
+    const sub = sub_module ?? null;
+    const subsub = sub_sub_module ?? null;
+    return (me.permissions as MePermission[]).some((p) => {
+      if (p.module !== module || p.action !== action) return false;
+      const pSub = p.sub_module ?? null;
+      const pSubsub = p.sub_sub_module ?? null;
+      // exact tuple, OR a broader sub-module grant (subsub null), OR a
+      // module-level grant (sub null) — mirrors the server's fallback.
+      return (
+        (pSub === sub && pSubsub === subsub) ||
+        (pSub === sub && pSubsub === null) ||
+        (pSub === null && pSubsub === null)
+      );
+    });
+  }, [me, isAdmin, module, sub_module, sub_sub_module, action]);
 }
 
 // Module-scope PAGE guard. A scoped role (see ROLE_MODULE_SCOPE) that is not
