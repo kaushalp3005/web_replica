@@ -217,6 +217,9 @@ export interface CreateJobCardBody {
   qty_units?: number | null;
   wip_steps: CreateJobCardStep[];
   pkg_floor: string;
+  // Terminal step's process name (unified list — the last row). May be a merged
+  // label like "Sorting + Packing". Defaults to "Packaging" server-side.
+  pkg_process?: string;
   // Other plan lines (same SKU + BOM) to fold into this primary line before the
   // chain is built — so same-article lines become ONE job-card set. qty_kg /
   // qty_units must be the COMBINED total. Omit/empty for a plain single create.
@@ -267,6 +270,7 @@ export interface LineJobCardConfig {
   qty_units?: number | null;
   wip_steps?: LineJobCardConfigStep[];
   pkg_floor?: string | null;
+  pkg_process?: string | null;
   pkg_job_card_id?: number | null;
   pkg_status?: string | null;
   pkg_started?: boolean;
@@ -348,6 +352,7 @@ export interface ApplyEditsBody {
   qty_units?: number | null;
   steps: ApplyEditsStep[];
   pkg_floor: string;
+  pkg_process?: string | null;
   pkg_job_card_id?: number | null;
   remove_reasons?: Record<string, string>;
 }

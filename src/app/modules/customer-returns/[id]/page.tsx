@@ -42,6 +42,7 @@ import {
 import { CustomerReturnsChrome } from "../_chrome";
 import { ErrorBanner, SuccessBanner, InfoBanner, ConfirmDialog, StatusBadge, CompanyChip, CrHeaderGrid, useCompanyParam, cx, fmtDateTime, num, isColdWarehouse } from "../_shared";
 import { printCrLabels } from "../_labelPrint";
+import { crBoxToForm, isCommitted, type CRBoxForm } from "../_boxEngine";
 
 // ── Inline SVG icons (lucide look; no lucide dep in web_replica) ──────────────
 type IconProps = { className?: string };
@@ -59,21 +60,6 @@ const IconChevronRight = (p: IconProps) => <S {...p}><path d="m9 18 6-6-6-6" /><
 const IconSpinner = (p: IconProps) => <S className={p.className ?? "h-3.5 w-3.5 animate-spin"}><path d="M21 12a9 9 0 1 1-6.219-8.56" /></S>;
 
 const BOX_PAGE_SIZE = 200; // window the read-only box list so large CRs open fast (legacy parity)
-
-interface BoxForm {
-  article_description: string;
-  box_number: number;
-  conversion: string;
-  net_weight: string;
-  gross_weight: string;
-  count: string;
-  lot_number: string;
-  item_mark: string;
-  spl_remarks: string;
-  vakkal: string;
-  box_id?: string;
-  is_printed: boolean;
-}
 
 interface LineForm {
   item_description: string;
@@ -120,22 +106,6 @@ function toLineForm(l: CRLine): LineForm {
   };
 }
 
-function toBoxForm(b: CRBox): BoxForm {
-  return {
-    article_description: b.article_description,
-    box_number: b.box_number,
-    conversion: b.conversion?.toString() || "",
-    net_weight: b.net_weight?.toString() || "",
-    gross_weight: b.gross_weight?.toString() || "",
-    count: b.count?.toString() || "",
-    lot_number: b.lot_number || "",
-    item_mark: b.item_mark || "",
-    spl_remarks: b.spl_remarks || "",
-    vakkal: b.vakkal || "",
-    box_id: b.box_id || undefined,
-    is_printed: !!b.box_id,
-  };
-}
 
 // CRBox -> the label-print box shape (shared by reprint one / range / all).
 const toLabelBox = (b: CRBox) => ({
@@ -166,7 +136,7 @@ export default function CustomerReturnDetailPage() {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [lineForms, setLineForms] = useState<LineForm[]>([]);
-  const [boxForms, setBoxForms] = useState<BoxForm[]>([]);
+  const [boxForms, setBoxForms] = useState<CRBoxForm[]>([]);
   const [lotSnapshots, setLotSnapshots] = useState<Map<string, string>>(new Map());
   // Per-article highest box_number ever used this edit session (incl. removed) —
   // so a re-add never reuses a freed number and silently merges into a live row.
@@ -211,7 +181,7 @@ export default function CustomerReturnDetailPage() {
   function enterEdit() {
     if (!data) return;
     setLineForms(data.lines.map(toLineForm));
-    const bf = data.boxes.map(toBoxForm);
+    const bf = data.boxes.map(crBoxToForm);
     setBoxForms(bf);
     const snap = new Map<string, string>();
     bf.forEach((b) => { if (b.box_id) snap.set(b.box_id, b.lot_number); });
@@ -273,7 +243,7 @@ export default function CustomerReturnDetailPage() {
     );
   }
 
-  function updateBox(article: string, boxNumber: number, field: keyof BoxForm, value: string) {
+  function updateBox(article: string, boxNumber: number, field: keyof CRBoxForm, value: string) {
     setBoxForms((prev) =>
       prev.map((b) => {
         if (b.article_description !== article || b.box_number !== boxNumber) return b;
@@ -329,6 +299,10 @@ export default function CustomerReturnDetailPage() {
   }
 
   function removeBox(article: string, boxNumber: number) {
+    // A printed / in-flight box is committed in the DB with a physical label — never
+    // remove it (Save's allow_clear would delete the row and orphan the label).
+    const target = boxForms.find((b) => b.article_description === article && b.box_number === boxNumber);
+    if (target && isCommitted(target)) return;
     // Do NOT renumber the survivors. box_number is the server's identity key
     // (bulk_save_boxes matches rows by (article_description, box_number) and never
     // receives box_id), so renumbering would slide each saved box's box_id onto a
@@ -338,7 +312,7 @@ export default function CustomerReturnDetailPage() {
     setBoxForms((prev) => prev.filter((b) => !(b.article_description === article && b.box_number === boxNumber)));
   }
 
-  const boxToBulk = (b: BoxForm) => ({
+  const boxToBulk = (b: CRBoxForm) => ({
     article_description: b.article_description,
     box_number: b.box_number,
     uom: lineForms.find((l) => l.item_description === b.article_description)?.uom || undefined,
@@ -347,8 +321,8 @@ export default function CustomerReturnDetailPage() {
     item_mark: b.item_mark ?? undefined,
     spl_remarks: b.spl_remarks ?? undefined,
     vakkal: b.vakkal ?? undefined,
-    net_weight: b.net_weight || undefined,
-    gross_weight: b.gross_weight || undefined,
+    net_weight: b.net_weight || "0", // blank = explicit clear → 0 (not "keep stale")
+    gross_weight: b.gross_weight || "0",
     count: b.count ? parseInt(b.count) : undefined,
   });
 
@@ -417,23 +391,30 @@ export default function CustomerReturnDetailPage() {
     const box = boxForms.find((b) => b.article_description === article && b.box_number === boxNumber);
     if (!box) return;
     const key = `${article}#${boxNumber}`;
+    const setPrinting = (v: boolean) =>
+      setBoxForms((prev) => prev.map((b) => (b.article_description === article && b.box_number === boxNumber ? { ...b, printing: v } : b)));
     setPrintingBoxKey(key);
     setError(null);
+    // Freeze the box (isCommitted) for the round-trip so a concurrent Remove can't drop
+    // it before the box_id stamp lands.
+    setPrinting(true);
     try {
       const res = await upsertBox(company, crId, {
         article_description: box.article_description,
         box_number: box.box_number,
         uom: lineForms.find((l) => l.item_description === article)?.uom || undefined,
         conversion: box.conversion || undefined,
-        net_weight: box.net_weight || undefined,
-        gross_weight: box.gross_weight || undefined,
+        net_weight: box.net_weight || "0",
+        gross_weight: box.gross_weight || "0",
         lot_number: box.lot_number || undefined,
         item_mark: box.item_mark || undefined,
+        spl_remarks: box.spl_remarks || undefined,
+        vakkal: box.vakkal || undefined,
         count: box.count ? parseInt(box.count) : undefined,
       });
       setBoxForms((prev) =>
         prev.map((b) =>
-          b.article_description === article && b.box_number === boxNumber ? { ...b, box_id: res.box_id, is_printed: true } : b,
+          b.article_description === article && b.box_number === boxNumber ? { ...b, box_id: res.box_id, is_printed: true, printing: false } : b,
         ),
       );
       // Seed the lot snapshot for the freshly-minted box_id so a later Save only
@@ -441,6 +422,7 @@ export default function CustomerReturnDetailPage() {
       setLotSnapshots((prev) => new Map(prev).set(res.box_id, box.lot_number));
       await printCrLabels({ company, crId, customer: data?.customer, rtvDate: data?.rtv_date, boxes: [{ ...box, box_id: res.box_id }] });
     } catch (e) {
+      setPrinting(false); // failed print → box unfrozen again
       setError(e instanceof Error ? e.message : "Print failed");
     } finally {
       setPrintingBoxKey(null);

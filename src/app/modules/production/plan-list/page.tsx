@@ -400,6 +400,7 @@ export default function PlanListPage() {
                     sfg_output: s.sfgOutput || null,
                   })),
                   pkg_floor: p.pkgFloor,
+                  pkg_process: p.pkgProcess,
                   pkg_job_card_id: p.pkgJobCardId,
                   remove_reasons: p.removeReasons,
                 });
@@ -420,6 +421,7 @@ export default function PlanListPage() {
                     sfg_output: s.sfgOutput || null,
                   })),
                   pkg_floor: p.pkgFloor,
+                  pkg_process: p.pkgProcess,
                 };
                 if (p.mode === "edit") {
                   const r = await replaceLineJobCards(p.planLineId, body);
@@ -1457,6 +1459,7 @@ function CreateJobCardModal({
     qtyUnits: string;
     wipSteps: WipStep[];
     pkgFloor: string;
+    pkgProcess: string;
     mode: "create" | "edit";
     liveEdit: boolean;
     pkgJobCardId: number | null;
@@ -1475,11 +1478,13 @@ function CreateJobCardModal({
   const selectedOption = articleOptions.find((o) => o.id === selected) ?? null;
   const [qtyKg, setQtyKg] = useState("");
   const [qtyUnits, setQtyUnits] = useState("");
-  // WIP is one or more processes, each with its own floor + SFG output.
+  // Unified process list. The LAST row is the terminal Final-FG (packaging)
+  // stage; rows above it are WIP/SFG producers. All rows are mergeable, so a
+  // WIP process can be merged with packing into e.g. "Sorting + Packing".
+  // Seed = one blank WIP + one blank Packaging terminal.
   const [wipSteps, setWipSteps] = useState<WipStep[]>(
-    [{ process: "", floor: "", sfgOutput: "" }],
+    [{ process: "", floor: "", sfgOutput: "" }, { process: "Packaging", floor: "", sfgOutput: "" }],
   );
-  const [pkgFloor, setPkgFloor] = useState("");
 
   // BOM of the selected article — drives the read-only per-step RM/PM view.
   const [bom, setBom] = useState<PlanBomSummary | null>(null);
@@ -1578,7 +1583,7 @@ function CreateJobCardModal({
                 ? [{
                     jobCardId: cfg.pkg_job_card_id,
                     role: "Packaging",
-                    process: "Packaging",
+                    process: cfg.pkg_process ?? "Packaging",
                     floor: cfg.pkg_floor ?? "",
                     status: cfg.pkg_status ?? null,
                   }]
@@ -1596,21 +1601,26 @@ function CreateJobCardModal({
           setRemoveReasons({});
           setQtyKg(cfg.qty_kg != null ? String(cfg.qty_kg) : "");
           setQtyUnits(cfg.qty_units != null ? String(cfg.qty_units) : "");
-          setWipSteps(
-            cfg.wip_steps && cfg.wip_steps.length
-              ? cfg.wip_steps.map((s) => ({
-                  process: s.process ?? "",
-                  floor: s.floor ?? "",
-                  // Auto-fill the canonical SFG for articles that have one
-                  // (overwrites a prior free-typed value); fall back to the
-                  // saved value only when there's no canonical. Stays editable.
-                  sfgOutput: canon || (s.sfg_output ?? ""),
-                  jobCardId: s.job_card_id ?? null,
-                  started: s.started === true,
-                }))
-              : [{ process: "", floor: "", sfgOutput: canon }],
-          );
-          setPkgFloor(cfg.pkg_floor ?? "");
+          setWipSteps([
+            ...(cfg.wip_steps ?? []).map((s) => ({
+              process: s.process ?? "",
+              floor: s.floor ?? "",
+              // Auto-fill the canonical SFG for articles that have one
+              // (overwrites a prior free-typed value); fall back to the
+              // saved value only when there's no canonical. Stays editable.
+              sfgOutput: canon || (s.sfg_output ?? ""),
+              jobCardId: s.job_card_id ?? null,
+              started: s.started === true,
+            })),
+            // Terminal Final-FG (packaging) row — always last.
+            {
+              process: cfg.pkg_process ?? "Packaging",
+              floor: cfg.pkg_floor ?? "",
+              sfgOutput: "",
+              jobCardId: cfg.pkg_job_card_id ?? null,
+              started: cfg.pkg_started === true,
+            },
+          ]);
         } else {
           // CREATE a fresh chain, OR "create another" partial chain when cards
           // already exist but the operator chose Create — a NEW chain drawing
@@ -1635,14 +1645,17 @@ function CreateJobCardModal({
           // chain's route when carded, else the plan's snapshot route). Each new
           // chain gets its own steps (jobCardId null).
           if (cfg.wip_steps && cfg.wip_steps.length) {
-            setWipSteps(cfg.wip_steps.map((s) => ({
-              process: s.process ?? "",
-              floor: s.floor ?? "",
-              sfgOutput: canon || (s.sfg_output ?? ""),
-              jobCardId: null,
-              started: false,
-            })));
-            setPkgFloor(cfg.pkg_floor ?? "");
+            setWipSteps([
+              ...cfg.wip_steps.map((s) => ({
+                process: s.process ?? "",
+                floor: s.floor ?? "",
+                sfgOutput: canon || (s.sfg_output ?? ""),
+                jobCardId: null,
+                started: false,
+              })),
+              // Terminal Final-FG (packaging) row — always last.
+              { process: cfg.pkg_process ?? "Packaging", floor: cfg.pkg_floor ?? "", sfgOutput: "", jobCardId: null, started: false },
+            ]);
           } else {
             // Fresh chain, no plan steps: seed the first WIP step's SFG output.
             setWipSteps((prev) => prev.map((x, idx) => (idx === 0 && !x.sfgOutput ? { ...x, sfgOutput: canon } : x)));
@@ -1667,14 +1680,20 @@ function CreateJobCardModal({
     setStep(2);
   }
 
+  // Add a WIP process — inserted BEFORE the terminal so the last row stays the
+  // Final-FG (packaging) stage.
   function addWipProcess() {
-    setWipSteps((s) => [...s, { process: "", floor: "", sfgOutput: "" }]);
+    setWipSteps((s) =>
+      s.length === 0
+        ? [{ process: "", floor: "", sfgOutput: "" }]
+        : [...s.slice(0, -1), { process: "", floor: "", sfgOutput: "" }, s[s.length - 1]],
+    );
   }
 
-  // Every WIP process needs both a process and a floor; plus a packaging floor.
-  const wipOk = wipSteps.length > 0 && wipSteps.every((s) => s.process !== "" && s.floor !== "");
-  const canCreate =
-    qtyKg.trim() !== "" && Number(qtyKg) > 0 && wipOk && pkgFloor !== "";
+  // Need ≥1 WIP + the terminal (≥2 rows); every row needs a process + floor.
+  // The last row IS the packaging stage, so there's no separate packaging gate.
+  const wipOk = wipSteps.length >= 2 && wipSteps.every((s) => s.process !== "" && s.floor !== "");
+  const canCreate = qtyKg.trim() !== "" && Number(qtyKg) > 0 && wipOk;
 
   // Quantity cap (decision: cap-at-remaining). A carded line's remaining balance
   // is planned − Σ(chain-head qty); a fresh line's cap is the (merged) option
@@ -1897,11 +1916,13 @@ function CreateJobCardModal({
             ) : null}
 
             <div className="space-y-3">
-              {/* WIP — one or more processes, each on its own floor */}
+              {/* Unified process list — WIP + terminal packaging together, all
+                  mergeable. The LAST row is the Final-FG (packaging) stage. */}
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="text-[11px] uppercase tracking-wide font-semibold text-[var(--text-secondary)]">
-                    WIP <span className="text-[var(--aws-error)]">*</span>
+                    Processes <span className="text-[var(--aws-error)]">*</span>
+                    <span className="ml-1 normal-case font-normal text-[10px] text-[var(--text-muted)]">· last = Final FG</span>
                   </span>
                   <button
                     type="button"
@@ -1925,9 +1946,6 @@ function CreateJobCardModal({
                 />
               </div>
 
-              {/* Packaging — single floor */}
-              <StepFloorRow label="Packaging" floors={floors} value={pkgFloor} onChange={setPkgFloor} />
-
               {floors.length === 0 ? (
                 <p className="text-[10px] text-[var(--text-muted)] italic">
                   No floor list for this warehouse — enter the floor name.
@@ -1949,7 +1967,6 @@ function CreateJobCardModal({
                 model of how job cards actually issue material. */}
             <MaterialsByStep
               wipSteps={wipSteps}
-              pkgFloor={pkgFloor}
               bom={bom}
               loading={bomLoading}
               err={bomErr}
@@ -2002,9 +2019,18 @@ function CreateJobCardModal({
                   disabled={!canSubmit || creating}
                   onClick={async () => {
                     setCreating(true);
+                    // Split the unified list: all-but-last = WIP; the last row is
+                    // the terminal Final-FG (packaging) stage.
+                    const term = wipSteps[wipSteps.length - 1];
+                    const wipOnly = wipSteps.slice(0, -1);
                     const ok = await onContinue({
-                      planLineId: selected, qtyKg, qtyUnits, wipSteps, pkgFloor, mode,
-                      liveEdit, pkgJobCardId, removeReasons,
+                      planLineId: selected, qtyKg, qtyUnits,
+                      wipSteps: wipOnly,
+                      pkgFloor: term?.floor ?? "",
+                      pkgProcess: term?.process ?? "Packaging",
+                      mode, liveEdit,
+                      pkgJobCardId: term?.jobCardId ?? pkgJobCardId,
+                      removeReasons,
                       // Fold sibling same-SKU lines into this primary — only on a
                       // fresh create of a merged option; empty otherwise.
                       mergePlanLineIds: mode === "create" && selectedOption
@@ -2228,9 +2254,17 @@ function WipProcessList({
               onDrop={(e) => { e.preventDefault(); const from = dragFromRef.current; if (from == null || from === i) return; move(from, i); dragFromRef.current = null; setDragOverIdx(null); }}
               className={[
                 "border rounded bg-white px-2 py-1.5",
-                isDragOver ? "border-[var(--aws-orange)] bg-[#fdf0f1]" : "border-[var(--aws-border)]",
+                i === steps.length - 1 ? "border-[var(--aws-orange-active)] bg-[#fffaf5]" : "",
+                isDragOver ? "border-[var(--aws-orange)] bg-[#fdf0f1]" : (i === steps.length - 1 ? "" : "border-[var(--aws-border)]"),
               ].join(" ")}
             >
+              {i === steps.length - 1 ? (
+                <div className="mb-1">
+                  <span className="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#fdeee0] text-[#9a5a14] border border-[#f0c79a]">
+                    Final FG · packaging
+                  </span>
+                </div>
+              ) : null}
               <div className="flex items-center gap-1.5">
                 <input
                   type="checkbox"
@@ -2336,38 +2370,6 @@ function WipProcessList({
   );
 }
 
-// Required floor field for a job-card step (WIP / Packaging). A select when the
-// plan's warehouse has a known floor set, else a free-text input.
-function StepFloorRow({
-  label, floors, value, onChange,
-}: {
-  label: string; floors: string[]; value: string; onChange: (v: string) => void;
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="w-[88px] shrink-0 text-[12px] font-medium text-[var(--text-primary)]">
-        {label} <span className="text-[var(--aws-error)]">*</span>
-      </span>
-      {floors.length > 0 ? (
-        <select
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className="flex-1 h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
-        >
-          <option value="">— Pick floor —</option>
-          {floors.map((f) => <option key={f} value={f}>{f}</option>)}
-        </select>
-      ) : (
-        <input
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="Floor"
-          className="flex-1 h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
-        />
-      )}
-    </div>
-  );
-}
 
 // Read-only "Materials per step" — maps the BOM's RM / PM / SFG lines onto the
 // job card's process steps using the OPERATIONAL model (how job cards actually
@@ -2377,16 +2379,18 @@ function StepFloorRow({
 // step. Reflects the live wipSteps order, so reordering updates which step is
 // "first". Renders nothing for articles without a BOM (e.g. RM SOs).
 function MaterialsByStep({
-  wipSteps, pkgFloor, bom, loading, err, hasBom,
+  wipSteps, bom, loading, err, hasBom,
 }: {
   wipSteps: WipStep[];
-  pkgFloor: string;
   bom: PlanBomSummary | null;
   loading: boolean;
   err: string | null;
   hasBom: boolean;
 }) {
   if (!hasBom) return null;
+  // Unified list: all but the last are WIP; the last is the terminal packaging.
+  const wip = wipSteps.slice(0, -1);
+  const term = wipSteps[wipSteps.length - 1];
 
   const kind = (t: string | null | undefined) => (t ?? "").trim().toLowerCase();
   const allLines = bom?.lines ?? [];
@@ -2448,7 +2452,7 @@ function MaterialsByStep({
         </p>
       ) : (
         <div className="mt-1.5 space-y-1.5">
-          {wipSteps.map((s, i) => (
+          {wip.map((s, i) => (
             <div key={`${s.process}-${i}`} className="border border-[var(--aws-border)] rounded px-2 py-1.5 bg-white">
               <div className="flex items-center gap-1.5 text-[11px] font-semibold text-[var(--text-primary)]">
                 <span className="shrink-0 inline-flex items-center justify-center w-4 h-4 rounded-full bg-[var(--aws-navy)] text-white text-[9px] font-bold">{i + 1}</span>
@@ -2476,8 +2480,8 @@ function MaterialsByStep({
           <div className="border border-[var(--aws-border)] rounded px-2 py-1.5 bg-white">
             <div className="flex items-center gap-1.5 text-[11px] font-semibold text-[var(--text-primary)]">
               <span className="shrink-0 inline-flex items-center justify-center w-4 h-4 rounded-full bg-[var(--aws-orange)] text-white text-[9px] font-bold">P</span>
-              <span>Packaging</span>
-              {pkgFloor ? <span className="shrink-0 text-[10px] font-normal text-[var(--text-muted)]">· {pkgFloor}</span> : null}
+              <span className="truncate" title={term?.process || undefined}>{term?.process || "Packaging"}</span>
+              {term?.floor ? <span className="shrink-0 text-[10px] font-normal text-[var(--text-muted)]">· {term.floor}</span> : null}
             </div>
             {sfg.length > 0 ? (
               renderRows(sfg)

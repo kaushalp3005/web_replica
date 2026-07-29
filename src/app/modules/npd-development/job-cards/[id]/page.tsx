@@ -14,16 +14,19 @@ import type { MeResponse } from "@/lib/auth";
 import {
   getDevJobCard, replaceDevLines, startDevJobCard, closeDevJobCard, cancelDevJobCard,
   addDevPhase, replacePhaseLines, startDevPhase, completeDevPhase, deleteDevPhase, promoteApproval,
-  promoteRejectByEmail, dispatchDevJobCard, replaceDevArticles,
+  promoteRejectByEmail, dispatchDevJobCard, replaceDevArticles, updateDevJobCardDetails,
   type DevJobCard, type DevLine, type DevPhase, type DevPhaseCompleteBody, type PromoteGate,
-  type DevArticle, type DevJobCardCloseBody,
+  type DevArticle, type DevJobCardCloseBody, type DevJobCardDetailsInput,
 } from "@/lib/npd-dev";
 import {
   ArticleEditor, articleToDraft, draftToInput, emptyArticle, articlesValid,
   type ArticleDraft, type DraftLine,
 } from "../../_article-editor";
 import { DevJcStatusPill } from "../../../sample/_shared";
-import { ArticlePicker, UomSelect } from "../../../sample/_form";
+import {
+  ArticlePicker, UomSelect,
+  BillingFields, billingError, billingPayload, billingFrom, EMPTY_BILLING, type BillingValue,
+} from "../../../sample/_form";
 
 interface EditLine {
   id?: number;
@@ -286,6 +289,21 @@ export default function DevJobCardDetailPage() {
   function openMergedOutpass() {
     window.open(`/modules/npd-development/job-cards/${id}/gate-pass?merge=1`, "_blank", "noopener");
   }
+  // Edit the card's customer & dispatch header (DRAFT/IN_DEVELOPMENT) → PATCH + reload.
+  // Returns success so the editor stays open (typed input intact) on a failed save.
+  async function saveDetails(body: DevJobCardDetailsInput): Promise<boolean> {
+    setBusy(true); setError(null);
+    try {
+      await updateDevJobCardDetails(id, body);
+      await load();
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save details");
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
   // Partial out: issue part (or all) of the finalized FG sample. Blank qty → the
   // whole remaining balance. Reload refreshes dispatches[] + remaining_qty.
   function doDispatch() {
@@ -379,8 +397,9 @@ export default function DevJobCardDetailPage() {
               )}
             </section>
 
-            {/* Customer & dispatch — read-only; set on the requisition by BD, inherited here */}
-            <DispatchPlanCard jc={jc} />
+            {/* Customer & dispatch — editable while DRAFT/IN_DEVELOPMENT (enter/adjust here),
+                else read-only. Set on the requisition by BD and inherited on Develop. */}
+            <DispatchPlanCard jc={jc} editable={editable} busy={busy} onSave={saveDetails} />
 
             {/* Action bar */}
             {caps.canNpd && (jc.status === "DRAFT" || jc.status === "IN_DEVELOPMENT") && (
@@ -846,26 +865,115 @@ function Field({ label, value }: { label: string; value: string }) {
 // Customer + dispatch planning card — READ-ONLY on the job card. These are set on
 // the requisition by the BD team and inherited here; the confirmed dispatch date
 // is the job card's own closing date (set automatically on close).
-function DispatchPlanCard({ jc }: { jc: DevJobCard }) {
+function DispatchPlanCard({ jc, editable, busy, onSave }: {
+  jc: DevJobCard; editable?: boolean; busy?: boolean;
+  onSave?: (body: DevJobCardDetailsInput) => Promise<boolean>;
+}) {
   const d = (v: string | null | undefined) => (v ? String(v).slice(0, 10) : "—");
+  const [editing, setEditing] = useState(false);
+  const [company, setCompany] = useState("");
+  const [customer, setCustomer] = useState("");
+  const [contact, setContact] = useState("");
+  const [ship, setShip] = useState("");
+  const [transport, setTransport] = useState("");
+  const [expDispatch, setExpDispatch] = useState("");
+  const [billing, setBilling] = useState<BillingValue>(EMPTY_BILLING);
+  function startEdit() {
+    setCompany(jc.company_name ?? "");
+    setCustomer(jc.customer_name ?? "");
+    setContact(jc.customer_contact ?? "");
+    setShip(jc.customer_ship_to_address ?? "");
+    setTransport(jc.mode_of_transport ?? "");
+    setExpDispatch(jc.expected_dispatch_date ? String(jc.expected_dispatch_date).slice(0, 10) : "");
+    setBilling(billingFrom({
+      returnable: jc.returnable, non_returnable: jc.non_returnable, paid: jc.paid,
+      amount: jc.amount != null ? Number(jc.amount) : null,
+    }));
+    setEditing(true);
+  }
+  const err = billingError(billing);
+  async function save() {
+    if (err) return;
+    // Send cleared fields as null (→ column NULL → renders "—"); a cleared date must be null,
+    // not "" (backend Optional[date] rejects ""). Await the save and close ONLY on success so a
+    // failed PATCH keeps the editor open with the typed input intact.
+    const ok = await onSave?.({
+      company_name: company.trim() || null,
+      customer_name: customer.trim() || null,
+      customer_contact: contact.trim() || null,
+      customer_ship_to_address: ship.trim() || null,
+      mode_of_transport: transport.trim() || null,
+      expected_dispatch_date: expDispatch || null,
+      ...billingPayload(billing),
+    });
+    if (ok) setEditing(false);
+  }
+  if (editing) {
+    return (
+      <Card title="Customer & dispatch">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Company name</label>
+            <input className="form-input" value={company} onChange={(e) => setCompany(e.target.value)} placeholder="e.g. Candor Foods Pvt Ltd" />
+          </div>
+          <div>
+            <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Customer name</label>
+            <input className="form-input" value={customer} onChange={(e) => setCustomer(e.target.value)} placeholder="e.g. BigBasket" />
+          </div>
+          <div>
+            <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Customer contact</label>
+            <input className="form-input" value={contact} onChange={(e) => setContact(e.target.value)} placeholder="name / phone / email" />
+          </div>
+          <div>
+            <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Mode of transport</label>
+            <input className="form-input" value={transport} onChange={(e) => setTransport(e.target.value)} placeholder="e.g. Road / Air / Courier" />
+          </div>
+          <div>
+            <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Expected dispatch date</label>
+            <input className="form-input" type="date" value={expDispatch} onChange={(e) => setExpDispatch(e.target.value)} />
+          </div>
+          <div className="sm:col-span-2">
+            <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Customer ship-to address</label>
+            <textarea className="form-input min-h-[56px] resize-y" value={ship} onChange={(e) => setShip(e.target.value)} placeholder="Delivery address…" />
+          </div>
+          <div className="sm:col-span-2">
+            <BillingFields value={billing} onChange={setBilling} />
+          </div>
+        </div>
+        <div className="mt-3 flex items-center gap-2">
+          <div className="flex-1" />
+          <button disabled={busy} onClick={() => setEditing(false)}
+            className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] disabled:opacity-50 hover:bg-[var(--surface-subtle)]">Cancel</button>
+          <button disabled={busy || !!err} onClick={save}
+            className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">Save details</button>
+        </div>
+      </Card>
+    );
+  }
   return (
     <Card title="Customer & dispatch">
-      <dl className="grid grid-cols-2 sm:grid-cols-4 gap-y-3 gap-x-4 text-[13px]">
-        <Field label="Company" value={jc.company_name ?? "—"} />
-        <Field label="Customer" value={jc.customer_name ?? "—"} />
-        <Field label="Customer contact" value={jc.customer_contact ?? "—"} />
-        <Field label="Mode of transport" value={jc.mode_of_transport ?? "—"} />
-        <Field label="Expected dispatch (BD)" value={d(jc.expected_dispatch_date)} />
-        <Field label="Confirmed dispatch (NPD)" value={jc.confirmed_dispatch_date ? d(jc.confirmed_dispatch_date) : "On close"} />
-        <Field label="Return type" value={jc.returnable ? "Returnable" : jc.non_returnable ? "Non-returnable" : "—"} />
-        <Field label="Paid" value={jc.paid ? "Yes" : "No"} />
-        <Field label="Amount" value={jc.paid && jc.amount != null ? Number(jc.amount).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—"} />
-        <div className="col-span-2 sm:col-span-4">
-          <dt className="text-[11px] text-[var(--text-muted)]">Ship-to address</dt>
-          <dd className="text-[var(--text-primary)]">{jc.customer_ship_to_address ?? "—"}</dd>
-        </div>
-      </dl>
-      <p className="mt-2 text-[11px] text-[var(--text-muted)]">Set on the requisition by the BD team. Confirmed dispatch date = the job card&apos;s closing date.</p>
+      <div className="flex items-start justify-between gap-2">
+        <dl className="grid grid-cols-2 sm:grid-cols-4 gap-y-3 gap-x-4 text-[13px] flex-1">
+          <Field label="Company" value={jc.company_name || "—"} />
+          <Field label="Customer" value={jc.customer_name || "—"} />
+          <Field label="Customer contact" value={jc.customer_contact || "—"} />
+          <Field label="Mode of transport" value={jc.mode_of_transport || "—"} />
+          <Field label="Expected dispatch (BD)" value={d(jc.expected_dispatch_date)} />
+          <Field label="Confirmed dispatch (NPD)" value={jc.confirmed_dispatch_date ? d(jc.confirmed_dispatch_date) : "On close"} />
+          <Field label="Return type" value={jc.returnable ? "Returnable" : jc.non_returnable ? "Non-returnable" : "—"} />
+          <Field label="Paid" value={jc.paid ? "Yes" : "No"} />
+          <Field label="Amount" value={jc.paid && jc.amount != null ? Number(jc.amount).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—"} />
+          <div className="col-span-2 sm:col-span-4">
+            <dt className="text-[11px] text-[var(--text-muted)]">Ship-to address</dt>
+            <dd className="text-[var(--text-primary)]">{jc.customer_ship_to_address || "—"}</dd>
+          </div>
+        </dl>
+        {editable && (
+          <button onClick={startEdit}
+            className="shrink-0 h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[12px] hover:bg-[var(--surface-subtle)]">Edit</button>
+        )}
+      </div>
+      <p className="mt-2 text-[11px] text-[var(--text-muted)]">Prefilled from the requisition (set by BD) when developed from one; editable here while the card is a draft. Confirmed dispatch date = the job card&apos;s closing date.</p>
     </Card>
   );
 }

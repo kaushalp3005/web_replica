@@ -279,6 +279,9 @@ function JobCardListingPageBody() {
   const [teamLeader, setTeamLeader] = useState<string>(cache?.teamLeader ?? "");
   const [debouncedTeamLeader, setDebouncedTeamLeader] = useState<string>(cache?.teamLeader ?? "");
   const [pageSize, setPageSize] = useState<PageSize>(clampPageSize(cache?.pageSize));
+  // Pending sign-off chip — completed JCs still awaiting the production_head
+  // signature. Maps to the backend `pendency=pending_signoff` filter.
+  const [pendingSignoff, setPendingSignoff] = useState<boolean>(cache?.pendingSignoff ?? false);
   const initial = useUserInitial();
   const userScope = useUserScope();
   // W4-MED-3/M10 — consume the single context value rather than re-subscribing.
@@ -486,6 +489,10 @@ function JobCardListingPageBody() {
       // the toolbar. When populated we pass it as a search hint; the
       // server's /job-cards-v2 endpoint maps the column on its end.
       if (debouncedTeamLeader) params.set("customer", debouncedTeamLeader);
+      // Pending sign-off only applies to the paginated list — the /search
+      // endpoint doesn't accept `pendency`. ponytail: dropped during free-text
+      // search; wire into /search if operators need both at once.
+      if (pendingSignoff && !useSearch) params.set("pendency", "pending_signoff");
       if (useSearch) {
         params.set("q", debouncedSearch);
       } else {
@@ -517,7 +524,7 @@ function JobCardListingPageBody() {
             searchMeta: nextMeta,
             scrollY: 0,
             soNumber: debouncedSoNumber, dateFrom, dateTo,
-            teamLeader: debouncedTeamLeader, pageSize, floor,
+            teamLeader: debouncedTeamLeader, pageSize, floor, pendingSignoff,
           });
         } else {
           const data = (await res.json()) as ListResponse;
@@ -534,7 +541,7 @@ function JobCardListingPageBody() {
             searchMeta: null,
             scrollY: 0,
             soNumber: debouncedSoNumber, dateFrom, dateTo,
-            teamLeader: debouncedTeamLeader, pageSize, floor,
+            teamLeader: debouncedTeamLeader, pageSize, floor, pendingSignoff,
           });
         }
       } catch (e) {
@@ -552,7 +559,7 @@ function JobCardListingPageBody() {
       controller.abort();
     };
   }, [
-    entity, factory, floor, statusFilter,
+    entity, factory, floor, statusFilter, pendingSignoff,
     debouncedSearch, debouncedSoNumber, debouncedTeamLeader,
     dateFrom, dateTo, dateRangeInvalid, page, pageSize, router, cache, authed, reloadKey,
   ]);
@@ -732,6 +739,23 @@ function JobCardListingPageBody() {
               onToggle={toggleStatus}
               onClear={() => changeStatus([])}
             />
+            <label
+              className={[
+                "flex items-center gap-1.5 h-8 px-3 text-[13px] rounded-[2px] border cursor-pointer select-none",
+                pendingSignoff
+                  ? "bg-[#f5f3ff] border-[#ddd6fe] text-[#6d28d9]"
+                  : "bg-white border-[var(--aws-border-strong)] hover:border-[var(--aws-navy)]",
+              ].join(" ")}
+              title="Completed job cards still awaiting the production head's sign-off"
+            >
+              <input
+                type="checkbox"
+                checked={pendingSignoff}
+                onChange={(e) => { setPendingSignoff(e.target.checked); setPage(1); }}
+                className="accent-[var(--aws-orange)]"
+              />
+              Pending sign-off
+            </label>
             <PageSizeSelect
               value={pageSize}
               onChange={(v) => {
@@ -844,6 +868,7 @@ function JobCardListingPageBody() {
               setDateFrom("");
               setDateTo("");
               setTeamLeader("");
+              setPendingSignoff(false);
               // W4-MED-6 — also flush the debounced shadow state so the
               // refetch fires immediately. Without this, the next fetch is
               // delayed by SEARCH_DEBOUNCE_MS while the debounce timer

@@ -134,7 +134,8 @@ export default function DevJcGatePassPage() {
   const toAddr = jc.customer_ship_to_address || "";
   const fromAddr = (jc.warehouse && WAREHOUSE_ADDR[jc.warehouse]) || jc.warehouse || "—";
   const recipient = disp?.recipient || jc.dispatch_recipient || "—";
-  const reason = jc.output_notes || `NPD sample dispatch — ${outpassNo}`;
+  const expDate = jc.expected_dispatch_date ? String(jc.expected_dispatch_date).slice(0, 10) : "—";
+  const reason = jc.output_notes || `NPD stock dispatch — ${outpassNo}`;
   // Promote-gate digital signatures (name + decided date) — BH = REQUESTOR_BH, Inventory
   // manager = INV_MGR. Absent for a sourceless / pre-gate card → blank signature line.
   const bh = jc.gate_signatures?.REQUESTOR_BH;
@@ -205,7 +206,7 @@ export default function DevJcGatePassPage() {
                 <img src="/candor_logo.jpg" alt="Candor Foods" style={{ height: "60px", width: "auto" }} />
                 <div>
                   <div style={{ fontSize: "20px", fontWeight: "bold", color: BURGUNDY }}>CANDOR FOODS</div>
-                  <div style={{ fontSize: "24px", marginTop: "6px", color: BURGUNDY, fontWeight: "bold", letterSpacing: "1px" }}>SAMPLE OUTPASS</div>
+                  <div style={{ fontSize: "24px", marginTop: "6px", color: BURGUNDY, fontWeight: "bold", letterSpacing: "1px" }}>STOCK OUTPASS</div>
                 </div>
               </div>
             </td>
@@ -213,6 +214,9 @@ export default function DevJcGatePassPage() {
           <tr>
             <td colSpan={3} style={td}><strong>Outpass No:</strong> {outpassNo}</td>
             <td colSpan={2} style={td}><strong>Date:</strong> {date}</td>
+          </tr>
+          <tr>
+            <td colSpan={COLS} style={td}><strong>Expected dispatch date:</strong> {expDate}</td>
           </tr>
           <tr>
             <td colSpan={3} style={{ ...td, verticalAlign: "top" }}>
@@ -269,7 +273,7 @@ export default function DevJcGatePassPage() {
           </tr>
           <tr>
             <td colSpan={COLS} style={{ padding: "15px 10px", borderTop: "2px solid #000", textAlign: "center", fontSize: "10px", fontStyle: "italic", backgroundColor: "#f8f9fa" }}>
-              This is a computer-generated sample outpass. Business head &amp; inventory manager signatures are captured digitally; the security signature is taken at the gate.
+              This is a computer-generated stock outpass. Business head &amp; inventory manager signatures are captured digitally; the security signature is taken at the gate.
             </td>
           </tr>
         </tbody>
@@ -289,7 +293,7 @@ export default function DevJcGatePassPage() {
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "15px" }}>
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src="/candor_logo.jpg" alt="Candor Foods" style={{ height: "50px", width: "auto" }} />
-                <div style={{ fontSize: "18px", fontWeight: "bold", color: BURGUNDY }}>CANDOR FOODS - OUTPASS</div>
+                <div style={{ fontSize: "18px", fontWeight: "bold", color: BURGUNDY }}>CANDOR FOODS - STOCK OUTPASS</div>
               </div>
             </td>
           </tr>
@@ -298,6 +302,9 @@ export default function DevJcGatePassPage() {
           <tr>
             <td colSpan={2} style={td}><strong>Outpass No:</strong> {outpassNo}</td>
             <td colSpan={3} style={td}><strong>Date:</strong> {date}</td>
+          </tr>
+          <tr>
+            <td colSpan={5} style={td}><strong>Expected dispatch date:</strong> {expDate}</td>
           </tr>
           <tr>
             <td colSpan={2} style={td}><strong>From:</strong> Candor Foods, {fromAddr}</td>

@@ -44,6 +44,7 @@ export interface JcListCache {
   teamLeader?: string;
   pageSize?: number;          // 25 / 50 / 100
   floor?: string;             // Free-form floor label (e.g. "First Floor", "Cheese Floor")
+  pendingSignoff?: boolean;   // completed JCs awaiting production_head signature
 }
 
 const KEY = "jc-list-state";

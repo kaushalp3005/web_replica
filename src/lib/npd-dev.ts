@@ -191,11 +191,38 @@ export interface DevJobCardCreate {
   weight_per_piece?: number;
   uom?: string;
   source_requisition_id?: number;   // set when started from a request's "Develop"
+  // Customer & dispatch (like the requisition form). Omitted → inherited from the source
+  // requisition; an explicit value wins. Entered directly for a standalone card.
+  company_name?: string;
+  customer_name?: string;
+  customer_contact?: string;
+  customer_ship_to_address?: string;
+  mode_of_transport?: string;
+  expected_dispatch_date?: string;   // YYYY-MM-DD
+  returnable?: boolean;
+  non_returnable?: boolean;
+  paid?: boolean;
+  amount?: number;
   clone_from_base?: boolean;
   lines?: DevLine[];
   // Per-article develop (082): each article its own product + base BOM + recipe. When
   // sent, the card-level fg_sku_name/pcs/weight/base_bom_id mirror article #1.
   articles?: DevArticleInput[];
+}
+
+// Editable customer & dispatch header of a dev job card (PATCH). Text/date fields accept
+// null to CLEAR a column to NULL (the backend rejects "" for a date; null clears cleanly).
+export interface DevJobCardDetailsInput {
+  company_name?: string | null;
+  customer_name?: string | null;
+  customer_contact?: string | null;
+  customer_ship_to_address?: string | null;
+  mode_of_transport?: string | null;
+  expected_dispatch_date?: string | null;   // YYYY-MM-DD, or null to clear
+  returnable?: boolean;
+  non_returnable?: boolean;
+  paid?: boolean;
+  amount?: number;
 }
 
 // Per-article output + accounting at promote (082/083) — each article's own output.
@@ -325,6 +352,14 @@ export async function searchBoms(search: string): Promise<BomOption[]> {
 
 export async function createDevJobCard(body: DevJobCardCreate): Promise<DevJobCard> {
   return jsonOrThrow(await post(BASE, body), "Failed to create job card");
+}
+
+// Edit the card's customer & dispatch header (DRAFT/IN_DEVELOPMENT). PATCH — only send
+// the fields that changed.
+export async function updateDevJobCardDetails(id: number, body: DevJobCardDetailsInput): Promise<DevJobCard> {
+  return jsonOrThrow(
+    await apiFetch(`${BASE}/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+    "Failed to save customer & dispatch details");
 }
 
 export async function replaceDevLines(id: number, lines: DevLine[]): Promise<DevJobCard> {

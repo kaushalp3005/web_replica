@@ -14,13 +14,13 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useRequireAuth, useIsAdmin } from "@/lib/user";
-import { getCustomerReturn, getCrEmailRouting, decideCustomerReturn, bulkSaveBoxes, upsertBox, type CRWithDetails, type CRStatus, type CrEmailRouting, type CRBox } from "@/lib/customer-returns";
+import { getCustomerReturn, getCrEmailRouting, decideCustomerReturn, bulkSaveBoxes, upsertBox, type CRWithDetails, type CRStatus, type CrEmailRouting } from "@/lib/customer-returns";
 import { CustomerReturnsChrome } from "../../_chrome";
 import { StatusBadge, CompanyChip, ErrorBanner, InfoBanner, SuccessBanner, useCompanyParam, fmtDate, fmtDateTime, num, isColdWarehouse } from "../../_shared";
 import { SAMPLE_CR, type ApprovalAction, ACTION_TO_STATUS } from "../../_fixtures";
 import { resolveRecipients, formatActor, EMPTY_ROUTING } from "../../_approvalMatrix";
 import { ArticleBoxEditor } from "../../_ArticleBoxEditor";
-import { type CRBoxForm, toBulkItems } from "../../_boxEngine";
+import { type CRBoxForm, toBulkItems, crBoxToForm } from "../../_boxEngine";
 import { printCrLabels } from "../../_labelPrint";
 
 // approve/reject/hold, each with the same accent the backend uses for its email
@@ -132,8 +132,9 @@ export default function CustomerReturnApprovePage() {
   // On Hold is still actionable. Drives whether the decision UI shows at all.
   const alreadyDecided = status === "Approved" || status === "Rejected";
   const canDecide = !!recipients.approver && !alreadyDecided; // needs a mapped BH + a non-terminal status
-  // Box entry unlocks once approved (legacy /approve was the box-entry screen).
-  const boxesUnlocked = status === "Approved" && !usingSample;
+  // Box entry is independent of the approval matrix — available on any real record,
+  // regardless of status. Only the fixture fallback (no live CR) can't be edited.
+  const boxesUnlocked = !usingSample;
   const isCold = isColdWarehouse(data.factory_unit);
   const totalQty = data.lines.reduce((s, l) => s + num(l.qty), 0);
   const totalValue = data.lines.reduce((s, l) => s + num(l.value), 0);
@@ -184,26 +185,34 @@ export default function CustomerReturnApprovePage() {
 
   // Save + print one box, minting/keeping its QR box_id (same path as the detail screen).
   async function handlePrintBox(article: string, boxNumber: number) {
-    if (!data) return;
+    if (!data || savingBoxes) return;
     const box = boxes.find((b) => b.article_description === article && b.box_number === boxNumber);
     if (!box) return;
+    const setPrinting = (v: boolean) =>
+      setBoxes((prev) => prev.map((b) => (b.article_description === article && b.box_number === boxNumber ? { ...b, printing: v } : b)));
     setPrintingBoxKey(`${article}#${boxNumber}`);
     setBoxError(null);
+    // Freeze this box_number (isCommitted) for the round-trip so a concurrent Qty-Units
+    // change or row-Remove can't drop it before the box_id stamp lands.
+    setPrinting(true);
     try {
       const res = await upsertBox(company, crId, {
         article_description: box.article_description,
         box_number: box.box_number,
         uom: data.lines.find((l) => l.item_description === article)?.uom?.toString() || undefined,
         conversion: box.conversion || undefined,
-        net_weight: box.net_weight || undefined,
-        gross_weight: box.gross_weight || undefined,
+        net_weight: box.net_weight || "0",
+        gross_weight: box.gross_weight || "0",
         lot_number: box.lot_number || undefined,
         item_mark: box.item_mark || undefined,
+        spl_remarks: box.spl_remarks || undefined,
+        vakkal: box.vakkal || undefined,
         count: box.count ? parseInt(box.count) : undefined,
       });
-      setBoxes((prev) => prev.map((b) => (b.article_description === article && b.box_number === boxNumber ? { ...b, box_id: res.box_id, is_printed: true } : b)));
+      setBoxes((prev) => prev.map((b) => (b.article_description === article && b.box_number === boxNumber ? { ...b, box_id: res.box_id, is_printed: true, printing: false } : b)));
       await printCrLabels({ company, crId, customer: data.customer, rtvDate: data.rtv_date, boxes: [{ ...box, box_id: res.box_id }] });
     } catch (e) {
+      setPrinting(false);
       setBoxError(e instanceof Error ? e.message : "Print failed");
     } finally {
       setPrintingBoxKey(null);
@@ -398,7 +407,7 @@ export default function CustomerReturnApprovePage() {
         </div>
       </div>
 
-      {/* Articles — box-wise weights, unlocked once approved */}
+      {/* Articles — box-wise weights (independent of the approval decision) */}
       {boxesUnlocked && (
         <section className="mt-4 bg-white border border-[var(--aws-border)] rounded-md p-4">
           <div className="flex items-center justify-between gap-3 flex-wrap mb-1">
@@ -430,6 +439,7 @@ export default function CustomerReturnApprovePage() {
                 printingKey={printingBoxKey}
                 onPrintRange={handlePrintRange}
                 printingRange={printingRange}
+                disabled={savingBoxes}
               />
             ))}
           </div>
@@ -437,25 +447,6 @@ export default function CustomerReturnApprovePage() {
       )}
     </CustomerReturnsChrome>
   );
-}
-
-// CRBox (server shape) -> CRBoxForm (editor shape). Mirrors the detail screen's
-// toBoxForm; box_id present ⇒ already printed.
-function crBoxToForm(b: CRBox): CRBoxForm {
-  return {
-    article_description: b.article_description,
-    box_number: b.box_number,
-    conversion: b.conversion?.toString() || "",
-    net_weight: b.net_weight?.toString() || "",
-    gross_weight: b.gross_weight?.toString() || "",
-    count: b.count?.toString() || "",
-    lot_number: b.lot_number || "",
-    item_mark: b.item_mark || "",
-    spl_remarks: b.spl_remarks || "",
-    vakkal: b.vakkal || "",
-    box_id: b.box_id || undefined,
-    is_printed: !!b.box_id,
-  };
 }
 
 function RecipientList({ label, emails, approverEmail }: { label: string; emails: string[]; approverEmail?: string }) {

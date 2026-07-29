@@ -1062,6 +1062,20 @@ function EntityPill({ entity }: { entity?: string | null }) {
 // Pending arrival (grey) / Arrived (amber/blue) / Completed (green). For
 // Completed, also reflect accepted/rejected counts from the summary.
 
+// Receiving status pill from po_header.status (set on box change). Extra = more
+// net weight received than the ordered PO weight. Returns null for pending/empty
+// unless a pendingLabel is given (used in the receipt breakdown banner).
+function ReceivingStatusBadge({ status, pendingLabel }: { status?: string | null; pendingLabel?: string }) {
+  const s = (status ?? "").toLowerCase();
+  const pill = (bg: string, color: string, border: string, text: string) => (
+    <span className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-sm whitespace-nowrap" style={{ background: bg, color, border: `1px solid ${border}` }}>{text}</span>
+  );
+  if (s === "extra received") return pill("#fbe7d6", "#9a5b00", "#f0cfa0", "Extra received");
+  if (s === "partially received") return pill("#eaf0fb", "#2c5fa8", "#c3d4f0", "Partially received");
+  if (pendingLabel) return pill("var(--surface-disabled)", "var(--text-secondary)", "var(--aws-border)", pendingLabel);
+  return null;
+}
+
 function QcTxnBadge({ summary }: { summary?: ArrivalSummaryItem }) {
   const status: QcTxnStatus = summary ? summary.status : "pending_arrival";
   if (status === "pending_arrival") {
@@ -1433,7 +1447,10 @@ function MaterialInTableRow({
           <ArticlesSummary linesState={linesState} />
         </td>
         <td className="px-3 py-2 whitespace-nowrap">
-          <QcTxnBadge summary={qcSummaryItem} />
+          <div className="flex flex-col items-start gap-1">
+            <QcTxnBadge summary={qcSummaryItem} />
+            <ReceivingStatusBadge status={row.status} />
+          </div>
         </td>
         <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
           <ActionBtns onToggle={onToggle} onSend={onSend} onInward={onInward} isOpen={isOpen} canSend={canSend} />
@@ -1499,9 +1516,10 @@ function MaterialInMobileCard({
           <div className="text-[12px] text-[var(--text-secondary)]">
             <ArticlesSummary linesState={linesState} />
           </div>
-          {/* Row 5: QC status badge */}
-          <div className="mt-1">
+          {/* Row 5: QC status + receiving status badges */}
+          <div className="mt-1 flex flex-wrap gap-1">
             <QcTxnBadge summary={qcSummaryItem} />
+            <ReceivingStatusBadge status={row.status} />
           </div>
         </div>
         {/* Actions */}
@@ -1594,9 +1612,9 @@ function MaterialInDetailPanel({
 
 // ── Received vs PO quantity breakdown ─────────────────────────────────────────
 // Per line: received (net weight / count from weighed boxes) vs the ordered PO
-// quantity, with a Matched/Short badge. A PO is "Completed" when every line
-// matches on both weight and count — the same rule the backend section filter
-// applies (po_query._FULLY_RECEIVED_PREDICATE).
+// quantity, with a Matched/Short badge. A PO lands in "Completed" as soon as any
+// box is received; the status pill shows Partially / Extra received (extra =
+// received net weight > ordered PO weight).
 
 function ReceiptBreakdown({ receiptState }: { receiptState?: ReceiptState }) {
   const summary = receiptState?.summary;
@@ -1606,17 +1624,7 @@ function ReceiptBreakdown({ receiptState }: { receiptState?: ReceiptState }) {
         <div className="text-[11px] uppercase tracking-wide font-bold text-[var(--text-muted)]">
           Received vs PO Quantity
         </div>
-        {summary ? (
-          summary.completed ? (
-            <span className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-sm" style={{ background: "#eaf6ed", color: "var(--text-success)", border: "1px solid #b6dbb1" }}>
-              Completed · fully received
-            </span>
-          ) : (
-            <span className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-sm" style={{ background: "#fbf3e7", color: "#9a5b00", border: "1px solid #f0cfa0" }}>
-              Not fully received
-            </span>
-          )
-        ) : null}
+        {summary ? <ReceivingStatusBadge status={summary.status} pendingLabel="Not received yet" /> : null}
       </div>
       {receiptState?.loading ? (
         <div className="py-2 text-[var(--text-secondary)] flex items-center gap-2">

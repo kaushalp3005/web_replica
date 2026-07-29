@@ -49,9 +49,13 @@ const IconPrinter = () => (
     <path d="M6 9V2h12v7" /><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" /><rect x="6" y="14" width="12" height="8" rx="1" />
   </svg>
 );
+const IconChevronLeft = () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>;
+const IconChevronRight = () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>;
+
+const BOX_PAGE_SIZE = 200; // window the box rows so a huge article (500 boxes) stays responsive (detail-page parity)
 
 export function ArticleBoxEditor({
-  line, isCold, boxes, onBoxesChange, onPrintBox, printingKey, onPrintRange, printingRange,
+  line, isCold, boxes, onBoxesChange, onPrintBox, printingKey, onPrintRange, printingRange, disabled,
 }: {
   line: ArticleBoxLine;
   isCold: boolean;
@@ -61,6 +65,9 @@ export function ArticleBoxEditor({
   printingKey?: string | null;
   onPrintRange?: (article: string, from: number, to: number) => void;
   printingRange?: boolean;
+  // Freeze the whole card (e.g. while a submit/save round-trip is in flight) so no box
+  // state changes between the click and the navigation — a native <fieldset disabled>.
+  disabled?: boolean;
 }) {
   const article = line.item_description;
   const uom = str(line.uom);
@@ -74,6 +81,7 @@ export function ArticleBoxEditor({
   const [pr, setPr] = useState({ from: "", to: "" });
   const [query, setQuery] = useState("");
   const [active, setActive] = useState("");
+  const [page, setPage] = useState(1);
 
   const setCount = (v: string) => {
     if (v !== "" && (isNaN(parseInt(v)) || parseInt(v) < 0)) return;
@@ -99,8 +107,14 @@ export function ArticleBoxEditor({
     ? mine.filter((b) => String(b.box_number) === active || b.lot_number.toLowerCase().includes(active.toLowerCase()))
     : mine;
 
+  // Window the rows at 200/page. safePage clamps when the list shrinks (search,
+  // remove) so the page index never points past the end.
+  const totalPages = Math.max(1, Math.ceil(shown.length / BOX_PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const pageBoxes = shown.slice((safePage - 1) * BOX_PAGE_SIZE, safePage * BOX_PAGE_SIZE);
+
   return (
-    <div className="border border-[var(--aws-border)] rounded-md p-4 space-y-3">
+    <fieldset disabled={disabled} className="border border-[var(--aws-border)] rounded-md p-4 space-y-3 min-w-0 disabled:opacity-70">
       {/* Header: article name + tags */}
       <div>
         <p className="text-[14px] font-medium text-[var(--text-primary)] break-words">{article}</p>
@@ -189,7 +203,7 @@ export function ArticleBoxEditor({
         <p className="text-[12px] text-[var(--text-secondary)]">No boxes match “{active}”.</p>
       ) : (
         <div className="space-y-2">
-          {shown.map((b) => {
+          {pageBoxes.map((b) => {
             const key = `${article}#${b.box_number}`;
             return (
               <div key={key} className="grid grid-cols-2 sm:grid-cols-[auto_1fr_1fr_1fr_4rem_1fr_auto] gap-2 items-center rounded border border-[var(--aws-border)] p-2">
@@ -210,11 +224,11 @@ export function ArticleBoxEditor({
                 <LabeledMobile label="Conv."><div className={roCls} title="count × UOM">{b.conversion || "—"}</div></LabeledMobile>
                 <LabeledMobile label="Net wt"><input type="number" step="0.001" value={b.net_weight} onChange={(e) => setField(b.box_number, "net_weight", e.target.value)} onWheel={(e) => e.currentTarget.blur()} placeholder="Net wt" aria-label="Net weight" className={inCls} /></LabeledMobile>
                 <LabeledMobile label="Gross wt"><input type="number" step="0.001" value={b.gross_weight} onChange={(e) => setField(b.box_number, "gross_weight", e.target.value)} onWheel={(e) => e.currentTarget.blur()} placeholder="Gross wt" aria-label="Gross weight" className={inCls} /></LabeledMobile>
-                <LabeledMobile label="Count"><input type="number" step="1" value={b.count} onChange={(e) => setField(b.box_number, "count", e.target.value)} onWheel={(e) => e.currentTarget.blur()} aria-label="Count" className={inCls} /></LabeledMobile>
+                <LabeledMobile label="Count"><input type="number" step="1" value={b.count} onChange={(e) => setField(b.box_number, "count", e.target.value)} onWheel={(e) => e.currentTarget.blur()} placeholder="Count" aria-label="Count" className={inCls} /></LabeledMobile>
                 <LabeledMobile label="Lot #"><input value={b.lot_number} onChange={(e) => setField(b.box_number, "lot_number", e.target.value)} placeholder="Lot #" aria-label="Lot number" className={inCls} /></LabeledMobile>
                 <div className="col-span-2 sm:col-span-1 flex items-center justify-end gap-1">
                   {onPrintBox && (
-                    <button type="button" onClick={() => onPrintBox(article, b.box_number)} disabled={printingKey === key} title={b.is_printed ? "Reprint QR label" : "Save + print this box"} className="h-8 w-8 inline-flex items-center justify-center rounded border border-[var(--aws-border)] bg-white hover:border-[var(--aws-orange)] disabled:opacity-50 text-[var(--text-secondary)]">
+                    <button type="button" onClick={() => onPrintBox(article, b.box_number)} disabled={printingKey === key} aria-label={b.is_printed ? `Reprint box ${b.box_number}` : `Save and print box ${b.box_number}`} title={b.is_printed ? "Reprint QR label" : "Save + print this box"} className="h-8 w-8 inline-flex items-center justify-center rounded border border-[var(--aws-border)] bg-white hover:border-[var(--aws-orange)] disabled:opacity-50 text-[var(--text-secondary)]">
                       {printingKey === key ? "…" : <IconPrinter />}
                     </button>
                   )}
@@ -230,9 +244,21 @@ export function ArticleBoxEditor({
               </div>
             );
           })}
+          {totalPages > 1 && (
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-3 mt-1 border-t border-[var(--aws-border)] text-[12px]">
+              <span className="text-[var(--text-secondary)]">
+                Showing {(safePage - 1) * BOX_PAGE_SIZE + 1}–{Math.min(safePage * BOX_PAGE_SIZE, shown.length)} of {shown.length}{active ? " matching" : ""} boxes
+              </span>
+              <div className="flex items-center gap-1">
+                <button type="button" disabled={safePage <= 1} onClick={() => setPage(safePage - 1)} aria-label="Previous page" className="h-7 w-7 inline-flex items-center justify-center rounded border border-[var(--aws-border)] bg-white disabled:opacity-40"><IconChevronLeft /></button>
+                <span className="px-1 text-[var(--text-secondary)]">Page {safePage} / {totalPages}</span>
+                <button type="button" disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)} aria-label="Next page" className="h-7 w-7 inline-flex items-center justify-center rounded border border-[var(--aws-border)] bg-white disabled:opacity-40"><IconChevronRight /></button>
+              </div>
+            </div>
+          )}
         </div>
       )}
-    </div>
+    </fieldset>
   );
 }
 

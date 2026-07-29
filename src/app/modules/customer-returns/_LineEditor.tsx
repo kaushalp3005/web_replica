@@ -52,7 +52,7 @@ export function emptyCrLine(): CRLineForm {
 const labelCls = "text-[11px] text-[var(--text-secondary)]";
 
 export function CustomerReturnLineEditor({
-  line, index, isCold, onChange, onRemove, removable = true,
+  line, index, isCold, onChange, onRemove, removable = true, articleLocked = false,
 }: {
   line: CRLineForm;
   index: number;
@@ -60,6 +60,9 @@ export function CustomerReturnLineEditor({
   onChange: (index: number, patch: Partial<CRLineForm>) => void;
   onRemove?: (index: number) => void;
   removable?: boolean;
+  // Set when this line's article has a printed box: Change/Remove are locked (the
+  // box is committed to the DB with a physical label). Manage it on the detail screen.
+  articleLocked?: boolean;
 }) {
   const isResolved = !!(line.item_description && (line.material_type || line.item_category));
   const [mode, setMode] = useState<"search" | "browse">("search");
@@ -171,7 +174,7 @@ export function CustomerReturnLineEditor({
           )}
         </div>
         {removable && onRemove && (
-          <button type="button" onClick={() => onRemove(index)} className="text-[11px] text-[var(--aws-error)] hover:underline">Remove</button>
+          <button type="button" onClick={() => onRemove(index)} disabled={articleLocked} title={articleLocked ? "Has printed boxes — remove it on the detail screen" : undefined} className="text-[11px] text-[var(--aws-error)] hover:underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed">Remove</button>
         )}
       </div>
 
@@ -187,7 +190,7 @@ export function CustomerReturnLineEditor({
                 {line.sub_category && <span className="text-[10px] px-1.5 py-0.5 rounded border border-[var(--aws-border)] bg-white">{line.sub_category}</span>}
               </div>
             </div>
-            <button type="button" onClick={changeSelection} className="text-[12px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex-shrink-0">Change</button>
+            <button type="button" onClick={changeSelection} disabled={articleLocked} title={articleLocked ? "Has printed boxes — manage on the detail screen" : undefined} className="text-[12px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex-shrink-0 disabled:opacity-40 disabled:cursor-not-allowed">Change</button>
           </div>
 
           {/* Read-only category grid */}
@@ -304,21 +307,21 @@ function RO({ label, value }: { label: string; value: string }) {
 
 function Num({ label, value, step, onChange }: { label: string; value: string; step?: string; onChange: (v: string) => void }) {
   return (
-    <div className="space-y-1">
-      <label className={labelCls}>{label}</label>
+    <label className="space-y-1 block">
+      <span className={labelCls}>{label}</span>
       <input type="number" step={step} value={value} onChange={(e) => onChange(e.target.value)}
         onWheel={(e) => e.currentTarget.blur()}
         className="h-8 rounded border border-[var(--aws-border)] px-2 text-[12px] bg-white w-full" />
-    </div>
+    </label>
   );
 }
 
 function Txt({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
   return (
-    <div className="space-y-1">
-      <label className={labelCls}>{label}</label>
+    <label className="space-y-1 block">
+      <span className={labelCls}>{label}</span>
       <input value={value} onChange={(e) => onChange(e.target.value)}
         className="h-8 rounded border border-[var(--aws-border)] px-2 text-[12px] bg-white w-full" />
-    </div>
+    </label>
   );
 }

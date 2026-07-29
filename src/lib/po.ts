@@ -9,6 +9,7 @@ import * as XLSX from "xlsx-js-style";
 export interface PoListItem {
   transaction_no: string;
   entity: string;
+  status?: string | null; // pending | partially received | extra received
   po_number?: string | null;
   po_date?: string | null;
   voucher_type?: string | null;
@@ -240,6 +241,7 @@ export interface ReceiptSummary {
   transaction_no: string;
   entity?: string | null;
   completed: boolean; // received qty fully matches ordered on weight + count
+  status?: string; // pending | partially received | extra received
   total_lines: number;
   lines: ReceiptLine[];
 }

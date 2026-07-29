@@ -11,7 +11,7 @@
 // Boxes are keyed by (article_description, box_number). The engine returns new
 // arrays (immutable) so callers just setState(engineFn(...)).
 
-import type { CRBulkBoxItem } from "@/lib/customer-returns";
+import type { CRBulkBoxItem, CRBox } from "@/lib/customer-returns";
 
 export interface CRBoxForm {
   article_description: string;
@@ -26,6 +26,8 @@ export interface CRBoxForm {
   vakkal: string;
   box_id?: string; // set once the box is printed/saved
   is_printed: boolean;
+  printing?: boolean; // transient: a print is in flight — freeze the box_number so the
+  // post-upsert box_id stamp still lands on it (see isCommitted).
 }
 
 const n = (v: string | number | null | undefined): number => {
@@ -77,14 +79,19 @@ export function newBox(article: string, boxNumber: number, uom: string | number)
 }
 
 export function addArticleBox(boxes: CRBoxForm[], article: string, uom: string | number): CRBoxForm[] {
-  const next = boxesForArticle(boxes, article).length + 1;
-  return [...boxes, newBox(article, next, uom)];
+  // Number one past the article's HIGH-WATER box_number, not length+1 — once a
+  // printed box pins a non-contiguous number (remove-then-freeze), length+1 could
+  // collide with it and mint a duplicate (article, box_number).
+  const maxNum = boxesForArticle(boxes, article).reduce((m, b) => Math.max(m, b.box_number), 0);
+  return [...boxes, newBox(article, maxNum + 1, uom)];
 }
 
-// A box is "committed" once it has a QR box_id (printed/saved). Its box_number is
-// its DB identity (bulk_save matches rows by article_description + box_number), so
-// it must never be removed or renumbered by the box-count controls.
-const isCommitted = (b: CRBoxForm): boolean => b.is_printed || !!b.box_id;
+// A box is "committed" once it has a QR box_id (printed/saved) OR a print is in
+// flight (`printing`). Its box_number is its DB identity (bulk_save matches rows by
+// article_description + box_number), so it must never be removed or renumbered by
+// the box-count controls while committed. Exported so the create page enforces the
+// same lock when a line is changed/removed.
+export const isCommitted = (b: CRBoxForm): boolean => b.is_printed || !!b.box_id || !!b.printing;
 
 // Drop one box. Committed (printed) boxes are frozen in the DB — removing one is a
 // no-op. Remaining boxes renumber 1..N only while NONE is committed (keeps the
@@ -152,6 +159,12 @@ export function updateBoxField(
     const parts = value.split(".");
     if (parts[1] && parts[1].length > 3 && !isNaN(parseFloat(value))) v = String(round3(parseFloat(value)));
   }
+  // count is stored INTEGER; floor a typed fraction here so the stored count and the
+  // derived conversion agree with the parseInt done at serialize time.
+  if (field === "count" && value !== "") {
+    const c = parseInt(value);
+    v = isNaN(c) || c < 0 ? "0" : String(c);
+  }
   return boxes.map((b) => {
     if (!(b.article_description === article && b.box_number === boxNumber)) return b;
     const next = { ...b, [field]: v } as CRBoxForm;
@@ -161,9 +174,10 @@ export function updateBoxField(
   });
 }
 
-// Recompute an article's box conversions when the line UOM changes.
+// Recompute an article's box conversions when the line UOM changes. Committed
+// (printed/in-flight) boxes are frozen — their conversion is bound to a physical label.
 export function recomputeArticleOnUom(boxes: CRBoxForm[], article: string, uom: string | number): CRBoxForm[] {
-  return boxes.map((b) => (b.article_description === article ? { ...b, conversion: conv(b.count, uom) } : b));
+  return boxes.map((b) => (b.article_description === article && !isCommitted(b) ? { ...b, conversion: conv(b.count, uom) } : b));
 }
 
 // Stamp a lot number onto an article's boxes whose box_number is in [from, to].
@@ -197,10 +211,29 @@ export function bulkFillArticle(
 export function recomputeArticleOnCarton(boxes: CRBoxForm[], article: string, carton: string | number): CRBoxForm[] {
   if (n(carton) <= 0) return boxes;
   return boxes.map((b) =>
-    b.article_description === article && n(b.gross_weight) > 0
+    b.article_description === article && !isCommitted(b) && n(b.gross_weight) > 0
       ? { ...b, net_weight: netFromGross(b.gross_weight, carton) }
       : b,
   );
+}
+
+// Server CRBox → editor CRBoxForm. box_id present ⇒ printed (committed). Shared by
+// the approve + detail screens (was duplicated in both).
+export function crBoxToForm(b: CRBox): CRBoxForm {
+  return {
+    article_description: b.article_description,
+    box_number: b.box_number,
+    conversion: b.conversion?.toString() || "",
+    net_weight: b.net_weight?.toString() || "",
+    gross_weight: b.gross_weight?.toString() || "",
+    count: b.count?.toString() || "",
+    lot_number: b.lot_number || "",
+    item_mark: b.item_mark || "",
+    spl_remarks: b.spl_remarks || "",
+    vakkal: b.vakkal || "",
+    box_id: b.box_id || undefined,
+    is_printed: !!b.box_id,
+  };
 }
 
 // Serialize to the bulk-save contract. `uomFor` supplies each article's line UOM.
@@ -214,8 +247,12 @@ export function toBulkItems(boxes: CRBoxForm[], uomFor: (article: string) => str
     item_mark: b.item_mark || undefined,
     spl_remarks: b.spl_remarks || undefined,
     vakkal: b.vakkal || undefined,
-    net_weight: b.net_weight || undefined,
-    gross_weight: b.gross_weight || undefined,
+    // Weights: a blank field means the operator cleared it → persist 0. `|| undefined`
+    // would JSON-omit it and the backend's COALESCE would keep the stale value.
+    // (Loaded boxes are never blank — the backend defaults net/gross to 0 — so a blank
+    // here is always an explicit clear.)
+    net_weight: b.net_weight || "0",
+    gross_weight: b.gross_weight || "0",
     count: b.count ? parseInt(b.count) : undefined,
   }));
 }
@@ -277,6 +314,35 @@ export function demo(): void {
   assert(boxesForArticle(pr, "P").some((b) => b.box_number === 2 && b.is_printed), "printed #2 still pinned after grow");
   assert(boxesForArticle(pr, "P").some((b) => b.box_number > 2 && !b.is_printed), "new box numbered above high-water");
   assert(boxesForArticle(removeArticleBox(pr, "P", 2), "P").some((b) => b.box_number === 2 && b.is_printed), "removeArticleBox no-ops on a printed box");
+
+  // add box must not collide with a pinned printed number: [#1,#2], print #2, remove
+  // #1 → lone #2 (not renumbered); add box → #3, never a second #2.
+  let col = setArticleBoxCount([], "C", 2, "5");
+  col = col.map((b) => (b.box_number === 2 ? { ...b, box_id: "Z", is_printed: true } : b));
+  col = removeArticleBox(col, "C", 1); // #1 unprinted → dropped, #2 kept (not renumbered)
+  col = addArticleBox(col, "C", "5");
+  const nums = boxesForArticle(col, "C").map((b) => b.box_number).sort((a, b) => a - b);
+  assert(nums.join(",") === "2,3" && new Set(nums).size === nums.length, "addArticleBox never duplicates a pinned box_number");
+
+  // a box mid-print (printing flag) is frozen: Qty-Units shrink can't drop it.
+  let ip = setArticleBoxCount([], "I", 2, "5");
+  ip = ip.map((b) => (b.box_number === 2 ? { ...b, printing: true } : b));
+  ip = setArticleBoxCount(ip, "I", 1, "5");
+  assert(boxesForArticle(ip, "I").some((b) => b.box_number === 2 && b.printing), "in-flight (printing) box survives Qty-Units shrink");
+
+  // recompute (uom/carton edits) must NOT rewrite a committed (printed) box.
+  let rc = updateBoxField(setArticleBoxCount([], "R", 1, "10"), "R", 1, "gross_weight", "5", { uom: "10", carton: "1" }); // net 4
+  rc = rc.map((b) => ({ ...b, box_id: "P", is_printed: true }));
+  assert(boxesForArticle(recomputeArticleOnCarton(rc, "R", "2"), "R")[0].net_weight === "4", "recomputeArticleOnCarton skips committed box");
+  assert(boxesForArticle(recomputeArticleOnUom(rc, "R", "99"), "R")[0].conversion === "10", "recomputeArticleOnUom skips committed box");
+
+  // count floored to a non-negative integer; derived conversion agrees.
+  const cf = updateBoxField(setArticleBoxCount([], "F2", 1, "10"), "F2", 1, "count", "2.5", { uom: "10", carton: "0" });
+  assert(boxesForArticle(cf, "F2")[0].count === "2" && boxesForArticle(cf, "F2")[0].conversion === "20", "count floored to int, conversion agrees");
+
+  // a cleared weight serializes as "0" (explicit clear), not undefined (which would keep stale).
+  const wclear = toBulkItems([{ ...newBox("W", 1, "10"), net_weight: "", gross_weight: "" }], () => "10");
+  assert(wclear[0].net_weight === "0" && wclear[0].gross_weight === "0", "blank weight serializes as 0");
 
   // bulk fill: gross fills net via carton; explicit net wins; count sets conv.
   let bf = setArticleBoxCount([], "N", 2, "10");

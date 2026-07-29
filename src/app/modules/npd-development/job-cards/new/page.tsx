@@ -13,11 +13,20 @@ import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useHasPermission } from "@/lib/user";
 import { WAREHOUSES, getRequisition, type Warehouse } from "@/lib/sample";
 import { createDevJobCard } from "@/lib/npd-dev";
-import { FormSection, ReviewRow, UomSelect } from "../../../sample/_form";
+import {
+  FormSection, ReviewRow, UomSelect,
+  BillingFields, billingError, billingPayload, billingFrom, EMPTY_BILLING, type BillingValue,
+} from "../../../sample/_form";
 import {
   ArticleEditor, emptyArticle, articleQty, articlesValid, articlesTotalQty, draftToInput,
   type ArticleDraft, type DraftLine,
 } from "../../_article-editor";
+
+// Local YYYY-MM-DD for the date input — NOT toISOString() (that is UTC and can be a day off).
+function todayISO(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 
 export default function NewDevJobCardPage() {
   const router = useRouter();
@@ -35,6 +44,15 @@ export default function NewDevJobCardPage() {
   const [savedId, setSavedId] = useState<number | null>(null);
   const [linkedReq, setLinkedReq] = useState<string | null>(null);   // request label this card was started from
   const [linkedReqId, setLinkedReqId] = useState<number | null>(null);   // request id (back-links the card)
+  // Customer & dispatch (optional; mirrors the requisition form). Prefilled from the
+  // requisition on Develop, else entered directly for a standalone card.
+  const [companyName, setCompanyName] = useState("");
+  const [customerName, setCustomerName] = useState("");
+  const [customerContact, setCustomerContact] = useState("");
+  const [shipTo, setShipTo] = useState("");
+  const [modeOfTransport, setModeOfTransport] = useState("");
+  const [expectedDispatch, setExpectedDispatch] = useState("");
+  const [billing, setBilling] = useState<BillingValue>(EMPTY_BILLING);
 
   // When opened from an approved request's "Develop" button (?req=<id>), prefill the
   // articles from that requisition's target articles (name / pcs / weight each), plus
@@ -51,6 +69,14 @@ export default function NewDevJobCardPage() {
         if (req.warehouse) setWarehouse(req.warehouse as Warehouse);
         const desc = req.description ?? req.purpose_note;
         if (desc) setDescription(desc);
+        // Prefill customer & dispatch from the requisition so what shows == what's saved.
+        if (req.company_name) setCompanyName(req.company_name);
+        if (req.customer_name) setCustomerName(req.customer_name);
+        if (req.customer_contact) setCustomerContact(req.customer_contact);
+        if (req.customer_ship_to_address) setShipTo(req.customer_ship_to_address);
+        if (req.mode_of_transport) setModeOfTransport(req.mode_of_transport);
+        if (req.expected_dispatch_date) setExpectedDispatch(String(req.expected_dispatch_date).slice(0, 10));
+        setBilling(billingFrom(req));
         const tgts = req.npd_targets ?? [];
         if (tgts.length > 0) {
           setTitle(tgts[0].name ?? "");
@@ -72,6 +98,12 @@ export default function NewDevJobCardPage() {
     return () => { cancelled = true; };
   }, []);
 
+  // Default Expected dispatch date to today (client-only → no SSR hydration mismatch). Only
+  // fills an EMPTY field, so a ?req prefill with its own date (set above) still wins.
+  useEffect(() => {
+    queueMicrotask(() => setExpectedDispatch((cur) => cur || todayISO()));
+  }, []);
+
   // Keyed by the stable uid, not the array index: a base-BOM fetch inside ArticleEditor
   // awaits, and if an earlier article is removed meanwhile the captured index goes stale.
   function patchArticle(uid: string, patch: Partial<ArticleDraft>) {
@@ -83,7 +115,7 @@ export default function NewDevJobCardPage() {
     setArticles((prev) => prev.map((a) => (a.uid === uid ? { ...a, lines: fn(a.lines) } : a)));
   }
 
-  const canCreate = !!title.trim() && articlesValid(articles);
+  const canCreate = !!title.trim() && articlesValid(articles) && !billingError(billing);
   const totalQty = articlesTotalQty(articles);
 
   async function save() {
@@ -98,6 +130,15 @@ export default function NewDevJobCardPage() {
           warehouse: warehouse || undefined,
           uom: uom || undefined,
           source_requisition_id: linkedReqId ?? undefined,
+          // Send text as trim() (not `|| undefined`): a field the user CLEARED on a Develop
+          // card must persist blank, not silently re-inherit the requisition value.
+          company_name: companyName.trim(),
+          customer_name: customerName.trim(),
+          customer_contact: customerContact.trim(),
+          customer_ship_to_address: shipTo.trim(),
+          mode_of_transport: modeOfTransport.trim(),
+          expected_dispatch_date: expectedDispatch || undefined,
+          ...billingPayload(billing),
           articles: articles.map(draftToInput),
         });
         id = jc.id;
@@ -185,8 +226,42 @@ export default function NewDevJobCardPage() {
           </div>
         </FormSection>
 
-        {/* 3 · Review */}
-        <FormSection n={3} title="Review">
+        {/* 3 · Customer & dispatch (optional — mirrors the requisition; prefilled on Develop) */}
+        <FormSection n={3} title="Customer & dispatch">
+          <p className="text-[12px] text-[var(--text-muted)] mb-3">Optional — who this sample is for and how it ships. Prefilled from the requisition when developed from one; editable here and saved on the card.</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Company name</label>
+              <input className="form-input" value={companyName} onChange={(e) => setCompanyName(e.target.value)} placeholder="e.g. Candor Foods Pvt Ltd" />
+            </div>
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Customer name</label>
+              <input className="form-input" value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="e.g. BigBasket" />
+            </div>
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Customer contact</label>
+              <input className="form-input" value={customerContact} onChange={(e) => setCustomerContact(e.target.value)} placeholder="name / phone / email" />
+            </div>
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Mode of transport</label>
+              <input className="form-input" value={modeOfTransport} onChange={(e) => setModeOfTransport(e.target.value)} placeholder="e.g. Road / Air / Courier" />
+            </div>
+            <div>
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Expected dispatch date</label>
+              <input className="form-input" type="date" value={expectedDispatch} onChange={(e) => setExpectedDispatch(e.target.value)} />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Customer ship-to address</label>
+              <textarea className="form-input min-h-[56px] resize-y" value={shipTo} onChange={(e) => setShipTo(e.target.value)} placeholder="Delivery address (optional)…" />
+            </div>
+            <div className="sm:col-span-2">
+              <BillingFields value={billing} onChange={setBilling} />
+            </div>
+          </div>
+        </FormSection>
+
+        {/* 4 · Review */}
+        <FormSection n={4} title="Review">
           <dl className="space-y-1.5 text-[13px]">
             <ReviewRow label="Title" value={title || "—"} />
             <ReviewRow label="Warehouse" value={warehouse || "—"} />

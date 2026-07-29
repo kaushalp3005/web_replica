@@ -32,17 +32,23 @@ export function useCompanyParam(): Company {
   return q === "CFPL" || q === "CDPL" ? q : cached;
 }
 
-export function CompanyToggle({ value, onChange }: { value: Company; onChange: (c: Company) => void }) {
+// `disabled` pins the company once a record is committed (the create page mints a
+// CR on first box-print) — every later write is company-namespaced, so the toggle
+// must not diverge from the CR's namespace after that.
+export function CompanyToggle({ value, onChange, disabled }: { value: Company; onChange: (c: Company) => void; disabled?: boolean }) {
   return (
-    <div className="inline-flex bg-white border border-[var(--aws-border)] rounded-[8px] p-[2px] gap-[2px]">
+    <div className={cx("inline-flex bg-white border border-[var(--aws-border)] rounded-[8px] p-[2px] gap-[2px]", disabled && "opacity-60")}>
       {COMPANIES.map((c) => (
         <button
           key={c}
-          onClick={() => onChange(c)}
+          onClick={() => !disabled && onChange(c)}
+          disabled={disabled}
           aria-pressed={value === c}
+          title={disabled ? "Company is fixed once the return is created" : undefined}
           className={cx(
             "text-[12px] px-[12px] py-[4px] rounded-[6px]",
             value === c ? "bg-[var(--aws-navy)] text-white font-semibold" : "text-[var(--text-secondary)]",
+            disabled && "cursor-not-allowed",
           )}
         >
           {c}
