@@ -34,6 +34,10 @@ import {
   createLineJobCards,
   replaceLineJobCards,
   applyLiveJobCardEdits,
+  validateProcessMerge,
+  createMergedProcessRun,
+  type ProcessMergeGroup,
+  type ProcessMergeValidation,
   fetchLineJobCardConfig,
   searchCanonicalSfg,
   fetchLineDispatchInfo,
@@ -118,6 +122,10 @@ export default function PlanListPage() {
   // fresh / additional (create-another) chain, "edit" opens the existing chain.
   const [jcIntent, setJcIntent] = useState<"create" | "edit">("create");
   const [dispatchPlan, setDispatchPlan] = useState<PlanRow | null>(null);
+  // Cross-product process merge: which plans are checked for merging, and
+  // whether the merge wizard is open.
+  const [selectedPlanIds, setSelectedPlanIds] = useState<Set<number>>(new Set());
+  const [mergeOpen, setMergeOpen] = useState(false);
 
   // Debounce search; bump page back to 1 on every change so a stale page
   // beyond the new result set isn't requested.
@@ -235,6 +243,15 @@ export default function PlanListPage() {
   }, [router]);
   const onDispatch = useCallback((p: PlanRow) => setDispatchPlan(p), []);
   const onPage = useCallback((p: number) => setPage(p), []);
+  const onToggleSelect = useCallback((p: PlanRow) => {
+    setSelectedPlanIds((cur) => {
+      const next = new Set(cur);
+      if (next.has(p.plan_id)) next.delete(p.plan_id);
+      else next.add(p.plan_id);
+      return next;
+    });
+  }, []);
+  const clearSelection = useCallback(() => setSelectedPlanIds(new Set()), []);
 
   // Surface a thin, non-blocking progress bar whenever a fetch is in
   // flight AND we already have rows on screen (the rows-empty case is
@@ -321,6 +338,14 @@ export default function PlanListPage() {
         {/* Compact summary chip row — one strip, not a card grid. */}
         <SummaryStrip summary={summary} />
 
+        {selectedPlanIds.size >= 1 ? (
+          <MergeActionBar
+            count={selectedPlanIds.size}
+            onClear={clearSelection}
+            onMerge={() => setMergeOpen(true)}
+          />
+        ) : null}
+
         {toast ? (
           <div className="mb-3 px-3 py-2 rounded-sm border border-[var(--aws-border)] bg-[#f1faff] text-[12px] text-[var(--text-primary)] flex items-center justify-between gap-2">
             <span>{toast}</span>
@@ -357,6 +382,8 @@ export default function PlanListPage() {
               <PlansList
                 rows={rows}
                 expandedPlanId={expandedPlanId}
+                selectedPlanIds={selectedPlanIds}
+                onToggleSelect={onToggleSelect}
                 onToggleExpand={onToggleExpand}
                 onOpen={onOpen}
                 onCreateJobCard={(p, ci) => { setJcIntent(ci); setJcPlan(p); }}
@@ -452,6 +479,19 @@ export default function PlanListPage() {
           plan={dispatchPlan}
           onClose={() => setDispatchPlan(null)}
           onToast={setToast}
+        />
+      ) : null}
+
+      {mergeOpen ? (
+        <MergeProcessModal
+          planIds={[...selectedPlanIds]}
+          onClose={() => setMergeOpen(false)}
+          onDone={(msg) => {
+            setToast(msg);
+            setMergeOpen(false);
+            clearSelection();
+            reload();
+          }}
         />
       ) : null}
 
@@ -928,10 +968,13 @@ function SummaryStrip({
 // ── Plans list (table + mobile cards) ────────────────────────────────────
 
 function PlansList({
-  rows, expandedPlanId, onToggleExpand, onOpen, onCreateJobCard, onDispatch,
+  rows, expandedPlanId, selectedPlanIds, onToggleSelect,
+  onToggleExpand, onOpen, onCreateJobCard, onDispatch,
 }: {
   rows: PlanRow[];
   expandedPlanId: number | null;
+  selectedPlanIds: Set<number>;
+  onToggleSelect: (p: PlanRow) => void;
   onToggleExpand: (p: PlanRow) => void;
   onOpen:    (p: PlanRow) => void;
   onCreateJobCard: (p: PlanRow, intent: "create" | "edit") => void;
@@ -950,6 +993,8 @@ function PlansList({
             key={r.plan_id}
             row={r}
             expanded={expandedPlanId === r.plan_id}
+            selected={selectedPlanIds.has(r.plan_id)}
+            onToggleSelect={onToggleSelect}
             onToggleExpand={onToggleExpand}
             onOpen={onOpen}
             onCreateJobCard={onCreateJobCard}
@@ -964,6 +1009,7 @@ function PlansList({
           <table className="w-full text-[12px] border-collapse">
             <thead className="bg-[var(--surface-subtle)] text-[var(--text-primary)]">
               <tr className="border-b border-[var(--aws-border)]">
+                <Th />
                 <Th />
                 <Th>Plan</Th>
                 <Th>Type</Th>
@@ -982,6 +1028,8 @@ function PlansList({
                   key={r.plan_id}
                   row={r}
                   expanded={expandedPlanId === r.plan_id}
+                  selected={selectedPlanIds.has(r.plan_id)}
+                  onToggleSelect={onToggleSelect}
                   onToggleExpand={onToggleExpand}
                   onOpen={onOpen}
                   onCreateJobCard={onCreateJobCard}
@@ -1067,10 +1115,12 @@ function Th({ children, right }: { children?: React.ReactNode; right?: boolean }
 // given row's data changed.  Parent-supplied callbacks are stabilised
 // with useCallback so this memo isn't busted by new function identities.
 const PlanRowDesktop = memo(function PlanRowDesktop({
-  row, expanded, onToggleExpand, onOpen, onCreateJobCard, onDispatch,
+  row, expanded, selected, onToggleSelect, onToggleExpand, onOpen, onCreateJobCard, onDispatch,
 }: {
   row: PlanRow;
   expanded: boolean;
+  selected: boolean;
+  onToggleSelect: (p: PlanRow) => void;
   onToggleExpand: (p: PlanRow) => void;
   onOpen: (p: PlanRow) => void;
   onCreateJobCard: (p: PlanRow, intent: "create" | "edit") => void;
@@ -1107,6 +1157,18 @@ const PlanRowDesktop = memo(function PlanRowDesktop({
         handleToggle();
       }}
     >
+      <td
+        className="px-2 py-1.5 w-[28px]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={() => onToggleSelect(row)}
+          aria-label={`Select ${row.plan_name || `Plan #${row.plan_id}`} to merge`}
+          className="accent-[var(--aws-orange)] cursor-pointer align-middle"
+        />
+      </td>
       <td className="px-2 py-1.5 w-[24px] text-[var(--text-secondary)]">
         <button
           type="button"
@@ -1176,7 +1238,7 @@ const PlanRowDesktop = memo(function PlanRowDesktop({
     </tr>
     {expanded ? (
       <tr className="border-b border-[var(--aws-border)] bg-[var(--surface-subtle)]">
-        <td colSpan={10} className="px-3 py-3">
+        <td colSpan={11} className="px-3 py-3">
           <PlanInlinePreview planId={row.plan_id} onOpen={handleOpen} />
         </td>
       </tr>
@@ -1186,10 +1248,12 @@ const PlanRowDesktop = memo(function PlanRowDesktop({
 });
 
 const PlanMobileCard = memo(function PlanMobileCard({
-  row, expanded, onToggleExpand, onOpen, onCreateJobCard, onDispatch,
+  row, expanded, selected, onToggleSelect, onToggleExpand, onOpen, onCreateJobCard, onDispatch,
 }: {
   row: PlanRow;
   expanded: boolean;
+  selected: boolean;
+  onToggleSelect: (p: PlanRow) => void;
   onToggleExpand: (p: PlanRow) => void;
   onOpen: (p: PlanRow) => void;
   onCreateJobCard: (p: PlanRow, intent: "create" | "edit") => void;
@@ -1222,6 +1286,14 @@ const PlanMobileCard = memo(function PlanMobileCard({
       <div className="px-2.5 py-2">
         <div className="flex items-center justify-between gap-2 mb-1">
           <div className="min-w-0 flex items-center gap-1.5 flex-wrap">
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={() => onToggleSelect(row)}
+              onClick={(e) => e.stopPropagation()}
+              aria-label={`Select ${row.plan_name || `Plan #${row.plan_id}`} to merge`}
+              className="shrink-0 accent-[var(--aws-orange)] cursor-pointer"
+            />
             <button
               type="button"
               aria-label={expanded ? "Collapse" : "Expand"}
@@ -1359,6 +1431,341 @@ function RowActions({
         </svg>
         Dispatch
       </button>
+    </div>
+  );
+}
+
+// ── Cross-product process merge ─────────────────────────────────────────
+//
+// Select several plans that share factory + floor + raw-material articles, then
+// merge them into ONE shared process job card (summed qty) whose output feeds
+// each product's own packaging card. Backed by validateProcessMerge (eligibility
+// grouping, server-authoritative) + createMergedProcessRun.
+
+function MergeActionBar({ count, onClear, onMerge }: {
+  count: number; onClear: () => void; onMerge: () => void;
+}) {
+  const ready = count >= 2;
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-2 px-3 py-2 rounded-md border border-[var(--aws-orange-active)] bg-[#fff8f0]">
+      <span className="text-[12px] font-semibold text-[var(--text-primary)]">
+        {count} plan{count === 1 ? "" : "s"} selected
+      </span>
+      <span className="text-[11px] text-[var(--text-muted)]">
+        {ready
+          ? "Merge products that share factory + floor + raw materials into one process run."
+          : "Select at least 2 plans to merge their process."}
+      </span>
+      <div className="ml-auto flex items-center gap-2">
+        <button type="button" onClick={onClear}
+          className="h-7 px-2.5 text-[11px] rounded-[2px] border border-[var(--aws-border)] bg-white text-[var(--aws-link)] hover:border-[var(--aws-navy)]">
+          Clear
+        </button>
+        <button type="button" onClick={onMerge} disabled={!ready}
+          className="h-7 px-3 text-[11px] rounded-[2px] font-semibold border inline-flex items-center gap-1 bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white disabled:opacity-50 disabled:cursor-not-allowed">
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M6 3v6a6 6 0 0 0 6 6 6 6 0 0 0 6-6V3" /><line x1="12" y1="15" x2="12" y2="21" />
+          </svg>
+          Merge process
+        </button>
+      </div>
+    </div>
+  );
+}
+
+type MergeMemberDraft = {
+  plan_line_id: number;
+  fg_sku_name: string | null;
+  planned_qty_kg: number | null;
+  qty_kg: string;
+  pkg_floor: string;
+  pkg_process: string;
+};
+
+const MERGE_INP =
+  "h-8 px-2 text-[12px] rounded-[2px] bg-white border border-[var(--aws-border)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]";
+
+function MergeProcessModal({ planIds, onClose, onDone }: {
+  planIds: number[];
+  onClose: () => void;
+  onDone: (msg: string) => void;
+}) {
+  const [step, setStep] = useState<1 | 2 | 3>(1);
+  const [val, setVal] = useState<ProcessMergeValidation | null>(null);
+  const [loadingVal, setLoadingVal] = useState(true);
+  const [valErr, setValErr] = useState<string | null>(null);
+  const [chosenIdx, setChosenIdx] = useState<number>(-1);
+  const [procSteps, setProcSteps] = useState<{ process: string; floor: string }[]>([]);
+  const [sharedSfg, setSharedSfg] = useState("");
+  const [members, setMembers] = useState<MergeMemberDraft[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Selection is frozen while the modal is open, so validate once on mount.
+  // (loadingVal starts true; we only flip it in the async callbacks, keeping
+  // the effect body free of synchronous setState.)
+  const idsKey = planIds.join(",");
+  useEffect(() => {
+    let alive = true;
+    validateProcessMerge(planIds)
+      .then((v) => {
+        if (!alive) return;
+        setVal(v);
+        if (v.groups.length === 1) chooseGroup(0, v);
+      })
+      .catch((e) => { if (alive) setValErr(friendlyApiError(e)); })
+      .finally(() => { if (alive) setLoadingVal(false); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [idsKey]);
+
+  const group: ProcessMergeGroup | null =
+    val && chosenIdx >= 0 ? val.groups[chosenIdx] ?? null : null;
+
+  // Seed the shared-process + per-member drafts from the chosen group's key.
+  function chooseGroup(idx: number, v?: ProcessMergeValidation) {
+    const source = v ?? val;
+    const g = source?.groups[idx];
+    setChosenIdx(idx);
+    if (!g) return;
+    // Pre-fill the shared process from the products' actual planned steps
+    // (drop packaging — that stays per-product). Seed from the first member;
+    // they share RM + floor so their process is the same. Fall back to blank.
+    const first = g.members[0]?.steps ?? [];
+    const wip = first.filter((s) => (s.stage || "").toLowerCase() !== "packaging");
+    const seed = wip.length ? wip : first.slice(0, Math.max(0, first.length - 1));
+    setProcSteps(seed.length
+      ? seed.map((s) => ({ process: s.process_name || "", floor: s.floor || g.key.floor }))
+      : [{ process: "", floor: g.key.floor }]);
+    const slug = (g.key.rm_articles[0] || "wip").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 10);
+    setSharedSfg(`SFG-${slug}`);
+    setMembers(g.members.map((m) => ({
+      plan_line_id: m.plan_line_id,
+      fg_sku_name: m.fg_sku_name,
+      planned_qty_kg: m.planned_qty_kg,
+      qty_kg: m.planned_qty_kg != null ? String(m.planned_qty_kg) : "",
+      pkg_floor: g.key.floor,
+      pkg_process: "Packaging",
+    })));
+  }
+
+  const mergedQty = members.reduce((s, m) => s + (Number(m.qty_kg) || 0), 0);
+  const procOk = procSteps.length >= 1 && procSteps.every((s) => s.process.trim() && s.floor.trim());
+  const membersOk = members.length >= 2 && members.every((m) => m.pkg_floor.trim() && Number(m.qty_kg) > 0);
+
+  async function submit() {
+    if (!group) return;
+    setSubmitting(true);
+    setErr(null);
+    try {
+      const res = await createMergedProcessRun({
+        plan_line_ids: members.map((m) => m.plan_line_id),
+        wip_steps: procSteps.map((s, i) => ({
+          process: s.process.trim(),
+          floor: s.floor.trim(),
+          // Only the LAST shared step produces the group SFG the packaging consumes.
+          sfg_output: i === procSteps.length - 1 ? (sharedSfg.trim() || null) : null,
+        })),
+        per_member: members.map((m) => ({
+          plan_line_id: m.plan_line_id,
+          pkg_floor: m.pkg_floor.trim(),
+          pkg_process: m.pkg_process.trim() || "Packaging",
+          qty_kg: Number(m.qty_kg),
+          qty_units: null,
+        })),
+      });
+      onDone(`Merged ${res.packaging.length} products into one process run · ${res.merged_qty_kg} kg · ${res.count} job cards.`);
+    } catch (e) {
+      setErr(friendlyApiError(e));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const btnPrimary = "h-8 px-3 text-[12px] rounded-[2px] font-semibold border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white disabled:opacity-50 disabled:cursor-not-allowed";
+  const btnGhost = "h-8 px-3 text-[12px] rounded-[2px] border border-[var(--aws-border)] bg-white text-[var(--aws-link)] hover:border-[var(--aws-navy)]";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-[720px] max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="px-5 py-3 border-b border-[var(--aws-border)] flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-[15px] font-semibold text-[var(--text-primary)]">Merge process</h2>
+            <p className="text-[11px] text-[var(--text-muted)]">One shared process card (merged qty) → each product keeps its own packaging.</p>
+          </div>
+          <div className="flex items-center gap-1 text-[11px] shrink-0">
+            {[1, 2, 3].map((n) => (
+              <span key={n} className={[
+                "w-6 h-6 inline-flex items-center justify-center rounded-full font-semibold",
+                step === n ? "bg-[var(--aws-orange)] text-white"
+                  : step > n ? "bg-[#e6f4ea] text-[#1d8102]" : "bg-[var(--surface-subtle)] text-[var(--text-muted)]",
+              ].join(" ")}>{n}</span>
+            ))}
+          </div>
+        </div>
+
+        <div className="px-5 py-4 overflow-y-auto flex-1 text-[12px]">
+          {/* STEP 1 — eligibility review */}
+          {step === 1 ? (
+            loadingVal ? (
+              <p className="text-[var(--text-muted)]">Checking which products can merge…</p>
+            ) : valErr ? (
+              <p className="text-[var(--aws-error)]">{valErr}</p>
+            ) : (
+              <div className="space-y-3">
+                {(val?.groups.length ?? 0) === 0 ? (
+                  <p className="text-[var(--text-secondary)]">No products in your selection share a factory + floor + raw-material set, so nothing can be merged.</p>
+                ) : (
+                  <>
+                    <p className="text-[11px] text-[var(--text-muted)]">Pick a group of products to run as one shared process:</p>
+                    {val!.groups.map((g, idx) => (
+                      <label key={idx} className={[
+                        "block rounded-md border p-3 cursor-pointer",
+                        chosenIdx === idx ? "border-[var(--aws-orange-active)] bg-[#fff8f0]" : "border-[var(--aws-border)] hover:border-[var(--aws-navy)]",
+                      ].join(" ")}>
+                        <div className="flex items-start gap-2">
+                          <input type="radio" name="merge-group" checked={chosenIdx === idx} onChange={() => chooseGroup(idx)} className="mt-0.5 accent-[var(--aws-orange)]" />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                              <span className="font-semibold text-[var(--text-primary)] uppercase">{g.key.factory}</span>
+                              <span className="text-[var(--text-muted)]">· {g.key.entity}</span>
+                              <span className="text-[var(--text-muted)]">· floor {g.key.floor}</span>
+                              {g.key.rm_articles.map((a) => (
+                                <span key={a} className="px-1.5 py-0.5 rounded-full bg-[#eef2ff] text-[#4338ca] text-[10px]">{a}</span>
+                              ))}
+                            </div>
+                            <ul className="mt-1.5 space-y-1">
+                              {g.members.map((m) => (
+                                <li key={m.plan_line_id} className="text-[11px]">
+                                  <div className="flex items-baseline justify-between gap-2">
+                                    <span className="truncate text-[var(--text-primary)] flex items-center gap-1">
+                                      {m.fg_sku_name || "—"}
+                                      {m.carded ? (
+                                        <span className="px-1 py-0 rounded-sm text-[9px] uppercase font-bold tracking-wide bg-[#fff4e5] text-[#b45309] border border-[#fde68a]" title="Already has un-started job cards — the merge will rebuild them">rebuild</span>
+                                      ) : null}
+                                    </span>
+                                    <span className="font-mono text-[var(--text-muted)] shrink-0">{m.planned_qty_kg ?? 0} kg</span>
+                                  </div>
+                                  {m.steps && m.steps.length ? (
+                                    <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                                      {m.steps.map((s, si) => (
+                                        <span key={si} className="inline-flex items-center gap-1">
+                                          {si > 0 ? <span className="text-[var(--text-muted)]">→</span> : null}
+                                          <span className={[
+                                            "px-1.5 py-0.5 rounded-full text-[10px]",
+                                            (s.stage || "").toLowerCase() === "packaging"
+                                              ? "bg-[#f5f3ff] text-[#6d28d9]"
+                                              : "bg-[var(--surface-subtle)] text-[var(--text-secondary)]",
+                                          ].join(" ")} title={s.floor || ""}>{s.process_name || "—"}</span>
+                                        </span>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <div className="mt-0.5 text-[10px] text-[var(--text-muted)] italic">no process steps planned</div>
+                                  )}
+                                </li>
+                              ))}
+                            </ul>
+                            <div className="mt-1 text-[10px] text-[var(--text-muted)]">{g.members.length} products · {g.total_qty_kg} kg combined</div>
+                          </div>
+                        </div>
+                      </label>
+                    ))}
+                  </>
+                )}
+                {val && val.ineligible.length > 0 ? (
+                  <div className="mt-2 rounded-md border border-[var(--aws-border)] bg-[var(--surface-subtle)] p-3">
+                    <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)] mb-1">Cannot merge ({val.ineligible.length})</div>
+                    <ul className="space-y-0.5">
+                      {val.ineligible.map((m) => (
+                        <li key={m.plan_line_id} className="flex items-baseline justify-between gap-2 text-[11px] text-[var(--text-secondary)]">
+                          <span className="truncate">{m.fg_sku_name || `Line ${m.plan_line_id}`}</span>
+                          <span className="shrink-0 text-[var(--text-muted)] italic">{m.reason}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            )
+          ) : null}
+
+          {/* STEP 2 — shared process config */}
+          {step === 2 && group ? (
+            <div className="space-y-4">
+              <div className="text-[11px] text-[var(--text-muted)]">
+                Shared process for <strong className="text-[var(--text-primary)]">{group.members.length}</strong> products on floor <strong className="text-[var(--text-primary)]">{group.key.floor}</strong> · combined <strong className="text-[var(--text-primary)]">{mergedQty} kg</strong>.
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-secondary)] mb-1">Process steps · last step produces the shared SFG</div>
+                <div className="space-y-2">
+                  {procSteps.map((s, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <input value={s.process} placeholder="Process (e.g. Roasting)" className={`flex-1 ${MERGE_INP}`}
+                        onChange={(e) => setProcSteps((ps) => ps.map((x, j) => j === i ? { ...x, process: e.target.value } : x))} />
+                      <input value={s.floor} placeholder="Floor" className={`flex-1 ${MERGE_INP}`}
+                        onChange={(e) => setProcSteps((ps) => ps.map((x, j) => j === i ? { ...x, floor: e.target.value } : x))} />
+                      {procSteps.length > 1 ? (
+                        <button type="button" aria-label="Remove step" className="w-7 h-7 rounded-sm border border-[var(--aws-border)] text-[var(--text-muted)] hover:text-[var(--aws-error)]"
+                          onClick={() => setProcSteps((ps) => ps.filter((_, j) => j !== i))}>×</button>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+                <button type="button" className="mt-2 text-[11px] text-[var(--aws-link)] hover:underline"
+                  onClick={() => setProcSteps((ps) => [...ps, { process: "", floor: group.key.floor }])}>+ Add process step</button>
+              </div>
+              <label className="block">
+                <span className="block text-[10px] uppercase tracking-wide font-semibold text-[var(--text-secondary)] mb-1">Shared SFG code (roasted/processed intermediate)</span>
+                <input value={sharedSfg} onChange={(e) => setSharedSfg(e.target.value)} placeholder="e.g. SFG-CHIA" className={`w-full ${MERGE_INP}`} />
+                <span className="block text-[10px] text-[var(--text-muted)] mt-0.5">Each packaging stage consumes this code from the shared process output.</span>
+              </label>
+            </div>
+          ) : null}
+
+          {/* STEP 3 — per-product packaging review */}
+          {step === 3 && group ? (
+            <div className="space-y-3">
+              <div className="text-[11px] text-[var(--text-muted)]">Each product keeps its own packaging card. Confirm qty + packaging floor per product.</div>
+              <div className="grid grid-cols-[1fr_84px_1fr_1fr] gap-2 text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)] px-1">
+                <span>Product</span><span className="text-right">Qty (kg)</span><span>Pkg floor</span><span>Pkg process</span>
+              </div>
+              {members.map((m, i) => (
+                <div key={m.plan_line_id} className="grid grid-cols-[1fr_84px_1fr_1fr] gap-2 items-center">
+                  <span className="truncate text-[var(--text-primary)]" title={m.fg_sku_name || ""}>{m.fg_sku_name || "—"}</span>
+                  <input value={m.qty_kg} inputMode="decimal" className={`text-right ${MERGE_INP}`}
+                    onChange={(e) => setMembers((ms) => ms.map((x, j) => j === i ? { ...x, qty_kg: e.target.value } : x))} />
+                  <input value={m.pkg_floor} className={MERGE_INP}
+                    onChange={(e) => setMembers((ms) => ms.map((x, j) => j === i ? { ...x, pkg_floor: e.target.value } : x))} />
+                  <input value={m.pkg_process} className={MERGE_INP}
+                    onChange={(e) => setMembers((ms) => ms.map((x, j) => j === i ? { ...x, pkg_process: e.target.value } : x))} />
+                </div>
+              ))}
+              <div className="text-right text-[11px] font-semibold text-[var(--text-primary)]">Merged process qty: {mergedQty} kg</div>
+            </div>
+          ) : null}
+
+          {err ? <p className="mt-3 text-[11px] text-[var(--aws-error)]">{err}</p> : null}
+        </div>
+
+        <div className="px-5 py-3 border-t border-[var(--aws-border)] flex items-center justify-between gap-2">
+          <button type="button" onClick={onClose} className={btnGhost}>Cancel</button>
+          <div className="flex items-center gap-2">
+            {step > 1 ? (
+              <button type="button" className={btnGhost} onClick={() => setStep((s) => (s - 1) as 1 | 2 | 3)}>Back</button>
+            ) : null}
+            {step < 3 ? (
+              <button type="button" className={btnPrimary}
+                disabled={step === 1 ? !group : !procOk}
+                onClick={() => setStep((s) => (s + 1) as 1 | 2 | 3)}>Next</button>
+            ) : (
+              <button type="button" className={btnPrimary} disabled={!membersOk || submitting} onClick={submit}>
+                {submitting ? "Merging…" : "Create merged run"}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

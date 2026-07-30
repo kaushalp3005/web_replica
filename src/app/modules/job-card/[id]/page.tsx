@@ -181,6 +181,10 @@ type JobCardDetail = {
   next_job_card_id?: number | null;
   prev_job_card_id?: number | null;
   dispatched_to_next_kg?: number | string | null;
+  // Set on cards created by a cross-product process merge. The terminal process
+  // card (output_kind SFG/WIP + next_job_card_id NULL) fans its output out to
+  // every member packaging via POST .../dispatch-group.
+  process_group_id?: number | null;
   so_numbers?: string[] | null;
   primary_so_number?: string | null;
 
@@ -1219,6 +1223,24 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
           okMessage: "Dispatched.",
         });
       };
+    } else if (
+      // Merged-process producer: one shared process card fans its output out to
+      // every product's packaging (prev-linked, not a single next). Until it's
+      // distributed, that's the action; then it falls through to CLOSE.
+      detail.process_group_id != null &&
+      !detail.next_job_card_id &&
+      (detail.output_kind === "SFG" || detail.output_kind === "WIP") &&
+      remaining > BALANCE_TOLERANCE_KG
+    ) {
+      label = "DISTRIBUTE TO PACKAGING";
+      allowed = canComplete;
+      onClick = () => callAction({
+        confirmTitle: "Distribute to packaging",
+        confirmMessage: `Fan out ${remaining.toFixed(2)} kg of the shared process output to every product's packaging card in this merged group? Each packaging card unlocks and receives its share.`,
+        method: "POST",
+        path: `/api/v1/production/job-cards-v2/${detail.job_card_id}/dispatch-group`,
+        okMessage: "Distributed — every product's packaging is now unlocked and fed.",
+      });
     } else {
       label = "CLOSE JC";
       allowed = canClose;
@@ -1703,6 +1725,10 @@ function BatchCloseModal({
   }, [producedKg]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const isAdmin = useIsAdmin();
+  // Balance lock: an unbalanced batch can't be closed. Admins may override.
+  const unbalanced = summarySnapshot.isBalanced === false;
+  const [override, setOverride] = useState(false);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -1725,6 +1751,11 @@ function BatchCloseModal({
       }
     }
     const body: Record<string, unknown> = { produced_qty_kg: produced };
+    // Balance lock: forward the live verdict + admin override. The server reads
+    // the authoritative per-batch accounting and blocks unbalanced closes.
+    if (summarySnapshot.isBalanced != null) body.is_balanced = summarySnapshot.isBalanced;
+    if (summarySnapshot.balanceDiff != null) body.balance_difference_qty = summarySnapshot.balanceDiff;
+    if (override) body.allow_unbalanced = true;
     if (rmConsumedKg.trim() !== "") {
       const v = parseFloat(rmConsumedKg);
       if (Number.isFinite(v)) body.rm_consumed_kg = v;
@@ -1750,8 +1781,13 @@ function BatchCloseModal({
         body: JSON.stringify(body),
       });
       if (!res.ok) {
-        let txt: string; try { txt = await res.text(); } catch { txt = `HTTP ${res.status}`; }
-        throw new Error(txt || `HTTP ${res.status}`);
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = await res.json();
+          const d = j?.detail;
+          msg = (typeof d === "object" && d ? d.message : d) || j?.message || msg;
+        } catch { /* keep default */ }
+        throw new Error(typeof msg === "string" ? msg : `HTTP ${res.status}`);
       }
       await onDone();
     } catch (e) {
@@ -1833,10 +1869,23 @@ function BatchCloseModal({
               </dd>
             </div>
           </dl>
-          {summarySnapshot.isBalanced === false ? (
-            <p className="mt-2 text-[10px] text-[var(--aws-error)]">
-              Saved accounting is unbalanced — fix before closing or the /complete gate may reject.
-            </p>
+          {unbalanced ? (
+            <div className="mt-2">
+              <p className="text-[10px] text-[var(--aws-error)] font-semibold">
+                Unbalanced — this batch is locked and can&apos;t be closed until the accounting nets out (within tolerance).
+              </p>
+              {isAdmin ? (
+                <label className="mt-1.5 flex items-center gap-1.5 text-[10px] text-[#8a5e10] cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={override}
+                    onChange={(e) => setOverride(e.target.checked)}
+                    className="accent-[var(--aws-orange)]"
+                  />
+                  Admin override — close despite the imbalance
+                </label>
+              ) : null}
+            </div>
           ) : null}
         </div>
 
@@ -1913,15 +1962,16 @@ function BatchCloseModal({
           </button>
           <button
             type="submit"
-            disabled={busy}
+            disabled={busy || (unbalanced && !override)}
+            title={unbalanced && !override ? "Batch is unbalanced — resolve the accounting first" : undefined}
             className={[
               "h-8 px-3 rounded-[2px] text-[12px] font-bold border",
-              busy
+              busy || (unbalanced && !override)
                 ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
                 : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
             ].join(" ")}
           >
-            {busy ? "Closing…" : "Close Batch"}
+            {busy ? "Closing…" : override ? "Override & Close" : "Close Batch"}
           </button>
         </div>
       </form>

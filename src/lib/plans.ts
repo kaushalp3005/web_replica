@@ -247,6 +247,123 @@ export async function createLineJobCards(
   return (await res.json()) as CreateJobCardResult;
 }
 
+// ── Cross-product process merge (Plan List) ────────────────────────────────
+// Validate which of the selected plans' uncarded lines can share ONE merged
+// process run (same factory + entity + stage-1 floor + RM-article set). Backed
+// by POST /plans-v2/merge-process/validate. Read-only — drives the merge modal's
+// eligibility step; eligibility MUST come from the server (the row summary has
+// no floor or RM set), so never approximate it client-side.
+export interface ProcessMergeStepInfo {
+  step_order: number;
+  process_name: string | null;
+  stage: string | null;
+  floor: string | null;
+}
+
+export interface ProcessMergeMember {
+  plan_id: number;
+  plan_line_id: number;
+  fg_sku_name: string | null;
+  bom_id: number | null;
+  planned_qty_kg: number | null;
+  planned_qty_units: number | null;
+  // The line's planned process steps — the processes folded into the merge.
+  steps?: ProcessMergeStepInfo[];
+  // True when the line already has (un-started) job cards the merge will rebuild.
+  carded?: boolean;
+}
+
+export interface ProcessMergeGroup {
+  key: { factory: string; entity: string; floor: string; rm_articles: string[] };
+  members: ProcessMergeMember[];
+  total_qty_kg: number;
+  total_qty_units: number;
+  mergeable: true;
+}
+
+export interface ProcessMergeValidation {
+  groups: ProcessMergeGroup[];
+  ineligible: (ProcessMergeMember & { reason: string })[];
+}
+
+export async function validateProcessMerge(
+  planIds: number[],
+): Promise<ProcessMergeValidation> {
+  const res = await apiFetch(
+    `/api/v1/production/plans-v2/merge-process/validate`,
+    { method: "POST", body: JSON.stringify({ plan_ids: planIds }) },
+  );
+  if (!res.ok) {
+    throw new Error(await readApiErrorMessage(res, `Validate merge HTTP ${res.status}`));
+  }
+  return (await res.json()) as ProcessMergeValidation;
+}
+
+// Build the merged process run: one shared process card (summed qty) feeding
+// each product's own packaging card. Backed by POST /plans-v2/merge-process.
+export interface ProcessMergeMemberConfig {
+  plan_line_id: number;
+  pkg_floor: string;
+  pkg_process?: string;
+  qty_kg?: number | null;
+  qty_units?: number | null;
+}
+
+export interface ProcessMergeCreateBody {
+  plan_line_ids: number[];
+  wip_steps: CreateJobCardStep[];   // the SHARED process steps (last = SFG producer)
+  per_member: ProcessMergeMemberConfig[];
+}
+
+export interface ProcessMergeCreateResult {
+  process_group_id: number;
+  primary_plan_line_id: number;
+  merged_qty_kg: number;
+  shared_sfg_code: string | null;
+  process_job_card_ids: number[];
+  packaging: {
+    plan_line_id: number; job_card_id: number; fg_sku_name: string | null;
+    qty_kg: number; pkg_floor: string; pkg_process: string;
+  }[];
+  count: number;
+}
+
+export async function createMergedProcessRun(
+  body: ProcessMergeCreateBody,
+): Promise<ProcessMergeCreateResult> {
+  const res = await apiFetch(
+    `/api/v1/production/plans-v2/merge-process`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+  if (!res.ok) {
+    throw new Error(await readApiErrorMessage(res, `Merge process HTTP ${res.status}`));
+  }
+  return (await res.json()) as ProcessMergeCreateResult;
+}
+
+// Fan-out the shared process card's output to every member packaging card.
+// Backed by POST /job-cards-v2/{id}/dispatch-group.
+export interface ProcessGroupDispatchResult {
+  dispatched: boolean;
+  process_group_id: number;
+  produced_kg: number;
+  results: { packaging_job_card_id: number; plan_line_id: number; qty_kg: number; wip_batch_id: number | null }[];
+  message?: string;
+}
+
+export async function dispatchProcessGroup(
+  processJobCardId: number,
+): Promise<ProcessGroupDispatchResult> {
+  const res = await apiFetch(
+    `/api/v1/production/job-cards-v2/${processJobCardId}/dispatch-group`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    throw new Error(await readApiErrorMessage(res, `Dispatch group HTTP ${res.status}`));
+  }
+  return (await res.json()) as ProcessGroupDispatchResult;
+}
+
 // Current job-card config for a line, shaped to prefill the Edit wizard.
 // exists=false ⇒ no cards yet (Create); editable=false ⇒ a stage already
 // started, so it can't be replaced.
