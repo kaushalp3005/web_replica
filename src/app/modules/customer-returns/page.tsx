@@ -19,6 +19,7 @@ import {
   deleteCustomerReturn,
   exportCustomerReturns,
   toApiDate,
+  CR_READ_ONLY,
   type CRListItem,
   type CRStatus,
 } from "@/lib/customer-returns";
@@ -306,7 +307,10 @@ export default function CustomerReturnsListPage() {
 
   const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
   const hasFilters = !!(search || fromDate || toDate || statusFilter !== "all");
-  const detailHref = (r: CRListItem) => `/modules/customer-returns/${encodeURIComponent(r.rtv_id)}?company=${company}`;
+  // Read-only phase: the eye/View link goes to the read-only /view page (the
+  // editable detail + approve pages write, so they're not linked here).
+  const detailHref = (r: CRListItem) =>
+    `/modules/customer-returns/${encodeURIComponent(r.rtv_id)}${CR_READ_ONLY ? "/view" : ""}?company=${company}`;
   const approveHref = (r: CRListItem) => `/modules/customer-returns/${encodeURIComponent(r.rtv_id)}/approve?company=${company}`;
 
   async function handleDelete() {
@@ -384,13 +388,23 @@ export default function CustomerReturnsListPage() {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4"><path d="M3 3v18h18" /><rect x="7" y="10" width="3" height="8" /><rect x="12" y="6" width="3" height="12" /><rect x="17" y="13" width="3" height="5" /></svg>
           <span className="hidden xs:inline">Dashboard</span>
         </Link>
-        <Link
-          href={`/modules/customer-returns/new?company=${company}`}
-          className="inline-flex items-center gap-1.5 text-[12px] font-semibold bg-[var(--aws-orange)] text-white rounded-md px-3 py-1.5 hover:bg-[var(--aws-orange-hover)]"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-4 w-4"><path d="M12 5v14M5 12h14" /></svg>
-          New CR
-        </Link>
+        {CR_READ_ONLY ? (
+          <span
+            title="Customer Returns is read-only in CFERP — create in IMS"
+            className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-[var(--text-secondary)] border border-[var(--aws-border)] rounded-md px-3 py-1.5"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-3.5 w-3.5"><path d="M18 8h1a4 4 0 0 1 0 8h-1M6 8H5a4 4 0 0 0 0 8h1M8 12h8" /></svg>
+            Read-only
+          </span>
+        ) : (
+          <Link
+            href={`/modules/customer-returns/new?company=${company}`}
+            className="inline-flex items-center gap-1.5 text-[12px] font-semibold bg-[var(--aws-orange)] text-white rounded-md px-3 py-1.5 hover:bg-[var(--aws-orange-hover)]"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="h-4 w-4"><path d="M12 5v14M5 12h14" /></svg>
+            New CR
+          </Link>
+        )}
       </div>
 
       {/* Status tabs */}
@@ -505,7 +519,7 @@ export default function CustomerReturnsListPage() {
                           <Link href={detailHref(item)} title="View detail" aria-label={`View ${item.rtv_id}`} className="h-7 w-7 inline-flex items-center justify-center rounded hover:bg-[var(--background)] text-[var(--text-secondary)]">
                             <IconEye className="h-3.5 w-3.5" />
                           </Link>
-                          {item.status === "Pending" && (
+                          {!CR_READ_ONLY && item.status === "Pending" && (
                             <>
                               <Link href={approveHref(item)} title="Review / edit" aria-label={`Review ${item.rtv_id}`} className="h-7 w-7 inline-flex items-center justify-center rounded hover:bg-[var(--background)] text-[var(--text-secondary)]">
                                 <IconPencil className="h-3.5 w-3.5" />
@@ -515,13 +529,15 @@ export default function CustomerReturnsListPage() {
                               </button>
                             </>
                           )}
-                          <Link
-                            href={approveHref(item)}
-                            className="ml-1 h-7 inline-flex items-center gap-1 rounded-md border border-[var(--aws-border)] px-2 text-[12px] bg-white hover:border-[var(--aws-orange)]"
-                          >
-                            <IconCheckCircle className="h-3 w-3" />
-                            Review
-                          </Link>
+                          {!CR_READ_ONLY && (
+                            <Link
+                              href={approveHref(item)}
+                              className="ml-1 h-7 inline-flex items-center gap-1 rounded-md border border-[var(--aws-border)] px-2 text-[12px] bg-white hover:border-[var(--aws-orange)]"
+                            >
+                              <IconCheckCircle className="h-3 w-3" />
+                              Review
+                            </Link>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -553,11 +569,13 @@ export default function CustomerReturnsListPage() {
                     <Link href={detailHref(item)} className="h-7 flex-1 inline-flex items-center justify-center gap-1 rounded-md text-[12px] text-[var(--text-secondary)] hover:bg-[var(--background)]">
                       <IconEye className="h-3 w-3" /> View
                     </Link>
-                    <Link href={approveHref(item)} className="h-7 flex-1 inline-flex items-center justify-center gap-1 rounded-md border border-[var(--aws-border)] text-[12px] bg-white">
-                      <IconCheckCircle className="h-3 w-3" />
-                      Review
-                    </Link>
-                    {item.status === "Pending" && (
+                    {!CR_READ_ONLY && (
+                      <Link href={approveHref(item)} className="h-7 flex-1 inline-flex items-center justify-center gap-1 rounded-md border border-[var(--aws-border)] text-[12px] bg-white">
+                        <IconCheckCircle className="h-3 w-3" />
+                        Review
+                      </Link>
+                    )}
+                    {!CR_READ_ONLY && item.status === "Pending" && (
                       <button onClick={() => setDeleteTarget(item)} aria-label={`Delete ${item.rtv_id}`} className="h-7 w-7 inline-flex items-center justify-center rounded text-[var(--aws-error)] flex-shrink-0">
                         <IconTrash className="h-3 w-3" />
                       </button>

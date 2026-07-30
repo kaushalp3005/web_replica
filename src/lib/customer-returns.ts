@@ -14,6 +14,11 @@ import { apiFetch, readApiErrorMessage } from "./auth";
 
 const BASE = "/api/v1/customer-returns";
 
+// CFERP shares the live _rtv_* tables with IMS. Phase 2 (the _rtv_* write path) is
+// live, so full create/edit/print/approve is enabled. Flip to true (and set
+// router.py CR_READ_ONLY = True) as a kill switch to fall back to read-only.
+export const CR_READ_ONLY: boolean = false;
+
 export type Company = "CFPL" | "CDPL";
 export const COMPANIES: Company[] = ["CFPL", "CDPL"];
 
