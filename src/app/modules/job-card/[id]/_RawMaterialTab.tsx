@@ -32,14 +32,16 @@
 // else (Chrome/Firefox on Windows & Linux, Safari). Either way we feed the
 // decoder ONLY the centred ROI canvas, never the whole frame.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { BrowserQRCodeReader } from "@zxing/browser";
 import { BarcodeFormat, DecodeHintType } from "@zxing/library";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
 import { friendlyApiError } from "@/lib/apiErrors";
 
 // BarcodeDetector is not in the TS DOM lib yet — declare the slice we use.
-type BarcodeDetectorLike = { detect: (s: CanvasImageSource) => Promise<{ rawValue: string }[]> };
+// boundingBox lets us land the AR tap-target ON the detected QR (when present).
+type DetectedCode = { rawValue: string; boundingBox?: { x: number; y: number; width: number; height: number } };
+type BarcodeDetectorLike = { detect: (s: CanvasImageSource) => Promise<DetectedCode[]> };
 type BarcodeDetectorCtor = new (opts?: { formats?: string[] }) => BarcodeDetectorLike;
 
 // Fraction of the smaller frame dimension occupied by the scan box. Kept as a
@@ -60,6 +62,10 @@ const DECODE_MAX_PX = 512;
 const DECODE_INTERVAL_MS = 120;
 // How long the "Scanned: …" toast stays up before auto-dismissing.
 const TOAST_MS = 3500;
+// How long the "QR breaking" capture burst plays before the scanner re-arms.
+// Kept ~1s (fast, Paytm-style) per the ops ask — long enough to read, short
+// enough not to slow the next scan.
+const BREAK_MS = 1000;
 
 // Shape returned by POST /api/v1/production/scan-identify.
 type IdentifyBox = {
@@ -245,6 +251,99 @@ function ScanResult({ lookup }: { lookup: Lookup | null }) {
   );
 }
 
+// ── AR tap-to-capture ───────────────────────────────────────────────────────
+// Instead of auto-recording the instant a QR decodes, the scanner ARMS: it
+// highlights the live QR and waits for the operator to tap it. The tap records
+// the value and plays a fast (~1s) Paytm-style "QR breaking" burst.
+
+type Rect = { left: number; top: number; width: number; height: number }; // % of the square viewport
+
+// The aiming box as a viewport-% rect — the fallback capture target when the
+// decoder can't hand back a QR bounding box (the ZXing path).
+const ROI_RECT: Rect = {
+  left: 50 - ROI_RATIO * 50,
+  top: 50 - ROI_RATIO * 50,
+  width: ROI_RATIO * 100,
+  height: ROI_RATIO * 100,
+};
+
+// Map a QR bounding box (decode-canvas px, side = `target`) to a viewport-% rect.
+// The decode crop is a CENTRED DECODE_RATIO×min(frame) square shown under
+// object-cover, so it occupies exactly DECODE_RATIO of the square viewport,
+// centred — a clean linear remap with no per-device pixel math.
+function rectFromBox(box: { x: number; y: number; width: number; height: number }, target: number): Rect {
+  const pos = (v: number) => (0.5 + (v / target - 0.5) * DECODE_RATIO) * 100;
+  const size = (v: number) => (v / target) * DECODE_RATIO * 100;
+  const w = Math.max(size(box.width), 22); // floor the size so the tap target stays easy to hit
+  const h = Math.max(size(box.height), 22);
+  const cx = pos(box.x) + size(box.width) / 2;
+  const cy = pos(box.y) + size(box.height) / 2;
+  return {
+    left: Math.min(Math.max(cx - w / 2, 0), 100 - w),
+    top: Math.min(Math.max(cy - h / 2, 0), 100 - h),
+    width: w,
+    height: h,
+  };
+}
+
+// Keyframes for the break burst — injected once (React allows a raw <style>).
+const QR_ANIM_CSS = `
+@keyframes qrShard { to { transform: translate(var(--dx), var(--dy)) rotate(var(--rot)) scale(.25); opacity: 0; } }
+@keyframes qrRing  { from { transform: scale(.7); opacity: .9 } to { transform: scale(1.7); opacity: 0 } }
+@keyframes qrCheck { 0% { transform: scale(0); opacity: 0 } 55% { transform: scale(1.15); opacity: 1 } 100% { transform: scale(1); opacity: 1 } }
+@keyframes qrFlash { from { opacity: .6 } to { opacity: 0 } }
+@keyframes qrPulse { 0%,100% { opacity: 1 } 50% { opacity: .5 } }
+`;
+
+// A fast QR "shatter": a grid of tiles bursts outward + a ring + a check, ~1s.
+const BURST_GRID = 5;
+function QrBreakBurst({ rect }: { rect: Rect }) {
+  const cells: Array<readonly [number, number]> = [];
+  for (let r = 0; r < BURST_GRID; r++) for (let c = 0; c < BURST_GRID; c++) cells.push([r, c] as const);
+  return (
+    <div
+      className="pointer-events-none absolute z-20"
+      style={{ left: `${rect.left}%`, top: `${rect.top}%`, width: `${rect.width}%`, height: `${rect.height}%` }}
+    >
+      <div
+        className="absolute inset-0 rounded-lg"
+        style={{ boxShadow: "0 0 0 3px #1d8102", animation: "qrRing 700ms ease-out forwards" }}
+      />
+      {cells.map(([r, c]) => {
+        const dx = c - (BURST_GRID - 1) / 2;
+        const dy = r - (BURST_GRID - 1) / 2;
+        const rot = ((r * BURST_GRID + c) % 2 ? 1 : -1) * (120 + ((r * BURST_GRID + c) % 3) * 60);
+        const dist = Math.abs(dx) + Math.abs(dy);
+        const style: CSSProperties & Record<string, string | number> = {
+          left: `${(c * 100) / BURST_GRID}%`,
+          top: `${(r * 100) / BURST_GRID}%`,
+          width: `${100 / BURST_GRID}%`,
+          height: `${100 / BURST_GRID}%`,
+          "--dx": `${dx * 150}%`,
+          "--dy": `${dy * 150}%`,
+          "--rot": `${rot}deg`,
+          animation: `qrShard 700ms cubic-bezier(.4,0,.2,1) ${dist * 22}ms forwards`,
+        };
+        return (
+          <div key={`${r}-${c}`} className="absolute" style={style}>
+            <div
+              className="absolute inset-[7%] rounded-[1px]"
+              style={{ background: (r + c) % 2 === 0 ? "#334155" : "#0f172a" }}
+            />
+          </div>
+        );
+      })}
+      <div className="absolute inset-0 flex items-center justify-center" style={{ animation: "qrCheck 500ms ease-out 120ms both" }}>
+        <div className="flex items-center justify-center rounded-full" style={{ width: "38%", height: "38%", background: "#1d8102" }}>
+          <svg viewBox="0 0 24 24" width="58%" height="58%" fill="none" stroke="#fff" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round">
+            <path d="M5 13l4 4L19 7" />
+          </svg>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 type ScanState = "idle" | "starting" | "scanning" | "error";
 
 // Friendly, device-aware camera failure message from a DOMException name.
@@ -272,8 +371,13 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
   // leak a camera track. The scan loop and decodeOnce re-check it too.
   const genRef = useRef(0);
   const lastDecodeRef = useRef<number>(0);
-  const lastHitRef = useRef<{ value: string; at: number } | null>(null);
-  const flashTimerRef = useRef<number | null>(null);
+  // De-dupes setPending: only re-render the armed overlay when the QR's value or
+  // (rounded) position actually changes, so a held code doesn't churn state.
+  const pendingKeyRef = useRef<string | null>(null);
+  // True only while the ~1s break burst is playing: freezes decoding so the
+  // frozen shatter isn't disturbed and the scanner can't re-arm mid-animation.
+  const capturingRef = useRef(false);
+  const captureTimerRef = useRef<number | null>(null);
   // Read onResult through a ref so the long-lived decode loop always calls the
   // latest handler without being rebuilt, and can never capture a stale closure.
   const onResultRef = useRef(onResult);
@@ -281,7 +385,10 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
 
   const [state, setState] = useState<ScanState>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [flash, setFlash] = useState(false);
+  // A decoded-but-not-yet-recorded QR (armed, awaiting the operator's tap) and
+  // the in-flight capture burst. Recording happens ONLY on tap.
+  const [pending, setPending] = useState<{ value: string; rect: Rect } | null>(null);
+  const [capture, setCapture] = useState<{ value: string; rect: Rect } | null>(null);
   const [manual, setManual] = useState("");
 
   const stop = useCallback(() => {
@@ -291,9 +398,9 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-    if (flashTimerRef.current != null) {
-      window.clearTimeout(flashTimerRef.current);
-      flashTimerRef.current = null;
+    if (captureTimerRef.current != null) {
+      window.clearTimeout(captureTimerRef.current);
+      captureTimerRef.current = null;
     }
     const s = streamRef.current;
     if (s) {
@@ -303,6 +410,10 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
     detectorRef.current = null;
     const v = videoRef.current;
     if (v) v.srcObject = null;
+    capturingRef.current = false;
+    pendingKeyRef.current = null;
+    setPending(null);
+    setCapture(null);
     setState("idle");
   }, []);
 
@@ -314,6 +425,7 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
     const v = videoRef.current;
     const canvas = canvasRef.current;
     if (!v || !canvas || v.readyState < 2) return;
+    if (capturingRef.current) return; // frozen while the break burst plays
 
     const now = performance.now();
     if (now - lastDecodeRef.current < DECODE_INTERVAL_MS) return;
@@ -344,12 +456,17 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
     // Both throw / return empty when there's no QR in the crop — keep scanning.
     const gen = genRef.current; // detect() below is async — bail if superseded
     let value = "";
+    let box: { x: number; y: number; width: number; height: number } | undefined;
     const detector = detectorRef.current;
     if (detector) {
       try {
         const codes = await detector.detect(canvas);
         if (!activeRef.current || genRef.current !== gen) return; // torn down mid-detect
-        value = codes.length && codes[0].rawValue ? codes[0].rawValue.trim() : "";
+        const hit = codes.length ? codes[0] : null;
+        value = hit?.rawValue ? hit.rawValue.trim() : "";
+        if (hit?.boundingBox) {
+          box = { x: hit.boundingBox.x, y: hit.boundingBox.y, width: hit.boundingBox.width, height: hit.boundingBox.height };
+        }
       } catch {
         return; // transient detector error — keep scanning
       }
@@ -363,14 +480,15 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
       }
     }
     if (value) {
-      const prev = lastHitRef.current;
-      // De-dupe rapid repeats of the same code so a held QR doesn't spam.
-      if (!prev || prev.value !== value || now - prev.at > 1500) {
-        lastHitRef.current = { value, at: now };
-        setFlash(true);
-        if (flashTimerRef.current != null) window.clearTimeout(flashTimerRef.current);
-        flashTimerRef.current = window.setTimeout(() => setFlash(false), 350);
-        onResultRef.current?.(value);
+      // ARM, don't record: highlight the QR (on its bounding box when the decoder
+      // gives one, else the aiming box) and wait for the operator's tap. De-dupe
+      // so a held code doesn't re-render the overlay every pass.
+      if (capturingRef.current) return; // a detect() that resolved after a tap — don't re-arm
+      const rect = box ? rectFromBox(box, target) : ROI_RECT;
+      const key = `${value}@${Math.round(rect.left)},${Math.round(rect.top)},${Math.round(rect.width)}`;
+      if (pendingKeyRef.current !== key) {
+        pendingKeyRef.current = key;
+        setPending({ value, rect });
       }
     }
   }, []);
@@ -466,7 +584,10 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
 
     setState("scanning");
     lastDecodeRef.current = 0;
-    lastHitRef.current = null; // don't let the previous session's dedupe suppress a re-scan
+    pendingKeyRef.current = null; // don't let the previous session's dedupe suppress a re-arm
+    capturingRef.current = false;
+    setPending(null);
+    setCapture(null);
     activeRef.current = true;
 
     // Await each pass before re-arming so async BarcodeDetector decodes don't
@@ -483,7 +604,25 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
   // Stop the stream + RAF loop on unmount (e.g. switching away from this tab).
   useEffect(() => stop, [stop]);
 
+  // Record on tap + play the break burst. Fires onResult immediately so the box
+  // lookup runs while the ~1s animation plays; re-arms when it ends.
+  const doCapture = useCallback((value: string, rect: Rect) => {
+    if (capturingRef.current) return;
+    capturingRef.current = true;
+    setCapture({ value, rect });
+    setPending(null);
+    onResultRef.current?.(value);
+    if (captureTimerRef.current != null) window.clearTimeout(captureTimerRef.current);
+    captureTimerRef.current = window.setTimeout(() => {
+      capturingRef.current = false;
+      pendingKeyRef.current = null; // let the next (or same) QR re-arm
+      setCapture(null);
+      setPending(null); // re-arm only on a fresh detect, never a stale one
+    }, BREAK_MS);
+  }, []);
+
   const live = state === "scanning" || state === "starting";
+  const armed = pending != null;
 
   const submitManual = () => {
     const m = manual.trim();
@@ -538,7 +677,7 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
                 width: `${ROI_RATIO * 100}%`,
                 height: `${ROI_RATIO * 100}%`,
                 boxShadow: "0 0 0 9999px rgba(0,0,0,0.45)",
-                outline: `2px solid ${flash ? "#1d8102" : "var(--aws-orange)"}`,
+                outline: `2px solid ${armed ? "#1d8102" : "var(--aws-orange)"}`,
                 transition: "outline-color 120ms ease",
               }}
             >
@@ -549,11 +688,45 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
                   <span
                     key={pos}
                     className={`absolute h-5 w-5 ${pos}`}
-                    style={{ borderColor: flash ? "#1d8102" : "#ffffff" }}
+                    style={{ borderColor: armed ? "#1d8102" : "#ffffff" }}
                   />
                 ))}
             </div>
           </div>
+        ) : null}
+
+        {/* Armed: highlight the live QR and capture ON TAP. Nothing records until
+            the operator taps — a full-viewport target keeps it easy to hit. */}
+        {live && pending && !capture ? (
+          <button
+            type="button"
+            onClick={() => doCapture(pending.value, pending.rect)}
+            aria-label="Tap the QR to record it"
+            className="absolute inset-0 z-10 cursor-pointer border-0 bg-transparent p-0"
+          >
+            <span
+              className="absolute rounded-md"
+              style={{
+                left: `${pending.rect.left}%`,
+                top: `${pending.rect.top}%`,
+                width: `${pending.rect.width}%`,
+                height: `${pending.rect.height}%`,
+                boxShadow: "0 0 0 3px #1d8102, 0 0 22px 5px rgba(29,129,2,0.5)",
+                animation: "qrPulse 900ms ease-in-out infinite",
+              }}
+            />
+            <span className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-[#1d8102] px-3 py-1 text-[12px] font-semibold text-white shadow">
+              Tap the QR to record
+            </span>
+          </button>
+        ) : null}
+
+        {/* Capture burst — the fast QR "break" that plays once recorded. */}
+        {live && capture ? (
+          <>
+            <QrBreakBurst rect={capture.rect} />
+            <div className="pointer-events-none absolute inset-0 z-10 bg-white" style={{ animation: "qrFlash 500ms ease-out forwards" }} />
+          </>
         ) : null}
 
         {/* Idle / error overlay covering the black viewport. */}
@@ -576,6 +749,9 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
 
       {/* Offscreen decode buffer. */}
       <canvas ref={canvasRef} className="hidden" />
+
+      {/* Break-burst keyframes (mounted once). */}
+      <style>{QR_ANIM_CSS}</style>
 
       {/* Manual fallback when the camera can't be used (permission denied, no
           camera, or an insecure context) so the operator can still enter a code. */}
