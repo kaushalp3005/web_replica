@@ -4345,71 +4345,11 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     setAdditives((as) => as.filter((_, j) => j !== i));
   }
 
-  // Additive dropdown options — pulled from /sku-lookup once per
-  // additive category and deduped client-side.  Falls back to the
-  // canonical category labels when the catalog fetch hasn't landed yet
-  // (or when the endpoint is unavailable), so the dropdown always has
-  // *something* even on a fresh dev DB.
-  const [additiveOptions, setAdditiveOptions] = useState<string[]>(
-    [...ADDITIVE_CATEGORIES],
-  );
-  useEffect(() => {
-    // One pass of /sku-lookup searches at mount.  Each query goes
-    // through the same fetch as the SO sku-lookup picker — the server
-    // matches `particulars` with case + space tolerance, so "salt"
-    // returns "Salt Powdered", "Iodised Salt", etc.
-    let cancelled = false;
-    void (async () => {
-      const seen = new Set<string>();
-      const merged: string[] = [];
-      for (const cat of ADDITIVE_CATEGORIES) {
-        try {
-          const res = await apiFetch(
-            `/api/v1/so/sku-lookup?search=${encodeURIComponent(cat)}`,
-          );
-          if (!res.ok) continue;
-          // Server returns SKULookupResponse: `{options: {particulars: string[], ...}}`.
-          // The previous shape read `.results[].particulars` which didn't
-          // exist; the dropdown was silently falling back to the
-          // hardcoded ADDITIVE_CATEGORIES list every time.
-          const j = (await res.json()) as {
-            options?: { particulars?: string[] };
-          };
-          for (const name of j.options?.particulars ?? []) {
-            const trimmed = (name ?? "").trim();
-            if (!trimmed) continue;
-            const key = trimmed.toLowerCase();
-            if (seen.has(key)) continue;
-            seen.add(key);
-            merged.push(trimmed);
-          }
-        } catch {
-          /* network blip — keep walking the other categories */
-        }
-      }
-      if (cancelled) return;
-      // Always offer the canonical categories as a fallback at the top
-      // of the list — even when the catalog returns nothing useful,
-      // the operator can still pick a category name and save.
-      const out: string[] = [];
-      const seenFinal = new Set<string>();
-      for (const cat of ADDITIVE_CATEGORIES) {
-        if (!seenFinal.has(cat.toLowerCase())) {
-          seenFinal.add(cat.toLowerCase());
-          out.push(cat);
-        }
-      }
-      for (const name of merged) {
-        if (!seenFinal.has(name.toLowerCase())) {
-          seenFinal.add(name.toLowerCase());
-          out.push(name);
-        }
-      }
-      out.sort((a, b) => a.localeCompare(b));
-      setAdditiveOptions(out);
-    })();
-    return () => { cancelled = true; };
-  }, []);
+  // Additive dropdown options — a FIXED list of the canonical additive
+  // categories (per ops: the dropdown must show ONLY these). No dynamic
+  // /sku-lookup expansion — off-catalog names go through the "Others"
+  // free-text path below.
+  const additiveOptions: readonly string[] = ADDITIVE_CATEGORIES;
 
   // Submit ─────────────────────────────────────────────────────────────────
   async function onSubmit(e: React.FormEvent) {
