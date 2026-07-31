@@ -296,7 +296,6 @@ const QR_ANIM_CSS = `
 @keyframes qrRing  { from { transform: scale(.7); opacity: .9 } to { transform: scale(1.7); opacity: 0 } }
 @keyframes qrCheck { 0% { transform: scale(0); opacity: 0 } 55% { transform: scale(1.15); opacity: 1 } 100% { transform: scale(1); opacity: 1 } }
 @keyframes qrFlash { from { opacity: .6 } to { opacity: 0 } }
-@keyframes qrPulse { 0%,100% { opacity: 1 } 50% { opacity: .5 } }
 `;
 
 // A fast QR "shatter": a grid of tiles bursts outward + a ring + a check, ~1s.
@@ -710,20 +709,19 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
             the operator taps — a full-viewport target keeps it easy to hit. */}
         {live && pending && !capture ? (
           <>
-            {/* Tap target is ONLY the highlighted QR box — clicks off the code do
-                nothing. The box tracks the QR live and disarms when it leaves. */}
+            {/* Invisible tap target over the QR — no on-screen box. It tracks the
+                code live (position updates each frame) and disarms when it leaves;
+                clicks off the code do nothing. */}
             <button
               type="button"
               onClick={() => doCapture(pending.value, pending.rect)}
               aria-label="Tap the QR to record it"
-              className="absolute z-10 cursor-pointer rounded-md border-0 bg-transparent p-0"
+              className="absolute z-10 cursor-pointer border-0 bg-transparent p-0"
               style={{
                 left: `${pending.rect.left}%`,
                 top: `${pending.rect.top}%`,
                 width: `${pending.rect.width}%`,
                 height: `${pending.rect.height}%`,
-                boxShadow: "0 0 0 3px #1d8102, 0 0 22px 5px rgba(29,129,2,0.5)",
-                animation: "qrPulse 900ms ease-in-out infinite",
               }}
             />
             <span className="pointer-events-none absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-full bg-[#1d8102] px-3 py-1 text-[12px] font-semibold text-white shadow">
