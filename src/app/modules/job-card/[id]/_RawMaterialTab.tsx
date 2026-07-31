@@ -66,6 +66,10 @@ const TOAST_MS = 3500;
 // Kept ~1s (fast, Paytm-style) per the ops ask — long enough to read, short
 // enough not to slow the next scan.
 const BREAK_MS = 1000;
+// How long the armed highlight survives after the QR was last decoded. A short
+// grace absorbs a dropped frame or two; once the code leaves the view for
+// longer than this, the scanner disarms so a stale highlight can't be tapped.
+const MISS_GRACE_MS = 450;
 
 // Shape returned by POST /api/v1/production/scan-identify.
 type IdentifyBox = {
@@ -371,6 +375,7 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
   // leak a camera track. The scan loop and decodeOnce re-check it too.
   const genRef = useRef(0);
   const lastDecodeRef = useRef<number>(0);
+  const lastHitAtRef = useRef<number>(0); // performance.now() of the last successful decode
   // De-dupes setPending: only re-render the armed overlay when the QR's value or
   // (rounded) position actually changes, so a held code doesn't churn state.
   const pendingKeyRef = useRef<string | null>(null);
@@ -476,13 +481,14 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
       try {
         value = reader.decodeFromCanvas(canvas).getText().trim();
       } catch {
-        return; // No QR in the ROI this frame (NotFoundException) — keep scanning.
+        value = ""; // No QR in the ROI this frame — fall through to miss handling.
       }
     }
     if (value) {
       // ARM, don't record: highlight the QR (on its bounding box when the decoder
       // gives one, else the aiming box) and wait for the operator's tap. De-dupe
       // so a held code doesn't re-render the overlay every pass.
+      lastHitAtRef.current = now;
       if (capturingRef.current) return; // a detect() that resolved after a tap — don't re-arm
       const rect = box ? rectFromBox(box, target) : ROI_RECT;
       const key = `${value}@${Math.round(rect.left)},${Math.round(rect.top)},${Math.round(rect.width)}`;
@@ -490,6 +496,11 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
         pendingKeyRef.current = key;
         setPending({ value, rect });
       }
+    } else if (pendingKeyRef.current !== null && now - lastHitAtRef.current > MISS_GRACE_MS) {
+      // The QR left the frame (no decode for a beat) — disarm so the stale
+      // highlight can't be tapped and the box tracks the camera in real time.
+      pendingKeyRef.current = null;
+      setPending(null);
     }
   }, []);
 
@@ -698,14 +709,14 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
         {/* Armed: highlight the live QR and capture ON TAP. Nothing records until
             the operator taps — a full-viewport target keeps it easy to hit. */}
         {live && pending && !capture ? (
-          <button
-            type="button"
-            onClick={() => doCapture(pending.value, pending.rect)}
-            aria-label="Tap the QR to record it"
-            className="absolute inset-0 z-10 cursor-pointer border-0 bg-transparent p-0"
-          >
-            <span
-              className="absolute rounded-md"
+          <>
+            {/* Tap target is ONLY the highlighted QR box — clicks off the code do
+                nothing. The box tracks the QR live and disarms when it leaves. */}
+            <button
+              type="button"
+              onClick={() => doCapture(pending.value, pending.rect)}
+              aria-label="Tap the QR to record it"
+              className="absolute z-10 cursor-pointer rounded-md border-0 bg-transparent p-0"
               style={{
                 left: `${pending.rect.left}%`,
                 top: `${pending.rect.top}%`,
@@ -715,10 +726,10 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
                 animation: "qrPulse 900ms ease-in-out infinite",
               }}
             />
-            <span className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-[#1d8102] px-3 py-1 text-[12px] font-semibold text-white shadow">
+            <span className="pointer-events-none absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-full bg-[#1d8102] px-3 py-1 text-[12px] font-semibold text-white shadow">
               Tap the QR to record
             </span>
-          </button>
+          </>
         ) : null}
 
         {/* Capture burst — the fast QR "break" that plays once recorded. */}
