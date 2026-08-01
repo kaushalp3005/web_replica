@@ -89,7 +89,12 @@ export function RawMaterialTab({ jcId }: { jcId: number }) {
   const [boxes, setBoxes] = useState<BoxScan[]>([]);
   const [totals, setTotals] = useState<ScanTotals | null>(null);
   const [loadingList, setLoadingList] = useState(true);
-  const [count, setCount] = useState(""); // units for the NEXT scan (blank → the box's own count)
+  // Detail applied to the NEXT scan. For a KNOWN box these override its resolved
+  // values (blank → keep the box's own); for an UNKNOWN box `article` is required.
+  const [article, setArticle] = useState("");
+  const [netW, setNetW] = useState("");
+  const [grossW, setGrossW] = useState("");
+  const [count, setCount] = useState("");
   const [toast, setToast] = useState<Toast>(null);
   const [busy, setBusy] = useState<string | null>(null); // box id mid-delete
   // Guards a double-tap double-submit while a store round-trip is in flight.
@@ -137,14 +142,22 @@ export function RawMaterialTab({ jcId }: { jcId: number }) {
     } catch {
       /* not JSON — a bare box id */
     }
-    const n = Number(count);
-    const units = count.trim() !== "" && Number.isFinite(n) ? n : undefined;
+    // Optional detail — sent only when filled. The server auto-fills the rest
+    // for a known box, or requires `article` for a box it can't resolve.
+    const body: Record<string, unknown> = { code };
+    if (article.trim()) body.article = article.trim();
+    const nw = Number(netW);
+    if (netW.trim() !== "" && Number.isFinite(nw)) body.net_weight = nw;
+    const gw = Number(grossW);
+    if (grossW.trim() !== "" && Number.isFinite(gw)) body.gross_weight = gw;
+    const un = Number(count);
+    if (count.trim() !== "" && Number.isFinite(un)) body.count = un;
     inFlightRef.current = true;
     void (async () => {
       try {
         const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/box-scans`, {
           method: "POST",
-          body: JSON.stringify(units != null ? { code, count: units } : { code }),
+          body: JSON.stringify(body),
         });
         if (!res.ok) {
           flashToast({ kind: "err", text: await readApiErrorMessage(res, `Couldn't store ${code}`) });
@@ -158,7 +171,7 @@ export function RawMaterialTab({ jcId }: { jcId: number }) {
         inFlightRef.current = false;
       }
     })();
-  }, [jcId, count, flashToast, refresh]);
+  }, [jcId, article, netW, grossW, count, flashToast, refresh]);
 
   const deleteBox = useCallback(async (code: string) => {
     setBusy(code);
@@ -184,19 +197,53 @@ export function RawMaterialTab({ jcId }: { jcId: number }) {
     <div className="space-y-4">
       <QrScanner onResult={handleScan} />
 
-      {/* Units count applied to the NEXT scan — blank uses the box's own count. */}
-      <div className="flex items-center gap-2">
-        <label htmlFor="rm-count" className="text-[12px] text-[var(--text-muted)]">Count (units in box)</label>
-        <input
-          id="rm-count"
-          type="number"
-          min={0}
-          inputMode="numeric"
-          value={count}
-          onChange={(e) => setCount(e.target.value)}
-          placeholder="auto"
-          className="h-8 w-24 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
-        />
+      {/* Detail applied to the NEXT scan. Auto-filled for a known box; for a new
+          / unknown box, at least an Article is required to store it. */}
+      <div className="bg-white border border-[var(--aws-border)] rounded-md p-3 space-y-2">
+        <div className="text-[11px] text-[var(--text-muted)]">
+          Applied to the next scan. Auto-filled for a known box — for a new/unknown box, enter at least an <span className="font-semibold text-[var(--text-primary)]">Article</span>.
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <label className="col-span-2 sm:col-span-1 flex flex-col gap-1">
+            <span className="text-[11px] text-[var(--text-muted)]">Article</span>
+            <input
+              value={article}
+              onChange={(e) => setArticle(e.target.value)}
+              placeholder="auto"
+              className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-[var(--text-muted)]">Net wt (kg)</span>
+            <input
+              type="number" min={0} step="0.001" inputMode="decimal"
+              value={netW}
+              onChange={(e) => setNetW(e.target.value)}
+              placeholder="auto"
+              className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-[var(--text-muted)]">Gross wt (kg)</span>
+            <input
+              type="number" min={0} step="0.001" inputMode="decimal"
+              value={grossW}
+              onChange={(e) => setGrossW(e.target.value)}
+              placeholder="auto"
+              className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-[var(--text-muted)]">Count</span>
+            <input
+              type="number" min={0} inputMode="numeric"
+              value={count}
+              onChange={(e) => setCount(e.target.value)}
+              placeholder="auto"
+              className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
+            />
+          </label>
+        </div>
       </div>
 
       {toast ? (
