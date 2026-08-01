@@ -122,6 +122,14 @@ export interface DevJobCard {
   warehouse?: string | null;
   base_bom_id?: number | null;
   base_bom_name?: string | null;   // FG name of the base BOM (detail header)
+  // Set when the card was started from a request's "Develop". Always returned by the
+  // detail GET (a real column on npd_dev_job_cards); it was only ever declared on
+  // DevJobCardCreate before, so reads of it did not typecheck.
+  source_requisition_id?: number | null;
+  // Read from the source requisition (085) — the card carries no columns of its own.
+  source_requestor_name?: string | null;    // the BH this was raised for
+  source_sales_poc_name?: string | null;    // sales point of contact
+  source_sales_poc_email?: string | null;
   fg_sku_id?: number | null;
   fg_sku_name?: string | null;
   target_qty?: number | string | null;

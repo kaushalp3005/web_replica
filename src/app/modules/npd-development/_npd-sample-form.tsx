@@ -4,7 +4,7 @@
 // the new product (Target NPD article name); the recipe (base BOM, ingredients,
 // promotion to a live BOM) is authored entirely by the NPD team later on the
 // requisition detail page. Fields, in order:
-//   type → warehouse → target NPD article → quantity (kg) → purpose → requestor → description
+//   type → warehouse → target NPD article → quantity (kg) → purpose → business head → description
 // Mandatory: target article, quantity (> 0). Warehouse is also required by the
 // backend (NpdRequisitionCreate). Posts to the dedicated NPD endpoint, which
 // re-validates the NPD-mandatory fields server-side.
@@ -13,12 +13,12 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial, useMe, useIsAdmin, useHasPermission } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useMe, useHasPermission } from "@/lib/user";
 import {
-  createNpdRequisition, submitRequisition, listBusinessHeads, NPD_SAMPLE_TYPES, NPD_WAREHOUSES,
-  type NpdSampleType, type PurposeTag,
+  createNpdRequisition, submitRequisition, listBusinessHeads, listSalesPocs,
+  NPD_SAMPLE_TYPES, NPD_WAREHOUSES,
+  type NpdSampleType, type PurposeTag, type BusinessHead, type SalesPoc,
 } from "@/lib/sample";
-import { roleNamesOf } from "@/lib/sample-roles";
 import {
   FormSection, BillingFields, billingError, billingPayload, EMPTY_BILLING, type BillingValue,
   TargetArticlesEditor, targetsValid, targetsPayload, EMPTY_TARGET, type TargetRow,
@@ -40,12 +40,13 @@ export function NpdSampleForm({ defaultType, heading }: {
   const authed = useRequireAuth(router.replace);
   const initial = useUserInitial();
   const me = useMe();
-  const isAdmin = useIsAdmin();
   const canCreateReq = useHasPermission("sample", "requisition", null, "create");
   const profileName = (me?.full_name ?? "").trim();
-  // sales (like admin) raises on behalf of a business head → pick the requestor from a
-  // dropdown of BHs, rather than defaulting to the signed-in user's own name.
-  const needsBhDropdown = isAdmin || roleNamesOf(me).includes("sales");
+  // The business head is ALWAYS chosen from the list — for every role, not just
+  // admin/sales. It used to fall back to a free-text box that pre-filled the signed-in
+  // user's own name, which left requestor_user_id pointing at the creator: the promote
+  // approval (WhatsApp and mail) then went back to whoever raised the request instead of
+  // to the business head who has to approve it.
 
   const [type, setType] = useState<NpdSampleType>(defaultType);
   const [warehouse, setWarehouse] = useState<(typeof NPD_WAREHOUSES)[number] | "">("");
@@ -53,8 +54,15 @@ export function NpdSampleForm({ defaultType, heading }: {
   const [targets, setTargets] = useState<TargetRow[]>([{ ...EMPTY_TARGET }]);
   const [purposeTag, setPurposeTag] = useState<PurposeTag | "">("");
   const [requestorTeam, setRequestorTeam] = useState("");
-  const [requestorTouched, setRequestorTouched] = useState(false);
-  const [reqOptions, setReqOptions] = useState<string[]>([]);   // business-head names (no admins)
+  // Business heads (no admins). The dropdown carries user_id, not just the name: the
+  // server binds requestor_user_id + business_head_user_id from it, which is what routes
+  // the approval gate and the request's mail trail to that specific person.
+  const [reqUserId, setReqUserId] = useState<number | "">("");
+  const [reqOptions, setReqOptions] = useState<BusinessHead[]>([]);
+  // Sales POC — defaults to the signed-in user and stays editable. "" means "unchanged",
+  // which the server reads as "default to me".
+  const [salesPocId, setSalesPocId] = useState<number | "">("");
+  const [pocOptions, setPocOptions] = useState<SalesPoc[]>([]);
   const [description, setDescription] = useState("");
   // Customer + dispatch planning (Company / Customer mandatory).
   const [companyName, setCompanyName] = useState("");
@@ -68,30 +76,40 @@ export function NpdSampleForm({ defaultType, heading }: {
   const [error, setError] = useState<string | null>(null);
   const [savedId, setSavedId] = useState<number | null>(null);
 
-  // Requestor is a business head chosen from the dropdown. An admin must pick one
-  // (no self-default); a non-admin's free-text field still defaults to their own name.
-  const effectiveRequestor = requestorTouched ? requestorTeam : (needsBhDropdown ? "" : profileName);
-
-  // Admin + sales pick the requestor from a dropdown of business heads. Fetched via the
-  // sample business-heads endpoint (not admin-gated, so a sales user can populate it too).
+  // Business heads for the picker, via the sample business-heads endpoint (not
+  // admin-gated, so every requesting role can populate it).
   useEffect(() => {
-    if (!needsBhDropdown) return;
     let cancelled = false;
-    listBusinessHeads().then((names) => {
+    listBusinessHeads().then((bhs) => {
       if (cancelled) return;
-      setReqOptions(Array.from(new Set(names.map((n) => n.trim()).filter(Boolean))));
+      setReqOptions(bhs);
     }).catch(() => { /* leave empty — the placeholder prompts a selection */ });
     return () => { cancelled = true; };
-  }, [needsBhDropdown]);
+  }, []);
 
-  // Business heads only — never the signed-in admin's own name.
+  // Sales POC options.
+  useEffect(() => {
+    let cancelled = false;
+    listSalesPocs().then((ps) => { if (!cancelled) setPocOptions(ps); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  // Business heads only — never the signed-in user's own name unless they are one.
   const requestorChoices = reqOptions;
+  // "me" is always selectable as the sales POC, matching the server's default.
+  // MeResponse.user_id is a STRING on the wire; SalesPoc.user_id is numeric.
+  const meId = Number(me?.user_id ?? 0) || 0;
+  const pocChoices: SalesPoc[] =
+    meId && !pocOptions.some((p) => p.user_id === meId)
+      ? [{ user_id: meId, full_name: `${profileName || "Me"} (me)`, email: me?.email ?? "" },
+         ...pocOptions]
+      : pocOptions;
 
   // Mandatory: ≥1 target (name + pcs>0 + weight>0), warehouse, company, customer.
   const canSave =
     !!warehouse && targetsValid(targets) &&
     companyName.trim() !== "" && customerName.trim() !== "" && !billingError(billing) &&
-    (!needsBhDropdown || effectiveRequestor.trim() !== "");   // sales/admin must pick a BH
+    requestorTeam.trim() !== "";   // a business head must always be chosen
 
   async function save(submit: boolean) {
     if (!canSave || !warehouse) return;
@@ -110,7 +128,9 @@ export function NpdSampleForm({ defaultType, heading }: {
           mode_of_transport: modeOfTransport.trim() || undefined,
           expected_dispatch_date: expectedDispatch || undefined,
           purpose_tag: purposeTag || undefined,
-          requestor_team: effectiveRequestor.trim() || undefined,
+          requestor_team: requestorTeam.trim() || undefined,
+          requestor_user_id: typeof reqUserId === "number" && reqUserId > 0 ? reqUserId : undefined,
+          sales_poc_user_id: typeof salesPocId === "number" && salesPocId > 0 ? salesPocId : undefined,
           description: description.trim() || undefined,
           ...billingPayload(billing),
         });
@@ -189,17 +209,32 @@ export function NpdSampleForm({ defaultType, heading }: {
                 </div>
                 {/* requestor */}
                 <div>
-                  <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Requestor {needsBhDropdown && <span className="text-[var(--aws-error)]">*</span>}</label>
-                  {needsBhDropdown ? (
-                    <select className="form-input" value={effectiveRequestor}
-                      onChange={(e) => { setRequestorTouched(true); setRequestorTeam(e.target.value); }}>
+                  <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Business head <span className="text-[var(--aws-error)]">*</span></label>
+                  {(
+                    <select className="form-input" value={reqUserId === "" ? "" : String(reqUserId)}
+                      onChange={(e) => {
+                        const id = e.target.value === "" ? "" : Number(e.target.value);
+                        setReqUserId(id);
+                        setRequestorTeam(reqOptions.find((b) => b.user_id === id)?.full_name ?? "");
+                      }}>
                       <option value="">Select a business head…</option>
-                      {requestorChoices.map((n) => <option key={n} value={n}>{n}</option>)}
+                      {requestorChoices.map((b) => (
+                        <option key={b.user_id} value={String(b.user_id)}>{b.full_name}</option>
+                      ))}
                     </select>
-                  ) : (
-                    <input className="form-input" value={effectiveRequestor}
-                      onChange={(e) => { setRequestorTouched(true); setRequestorTeam(e.target.value); }} />
                   )}
+                </div>
+                {/* Sales POC — defaults to the signed-in user, editable; Cc'd on the mail trail */}
+                <div>
+                  <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Sales POC</label>
+                  <select className="form-input" value={salesPocId === "" ? "" : String(salesPocId)}
+                    onChange={(e) => setSalesPocId(e.target.value === "" ? "" : Number(e.target.value))}
+                    title="Sales point of contact — receives the request's mail trail">
+                    <option value="">{profileName ? `${profileName} (me)` : "Me"}</option>
+                    {pocChoices.filter((pc) => pc.user_id !== meId).map((pc) => (
+                      <option key={pc.user_id} value={String(pc.user_id)}>{pc.full_name}</option>
+                    ))}
+                  </select>
                 </div>
                 {/* description */}
                 <div className="sm:col-span-2">

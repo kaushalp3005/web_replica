@@ -13,12 +13,12 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial, useMe, useIsAdmin, useHasPermission } from "@/lib/user";
-import { sampleCaps, roleNamesOf } from "@/lib/sample-roles";
+import { useRequireAuth, useUserInitial, useMe, useHasPermission } from "@/lib/user";
+import { sampleCaps } from "@/lib/sample-roles";
 import {
   listRequisitions, listRequestors, npdReview, cancelRequisition, updateRequisition, listBusinessHeads,
   WAREHOUSES, NPD_WAREHOUSES, NPD_SAMPLE_TYPES,
-  type Requisition, type PurposeTag, type Warehouse,
+  type Requisition, type PurposeTag, type Warehouse, type BusinessHead,
 } from "@/lib/sample";
 import { NpdStatusPill, NPD_STATUS_FILTERS } from "../sample/_shared";
 import {
@@ -123,7 +123,7 @@ function RowActions({ flags, busy, onView, onAccept, onHold, onCancel, onEdit }:
 
 type EditForm = {
   npd_target_name: string; pcs: string; weight_per_piece: string; warehouse: string;
-  purpose_tag: string; requestor_team: string; description: string;
+  purpose_tag: string; requestor_team: string; requestor_user_id: number; description: string;
   company_name: string; customer_name: string; customer_contact: string;
   customer_ship_to_address: string; mode_of_transport: string; expected_dispatch_date: string;
   billing: BillingValue;
@@ -168,33 +168,36 @@ export default function NpdQueuePage() {
   const [holdStart, setHoldStart] = useState("");
   const [editForm, setEditForm] = useState<EditForm>({
     npd_target_name: "", pcs: "", weight_per_piece: "", warehouse: "",
-    purpose_tag: "", requestor_team: "", description: "",
+    purpose_tag: "", requestor_team: "", requestor_user_id: 0, description: "",
     company_name: "", customer_name: "", customer_contact: "",
     customer_ship_to_address: "", mode_of_transport: "", expected_dispatch_date: "",
     billing: EMPTY_BILLING,
   });
-  // Requestor dropdown — business heads (mirrors the create form). Admin + sales pick a
-  // BH; other roles keep free-text. Fetched via the sample business-heads endpoint (not
-  // admin-gated). Plus derived qty + billing guard.
-  const isAdmin = useIsAdmin();
-  const needsBhDropdown = isAdmin || roleNamesOf(me).includes("sales");
-  const [bhOptions, setBhOptions] = useState<string[]>([]);
+  // Business-head picker (mirrors the create form) — every role picks from the list, so
+  // requestor_user_id always binds to a real BH. Plus derived qty + billing guard.
+  // Carries user_id, not just the name: an edit that moved requestor_team without
+  // requestor_user_id would leave the approval gate and mail trail pointing at the OLD
+  // business head while the UI showed the new one.
+  const [bhOptions, setBhOptions] = useState<BusinessHead[]>([]);
   useEffect(() => {
-    if (!needsBhDropdown) return;
     let cancelled = false;
-    listBusinessHeads().then((names) => {
+    listBusinessHeads().then((bhs) => {
       if (cancelled) return;
-      setBhOptions(Array.from(new Set(names.map((n) => n.trim()).filter(Boolean))));
+      setBhOptions(bhs);
     }).catch(() => { /* leave empty — the placeholder prompts a selection */ });
     return () => { cancelled = true; };
-  }, [needsBhDropdown]);
+  }, []);
   const editPcsN = Number(editForm.pcs), editWppN = Number(editForm.weight_per_piece);
   const editQty = (editForm.pcs.trim() && editForm.weight_per_piece.trim()
     && Number.isFinite(editPcsN) && Number.isFinite(editWppN))
     ? Number((editPcsN * editWppN).toFixed(3)) : 0;
   // Keep the saved requestor selectable even if it isn't a business head (no silent blank).
-  const reqChoices = editForm.requestor_team.trim() && !bhOptions.includes(editForm.requestor_team.trim())
-    ? [editForm.requestor_team.trim(), ...bhOptions] : bhOptions;
+  // The synthetic entry carries user_id 0 — selecting it sends no requestor_user_id, so an
+  // unrelated edit can't rebind the approval gate to a bogus id.
+  const savedReq = editForm.requestor_team.trim();
+  const reqChoices: BusinessHead[] =
+    savedReq && !bhOptions.some((b) => b.full_name === savedReq)
+      ? [{ user_id: 0, full_name: savedReq }, ...bhOptions] : bhOptions;
   const editBillErr = billingError(editForm.billing);
 
   const [mounted, setMounted] = useState(false);
@@ -254,6 +257,7 @@ export default function NpdQueuePage() {
       warehouse: row.warehouse ?? "",
       purpose_tag: row.purpose_tag ?? "",
       requestor_team: row.requestor_team ?? "",
+      requestor_user_id: row.requestor_user_id ?? 0,
       description: row.description ?? "",
       company_name: row.company_name ?? "",
       customer_name: row.customer_name ?? "",
@@ -289,6 +293,7 @@ export default function NpdQueuePage() {
       warehouse: (editForm.warehouse || undefined) as Warehouse | undefined,
       purpose_tag: (editForm.purpose_tag || undefined) as PurposeTag | undefined,
       requestor_team: editForm.requestor_team.trim() || undefined,
+      requestor_user_id: editForm.requestor_user_id > 0 ? editForm.requestor_user_id : undefined,
       description: editForm.description.trim() || undefined,
       company_name: editForm.company_name.trim() || undefined,
       customer_name: editForm.customer_name.trim() || undefined,
@@ -374,9 +379,9 @@ export default function NpdQueuePage() {
             onChange={(e) => { setDateTo(e.target.value); setOffset(0); }} aria-label="Date to" />
         </div>
         <div className="flex flex-col">
-          <label className="text-[11px] text-[var(--text-muted)] mb-0.5">Requestor</label>
+          <label className="text-[11px] text-[var(--text-muted)] mb-0.5">Business head</label>
           <select className="form-input !w-auto" value={requestor}
-            onChange={(e) => { setRequestor(e.target.value); setOffset(0); }} aria-label="Requestor">
+            onChange={(e) => { setRequestor(e.target.value); setOffset(0); }} aria-label="Business head">
             <option value="">All requestors</option>
             {requestorOptions.map((r) => <option key={r} value={r}>{r}</option>)}
           </select>
@@ -464,7 +469,7 @@ export default function NpdQueuePage() {
                   <th className="px-3 py-2 font-semibold">Target article</th>
                   <th className="px-3 py-2 font-semibold text-right">Qty</th>
                   <th className="px-3 py-2 font-semibold">Description</th>
-                  <th className="px-3 py-2 font-semibold">Requestor</th>
+                  <th className="px-3 py-2 font-semibold">Business head</th>
                   <th className="px-3 py-2 font-semibold">Status</th>
                   <th className="px-3 py-2 font-semibold">Actions</th>
                 </tr>
@@ -608,16 +613,19 @@ export default function NpdQueuePage() {
                 </select>
               </div>
               <div>
-                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Requestor</label>
-                {needsBhDropdown ? (
+                <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Business head</label>
+                {(
                   <select className="form-input" value={editForm.requestor_team}
-                    onChange={(e) => setEditForm((f) => ({ ...f, requestor_team: e.target.value }))}>
+                    onChange={(e) => setEditForm((f) => ({
+                      ...f,
+                      requestor_team: e.target.value,
+                      requestor_user_id: reqChoices.find((b) => b.full_name === e.target.value)?.user_id || 0,
+                    }))}>
                     <option value="">Select a business head…</option>
-                    {reqChoices.map((n) => <option key={n} value={n}>{n}</option>)}
+                    {reqChoices.map((b) => (
+                      <option key={`${b.user_id}:${b.full_name}`} value={b.full_name}>{b.full_name}</option>
+                    ))}
                   </select>
-                ) : (
-                  <input className="form-input" value={editForm.requestor_team}
-                    onChange={(e) => setEditForm((f) => ({ ...f, requestor_team: e.target.value }))} />
                 )}
               </div>
               <div>

@@ -53,8 +53,13 @@ export interface SampleCaps {
   canNpd: boolean;
   /** may SEE & navigate the NPD Development module */
   canSeeNpd: boolean;
-  /** may download the NPD dev-JC outpass (gate pass) */
+  /** may ISSUE the NPD dev-JC outpass — the "Download outpass" actions on the job card */
   canOutpass: boolean;
+  /** may VIEW the read-only dev-JC Delivery Challan + Gate Pass document. Wider than
+   *  canOutpass: the dispatch mail threads the DC link to everyone on the request's mail
+   *  trail (requestor / BH, npd_team, inventory_manager), and that link has to open for
+   *  them. The page has no inventory side effects — issuing the outpass stays canOutpass. */
+  canViewOutpass: boolean;
 }
 
 // All role codes the user holds (string entries + envelope code/role_name).
@@ -91,6 +96,10 @@ export function sampleCaps(me: MeResponse | null): SampleCaps {
     canNpd: is("npd_team"),
     canSeeNpd: is("npd_team", "business_head", "inventory_manager", "sales"),
     canOutpass: is("npd_team"),
+    // Same set as canSeeNpd — anyone who may open the NPD module may read the DC document
+    // the dispatch mail links them to. Kept as its own flag (not an alias) so tightening
+    // module visibility and DC visibility stay independent decisions.
+    canViewOutpass: is("npd_team", "business_head", "inventory_manager", "sales"),
   };
 }
 

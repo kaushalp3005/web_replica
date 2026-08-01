@@ -10,15 +10,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, SAMPLE_ROOT, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
-import { useRequireAuth, useUserInitial, useMe, useIsAdmin, useHasPermission } from "@/lib/user";
-import { sampleCaps, roleNamesOf } from "@/lib/sample-roles";
+import { useRequireAuth, useUserInitial, useMe, useHasPermission } from "@/lib/user";
+import { sampleCaps } from "@/lib/sample-roles";
 import {
   getRequisition, submitRequisition, cancelRequisition, closeRequisition,
   approveRequisition, npdReview, issueOutward, dispatchInternal, startProduction,
   markPacking, markReady, invVerify, issueGatePass, convertFull, convertPartial,
   printGatePassBlob, updateRequisition, listBusinessHeads, WAREHOUSES,
   type Requisition, type RecipientBody, type RequisitionCreate,
-  type PurposeTag, type Warehouse,
+  type PurposeTag, type Warehouse, type BusinessHead,
 } from "@/lib/sample";
 import { StatusPill, NpdStatusPill, TYPE_LABEL } from "../_shared";
 import {
@@ -223,7 +223,8 @@ export default function SampleDetailPage() {
                 <>
                   <dl className="border-t border-[var(--surface-divider)] px-5 py-4 grid grid-cols-2 sm:grid-cols-4 gap-y-4 gap-x-4">
                     <Field label="Warehouse" value={req.warehouse ?? "—"} />
-                    <Field label="Requestor" value={req.requestor_team ?? "—"} />
+                    <Field label="Business head" value={req.requestor_team ?? "—"} />
+                    <Field label="Sales POC" value={req.sales_poc_name ?? req.sales_poc_email ?? "—"} />
                     <Field label="Purpose" value={req.purpose_tag ? req.purpose_tag.replace(/_/g, " ") : "—"} />
                     <Field label="Created" value={(req.created_at ?? "").slice(0, 10)} />
                   </dl>
@@ -375,26 +376,27 @@ function EditCard({ req, busy, onSave, onCancel }: {
   // Billing checklist — only edited on NPD/TRIAL requisitions.
   const isNpd = req.sample_type === "NPD" || req.sample_type === "TRIAL";
   const [billing, setBilling] = useState<BillingValue>(() => billingFrom(req));
-  // Requestor dropdown — business heads only (mirrors the create form). Admin-gated
-  // because /users is admin-only; non-admins keep the free-text input.
-  const isAdmin = useIsAdmin();
-  const me = useMe();
-  const needsBhDropdown = isAdmin || roleNamesOf(me).includes("sales");
-  const [reqOptions, setReqOptions] = useState<string[]>([]);
+  // Business-head picker — every role picks from the list (the sample business-heads
+  // endpoint is not admin-gated), so requestor_user_id always binds to a real BH.
+  // Carries user_id so an edit rebinds requestor_user_id + business_head_user_id together
+  // with the displayed name — otherwise the approval gate keeps pointing at the old BH.
+  const [reqUserId, setReqUserId] = useState<number>(req.requestor_user_id ?? 0);
+  const [reqOptions, setReqOptions] = useState<BusinessHead[]>([]);
   useEffect(() => {
-    if (!needsBhDropdown) return;
     let cancelled = false;
-    listBusinessHeads().then((names) => {
+    listBusinessHeads().then((bhs) => {
       if (cancelled) return;
-      setReqOptions(Array.from(new Set(names.map((n) => n.trim()).filter(Boolean))));
+      setReqOptions(bhs);
     }).catch(() => { /* leave empty — the placeholder prompts a selection */ });
     return () => { cancelled = true; };
-  }, [needsBhDropdown]);
+  }, []);
   // Keep the currently-saved requestor selectable even if it isn't (or is no longer)
   // a business head, so editing never silently blanks an existing value.
   const currentReq = (req.requestor_team ?? "").trim();
-  const reqChoices = currentReq && !reqOptions.includes(currentReq)
-    ? [currentReq, ...reqOptions] : reqOptions;
+  // user_id 0 on the synthetic entry means "unchanged" — it sends no requestor_user_id.
+  const reqChoices: BusinessHead[] =
+    currentReq && !reqOptions.some((b) => b.full_name === currentReq)
+      ? [{ user_id: 0, full_name: currentReq }, ...reqOptions] : reqOptions;
   const billErr = isNpd ? billingError(billing) : null;
   const targetErr = isNpd && !targetsValid(targets) ? "Each target needs a name, pcs and weight (> 0)." : null;
 
@@ -406,6 +408,7 @@ function EditCard({ req, busy, onSave, onCancel }: {
       ...(isNpd ? { targets: targetsPayload(targets) } : {}),
       purpose_tag: (purposeTag || undefined) as PurposeTag | undefined,
       requestor_team: requestorTeam.trim() || undefined,
+      requestor_user_id: reqUserId > 0 ? reqUserId : undefined,
       description: description.trim() || undefined,
       company_name: companyName.trim() || undefined,
       customer_name: customerName.trim() || undefined,
@@ -438,14 +441,18 @@ function EditCard({ req, busy, onSave, onCancel }: {
           {PURPOSE_OPTIONS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
         </select>
       </label>
-      <label className="text-[12px] text-[var(--text-secondary)]">Requestor
-        {needsBhDropdown ? (
-          <select className="form-input mt-0.5" value={requestorTeam} onChange={(e) => setRequestorTeam(e.target.value)}>
+      <label className="text-[12px] text-[var(--text-secondary)]">Business head
+        {(
+          <select className="form-input mt-0.5" value={requestorTeam}
+            onChange={(e) => {
+              setRequestorTeam(e.target.value);
+              setReqUserId(reqChoices.find((bh) => bh.full_name === e.target.value)?.user_id ?? 0);
+            }}>
             <option value="">Select a business head…</option>
-            {reqChoices.map((n) => <option key={n} value={n}>{n}</option>)}
+            {reqChoices.map((bh) => (
+              <option key={`${bh.user_id}:${bh.full_name}`} value={bh.full_name}>{bh.full_name}</option>
+            ))}
           </select>
-        ) : (
-          <input className="form-input mt-0.5" value={requestorTeam} onChange={(e) => setRequestorTeam(e.target.value)} />
         )}
       </label>
       <label className="text-[12px] text-[var(--text-secondary)]">Company name

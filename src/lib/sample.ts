@@ -72,8 +72,12 @@ export interface Requisition {
   request_id?: number;               // 8-digit BIGINT request handle — the surfaced identifier
   sample_type: SampleType;
   status: SampleStatus;
-  requestor_user_id?: number;
-  requestor_team?: string | null;
+  requestor_user_id?: number;        // the business head this request is raised FOR (085)
+  requestor_team?: string | null;    // display mirror of that BH's name
+  // Sales point of contact (085) — defaults to whoever raised the request, editable.
+  sales_poc_user_id?: number | null;
+  sales_poc_name?: string | null;
+  sales_poc_email?: string | null;
   purpose_tag?: PurposeTag | null;
   purpose_note?: string | null;
   base_bom_id?: number | null;
@@ -238,7 +242,11 @@ export async function getRequisition(id: number): Promise<Requisition> {
 export interface RequisitionCreate {
   sample_type: SampleType;
   warehouse: Warehouse;
+  requestor_user_id?: number;   // the BH this is raised for (085); server mirrors the name
   requestor_team?: string;
+  sales_poc_user_id?: number;   // sales POC (085); omitted -> defaults to the signed-in user
+  sales_poc_name?: string;
+  sales_poc_email?: string;
   purpose_tag?: PurposeTag;
   purpose_note?: string;
   description?: string;
@@ -302,7 +310,11 @@ export interface NpdRequisitionCreate {
   expected_dispatch_date?: string;     // by BD team (ISO date, nullable)
   description?: string;           // nullable
   purpose_tag?: PurposeTag;       // nullable
-  requestor_team?: string;        // nullable
+  requestor_user_id?: number;     // the BH this is raised for (085)
+  requestor_team?: string;        // nullable (server mirrors the BH name)
+  sales_poc_user_id?: number;   // sales POC (085); omitted -> defaults to the signed-in user
+  sales_poc_name?: string;
+  sales_poc_email?: string;
   // Billing checklist: returnable XOR non_returnable; amount 0 unless paid, else > 0 (≤2 decimals).
   returnable?: boolean;
   non_returnable?: boolean;
@@ -314,13 +326,52 @@ export async function createNpdRequisition(body: NpdRequisitionCreate): Promise<
   return jsonOrThrow(await post(`/api/v1/sample/npd-requisitions`, body), "Failed to create NPD requisition");
 }
 
-// Business-head names for the requestor dropdown (sales/admin raise on behalf of a BH).
-// Not admin-gated (unlike /auth/users), so a sales user can populate it. Degrades to [].
-export async function listBusinessHeads(): Promise<string[]> {
+export interface BusinessHead {
+  user_id: number;
+  full_name: string;
+}
+
+export interface SalesPoc {
+  user_id: number;
+  full_name: string;
+  email: string;
+}
+
+// Users holding the `sales` role, for the Sales POC picker. Degrades to [] so a form
+// never blocks on it — the field falls back to the signed-in user server-side.
+export async function listSalesPocs(): Promise<SalesPoc[]> {
+  try {
+    const res = await apiFetch(`/api/v1/sample/sales-pocs`);
+    if (!res.ok) return [];
+    const raw = (await res.json()) as unknown;
+    if (!Array.isArray(raw)) return [];
+    return raw.map((r) => ({
+      user_id: Number((r as SalesPoc).user_id) || 0,
+      full_name: String((r as SalesPoc).full_name ?? ""),
+      email: String((r as SalesPoc).email ?? ""),
+    })).filter((p) => p.full_name.trim() !== "");
+  } catch {
+    return [];
+  }
+}
+
+// Business heads for the requestor dropdown (sales/admin raise on behalf of a BH). Not
+// admin-gated (unlike /auth/users), so a sales user can populate it. Degrades to [].
+// Tolerates the pre-085 string[] response so a frontend deployed ahead of the backend
+// still renders names (it just can't send requestor_user_id until the backend follows).
+export async function listBusinessHeads(): Promise<BusinessHead[]> {
   try {
     const res = await apiFetch(`/api/v1/sample/business-heads`);
     if (!res.ok) return [];
-    return (await res.json()) as string[];
+    const raw = (await res.json()) as unknown;
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map((r) =>
+        typeof r === "string"
+          ? { user_id: 0, full_name: r }
+          : { user_id: Number((r as BusinessHead).user_id) || 0,
+              full_name: String((r as BusinessHead).full_name ?? "") })
+      .filter((b) => b.full_name.trim() !== "");
   } catch {
     return [];
   }

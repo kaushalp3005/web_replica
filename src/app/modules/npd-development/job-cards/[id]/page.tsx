@@ -388,6 +388,12 @@ export default function DevJobCardDetailPage() {
                 <Field label="Weight per piece (kg)" value={jc.weight_per_piece != null ? num(jc.weight_per_piece) : "—"} />
                 <Field label="Target qty" value={jc.target_qty != null ? `${num(jc.target_qty)} ${jc.uom ?? ""}`.trim() : "—"} />
                 <Field label="Base BOM" value={jc.base_bom_id != null ? `${jc.base_bom_name ? `${jc.base_bom_name} ` : ""}#${jc.base_bom_id}` : "—"} />
+                {jc.source_requisition_id != null && (
+                  <>
+                    <Field label="Business head" value={jc.source_requestor_name ?? "—"} />
+                    <Field label="Sales POC" value={jc.source_sales_poc_name ?? jc.source_sales_poc_email ?? "—"} />
+                  </>
+                )}
                 <Field label="Created" value={(jc.created_at ?? "").slice(0, 10)} />
                 {jc.started_at && <Field label="Started" value={(jc.started_at ?? "").slice(0, 10)} />}
                 {jc.closed_at && <Field label="Closed" value={(jc.closed_at ?? "").slice(0, 10)} />}

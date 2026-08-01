@@ -45,7 +45,11 @@ export default function DevJcGatePassPage() {
   const id = Number(params.id);
   const authed = useRequireAuth(router.replace);
   const me = useMe();
-  const canOutpass = sampleCaps(me).canOutpass;
+  // VIEW gate, deliberately wider than canOutpass: the dispatch mail threads this DC link
+  // to everyone on the request's trail (requestor / BH, npd_team, inventory_manager), so it
+  // must open for them. Read-only document, no inventory side effects; ISSUING an outpass
+  // from the job card is still gated on canOutpass.
+  const canViewOutpass = sampleCaps(me).canViewOutpass;
 
   const [jc, setJc] = useState<DevJobCard | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -68,13 +72,13 @@ export default function DevJcGatePassPage() {
     if (sp.get("merge") === "1") setMergeAll(true);
   }, []);
 
-  // npd_team + admin only — BH/IM are module members but must not reach the
-  // outpass. The module layout lets them in; this is the finer gate.
+  // NPD module members (npd_team, BH, inventory_manager, sales) + admin. Anyone outside
+  // the module still bounces back to the job card.
   useEffect(() => {
-    if (authed && me !== null && !canOutpass) {
+    if (authed && me !== null && !canViewOutpass) {
       router.replace(`/modules/npd-development/job-cards/${id}`);
     }
-  }, [authed, me, canOutpass, router, id]);
+  }, [authed, me, canViewOutpass, router, id]);
 
   useEffect(() => {
     if (!authed || !Number.isFinite(id)) return;
@@ -92,7 +96,7 @@ export default function DevJcGatePassPage() {
   }, [jc]);
 
   if (mounted && !authed) return null;
-  if (mounted && me !== null && !canOutpass) return null;
+  if (mounted && me !== null && !canViewOutpass) return null;
 
   if (error) {
     return <div style={{ padding: 24, fontFamily: "Arial, sans-serif", color: "#b1361e" }}>{error}</div>;
