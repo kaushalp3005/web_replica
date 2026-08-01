@@ -71,107 +71,148 @@ const BREAK_MS = 1000;
 // longer than this, the scanner disarms so a stale highlight can't be tapped.
 const MISS_GRACE_MS = 450;
 
-// Shape returned by POST /api/v1/production/scan-identify.
-type IdentifyBox = {
+// A stored raw-material box scan (jc_box_scan), as returned by the box-scans list.
+type BoxScan = {
   box_id: string | null;
+  sfg_box_id: string | null;
   transaction_no: string | null;
-  item_description: string | null;
-  lot_number: string | null;
+  article: string | null;
   net_weight: number | null;
   gross_weight: number | null;
-  count: number | string | null;
-  status: string | null;
-  job_card_number: string | null;
+  count: number | null;
+  scanned_at: string | null;
 };
-type IdentifyResult =
-  | { found: true; table: string; company: string | null; matched_by: string; box: IdentifyBox }
-  | { found: false; box_id: string | null; transaction_no?: string | null };
-
-type Lookup =
-  | { status: "loading" }
-  | { status: "ok"; data: IdentifyResult }
-  | { status: "err"; error: string };
+type ScanTotals = { boxes: number; net_weight: number; gross_weight: number; count: number };
+type Toast = { kind: "ok" | "err"; text: string } | null;
 
 export function RawMaterialTab({ jcId }: { jcId: number }) {
-  // Identify is JC-agnostic (it answers "which table is this box in"), so jcId
-  // isn't needed for the lookup itself.
-  void jcId;
-
-  const [scanned, setScanned] = useState<string | null>(null);
-  const [lookup, setLookup] = useState<Lookup | null>(null);
-  const [toast, setToast] = useState<{ text: string } | null>(null);
-  // The value currently displayed. The scanner re-emits a held QR (~every 1.5s);
-  // this guard stops the same code re-toasting — including after a manual ✕ or an
-  // auto-dismiss — so the toast doesn't pop back while the code is held.
-  const lastShownRef = useRef<string | null>(null);
+  const [boxes, setBoxes] = useState<BoxScan[]>([]);
+  const [totals, setTotals] = useState<ScanTotals | null>(null);
+  const [loadingList, setLoadingList] = useState(true);
+  const [count, setCount] = useState(""); // units for the NEXT scan (blank → the box's own count)
+  const [toast, setToast] = useState<Toast>(null);
+  const [busy, setBusy] = useState<string | null>(null); // box id mid-delete
+  // Guards a double-tap double-submit while a store round-trip is in flight.
+  const inFlightRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
-  // Monotonic id per scan: a slow lookup response is dropped if a newer scan
-  // superseded it, so the card always reflects the latest code.
-  const reqRef = useRef(0);
 
-  const clearToastTimer = useCallback(() => {
-    if (toastTimerRef.current != null) {
-      window.clearTimeout(toastTimerRef.current);
-      toastTimerRef.current = null;
-    }
+  const flashToast = useCallback((t: { kind: "ok" | "err"; text: string }) => {
+    setToast(t);
+    if (toastTimerRef.current != null) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToast(null), TOAST_MS);
   }, []);
 
-  // Runs for every fresh QR decode: show the raw value + fire the identify lookup.
-  const handleScan = useCallback((value: string) => {
-    const v = value.trim();
-    if (!v || v === lastShownRef.current) return; // ignore empties + held-QR re-emits
-    lastShownRef.current = v;
-    setScanned(v);
-    setLookup({ status: "loading" });
-    setToast({ text: `Scanned: ${v}` });
-    clearToastTimer();
-    toastTimerRef.current = window.setTimeout(() => setToast(null), TOAST_MS);
+  const refresh = useCallback(async () => {
+    try {
+      const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/box-scans`);
+      if (res.ok) {
+        const data = (await res.json()) as { scans?: BoxScan[]; totals?: ScanTotals };
+        setBoxes(data.scans ?? []);
+        setTotals(data.totals ?? null);
+      }
+    } catch {
+      /* keep the last good list */
+    } finally {
+      setLoadingList(false);
+    }
+  }, [jcId]);
 
-    const reqId = ++reqRef.current;
+  useEffect(() => {
+    // Deferred past the synchronous effect body so react-hooks/set-state-in-effect
+    // stays happy (refresh() setStates). Same idiom the detail page's fetch uses.
+    queueMicrotask(() => { void refresh(); });
+  }, [refresh]);
+  useEffect(() => () => { if (toastTimerRef.current != null) window.clearTimeout(toastTimerRef.current); }, []);
+
+  // A scan STORES the box against this JC (upsert). RM labels are a bare box id
+  // or JSON {"tx","bi"} — send the bare id; the server matches po_box.box_id and
+  // resolves the article + weights from the box itself.
+  const handleScan = useCallback((value: string) => {
+    const raw = value.trim();
+    if (!raw || inFlightRef.current) return;
+    let code = raw;
+    try {
+      const j = JSON.parse(raw);
+      if (j && typeof j.bi === "string") code = j.bi.trim();
+    } catch {
+      /* not JSON — a bare box id */
+    }
+    const n = Number(count);
+    const units = count.trim() !== "" && Number.isFinite(n) ? n : undefined;
+    inFlightRef.current = true;
     void (async () => {
       try {
-        const res = await apiFetch("/api/v1/production/scan-identify", {
+        const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/box-scans`, {
           method: "POST",
-          body: JSON.stringify({ value: v }),
+          body: JSON.stringify(units != null ? { code, count: units } : { code }),
         });
-        if (reqRef.current !== reqId) return; // superseded by a newer scan
         if (!res.ok) {
-          setLookup({ status: "err", error: await readApiErrorMessage(res, "Lookup failed") });
+          flashToast({ kind: "err", text: await readApiErrorMessage(res, `Couldn't store ${code}`) });
           return;
         }
-        const data = (await res.json()) as IdentifyResult;
-        if (reqRef.current !== reqId) return;
-        setLookup({ status: "ok", data });
+        flashToast({ kind: "ok", text: `Stored ${code}` });
+        await refresh();
       } catch (e) {
-        if (reqRef.current !== reqId) return;
-        setLookup({ status: "err", error: friendlyApiError(e) });
+        flashToast({ kind: "err", text: friendlyApiError(e) });
+      } finally {
+        inFlightRef.current = false;
       }
     })();
-  }, [clearToastTimer]);
+  }, [jcId, count, flashToast, refresh]);
 
-  const dismissToast = useCallback(() => {
-    clearToastTimer();
-    setToast(null);
-  }, [clearToastTimer]);
-
-  // Clear the pending auto-dismiss timer on unmount.
-  useEffect(() => clearToastTimer, [clearToastTimer]);
+  const deleteBox = useCallback(async (code: string) => {
+    setBusy(code);
+    try {
+      const res = await apiFetch(
+        `/api/v1/production/job-cards-v2/${jcId}/box-scans/${encodeURIComponent(code)}`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) {
+        flashToast({ kind: "err", text: await readApiErrorMessage(res, "Delete failed") });
+        return;
+      }
+      flashToast({ kind: "ok", text: `Removed ${code}` });
+      await refresh();
+    } catch (e) {
+      flashToast({ kind: "err", text: friendlyApiError(e) });
+    } finally {
+      setBusy(null);
+    }
+  }, [jcId, flashToast, refresh]);
 
   return (
     <div className="space-y-4">
-      {/* Scanner pinned to the top; a scan identifies the box below. */}
       <QrScanner onResult={handleScan} />
+
+      {/* Units count applied to the NEXT scan — blank uses the box's own count. */}
+      <div className="flex items-center gap-2">
+        <label htmlFor="rm-count" className="text-[12px] text-[var(--text-muted)]">Count (units in box)</label>
+        <input
+          id="rm-count"
+          type="number"
+          min={0}
+          inputMode="numeric"
+          value={count}
+          onChange={(e) => setCount(e.target.value)}
+          placeholder="auto"
+          className="h-8 w-24 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
+        />
+      </div>
 
       {toast ? (
         <div
           role="status"
           aria-live="polite"
-          className="px-3 py-2 text-[13px] rounded-[2px] border flex items-center justify-between gap-3 bg-[#eaf6ed] border-[#b6dbb1] text-[var(--text-success)]"
+          className={`px-3 py-2 text-[13px] rounded-[2px] border flex items-center justify-between gap-3 ${
+            toast.kind === "ok"
+              ? "bg-[#eaf6ed] border-[#b6dbb1] text-[var(--text-success)]"
+              : "bg-[#fdecea] border-[#f5c6c2] text-[var(--text-danger)]"
+          }`}
         >
           <span className="break-all">{toast.text}</span>
           <button
             type="button"
-            onClick={dismissToast}
+            onClick={() => setToast(null)}
             aria-label="Dismiss"
             className="shrink-0 text-[15px] leading-none text-[var(--text-muted)] hover:text-[var(--text-primary)]"
           >
@@ -180,77 +221,56 @@ export function RawMaterialTab({ jcId }: { jcId: number }) {
         </div>
       ) : null}
 
-      {scanned ? (
-        <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
-          <div className="px-4 py-3 border-b border-[var(--aws-border)]">
-            <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">Scanned QR</h3>
-          </div>
-          <div className="p-4 space-y-4">
-            <div>
-              <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)]">Value</div>
-              <div className="font-mono text-[13px] text-[var(--text-primary)] break-all">{scanned}</div>
-            </div>
-            <ScanResult lookup={lookup} />
-          </div>
+      {/* Stored raw-material boxes for this job card — ✕ removes one box. */}
+      <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
+        <div className="px-4 py-3 border-b border-[var(--aws-border)] flex items-center justify-between gap-2">
+          <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">Scanned raw-material boxes</h3>
+          {totals ? (
+            <span className="text-[12px] text-[var(--text-muted)]">
+              {totals.boxes} box{totals.boxes === 1 ? "" : "es"} · {totals.net_weight.toFixed(3)} kg · {totals.count} units
+            </span>
+          ) : null}
         </div>
-      ) : (
-        <div className="bg-white border border-dashed border-[var(--aws-border-strong)] rounded-md p-4 text-center text-[12px] text-[var(--text-muted)]">
-          Scan a raw-material QR to identify its box.
-        </div>
-      )}
-    </div>
-  );
-}
 
-// Renders the identify outcome: loading / error / found (table + box) / not-found.
-function ScanResult({ lookup }: { lookup: Lookup | null }) {
-  if (!lookup || lookup.status === "loading")
-    return <div className="text-[12px] text-[var(--text-muted)]">Looking up…</div>;
-  if (lookup.status === "err")
-    return <div className="text-[12px] text-[var(--text-danger)]">{lookup.error}</div>;
-
-  const r = lookup.data;
-  if (!r.found)
-    return (
-      <div className="text-[12px] text-[var(--text-danger)]">
-        Not found in any box table{r.box_id ? ` (${r.box_id})` : ""}.
+        {loadingList ? (
+          <div className="p-4 text-[12px] text-[var(--text-muted)]">Loading…</div>
+        ) : boxes.length === 0 ? (
+          <div className="p-4 text-center text-[12px] text-[var(--text-muted)]">
+            Scan a raw-material QR to add its box.
+          </div>
+        ) : (
+          <ul className="divide-y divide-[var(--aws-border)]">
+            {boxes.map((b) => {
+              const code = b.box_id ?? b.sfg_box_id ?? "";
+              return (
+                <li key={code} className="px-4 py-3 flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="font-mono text-[13px] text-[var(--text-primary)] break-all">{code}</div>
+                    <div className="text-[12px] text-[var(--text-muted)] break-all">
+                      {b.article ?? "—"}{b.transaction_no ? ` · ${b.transaction_no}` : ""}
+                    </div>
+                    <div className="text-[12px] text-[var(--text-secondary)] mt-0.5">
+                      {b.net_weight != null ? `${Number(b.net_weight).toFixed(3)} kg net` : "— net"}
+                      {b.gross_weight != null ? ` · ${Number(b.gross_weight).toFixed(3)} kg gross` : ""}
+                      {b.count != null ? ` · ${b.count} units` : ""}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void deleteBox(code)}
+                    disabled={busy === code || !code}
+                    aria-label={`Remove box ${code}`}
+                    title="Remove this box"
+                    className="shrink-0 h-7 w-7 flex items-center justify-center rounded-[2px] border border-[var(--aws-border-strong)] text-[var(--text-muted)] hover:border-[var(--text-danger)] hover:text-[var(--text-danger)] disabled:opacity-50"
+                  >
+                    ✕
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </div>
-    );
-
-  const b = r.box;
-  const rows: [string, string | number | null][] = [
-    ["Box ID", b.box_id],
-    ["Transaction", b.transaction_no],
-    ["Item", b.item_description],
-    ["Lot", b.lot_number],
-    ["Net wt (kg)", b.net_weight],
-    ["Gross wt (kg)", b.gross_weight],
-    ["Count", b.count],
-    ["Status", b.status],
-    ["Job card", b.job_card_number],
-  ];
-  return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2 text-[12px]">
-        <span className="px-2 py-0.5 rounded-[2px] bg-[#eaf6ed] border border-[#b6dbb1] text-[var(--text-success)] font-semibold">
-          Found in {r.table}
-        </span>
-        {r.company ? (
-          <span className="px-2 py-0.5 rounded-[2px] bg-[var(--aws-bg-subtle,#f2f3f3)] border border-[var(--aws-border)] uppercase text-[var(--text-muted)]">
-            {r.company}
-          </span>
-        ) : null}
-      </div>
-      <dl className="grid grid-cols-[minmax(90px,auto)_1fr] gap-x-4 gap-y-1.5 text-[13px]">
-        {rows
-          .filter(([, v]) => v !== null && v !== "")
-          .map(([label, v]) => (
-            <div key={label} className="contents">
-              <dt className="text-[var(--text-muted)]">{label}</dt>
-              <dd className="text-[var(--text-primary)] break-all">{String(v)}</dd>
-            </div>
-          ))}
-      </dl>
     </div>
   );
 }
