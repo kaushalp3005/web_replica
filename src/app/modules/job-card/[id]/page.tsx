@@ -36,7 +36,7 @@ import { lockBannerId, useLockState, userMayForceUnlock } from "../_useLockState
 // C10 / C11 (Wave 4) — canonical role-gated action button + amendments tab.
 import { ActionButton, LockableButton } from "../_ActionButton";
 import { AmendmentsTab } from "../_AmendmentsTab";
-import { RawMaterialTab } from "./_RawMaterialTab";
+import { RawMaterialTab, BoxScanPanel } from "./_RawMaterialTab";
 import { OutputTab } from "./_OutputTab";
 import { SfgProducedBoxes, type BatchOpt } from "./_SfgProducedBoxes";
 // W4-MED-3/M10 — single subscription via context (see _UserContext.tsx).
@@ -2550,6 +2550,10 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
 
   return (
     <div className="space-y-4">
+      {/* Same box-scan feature as the Raw Material tab (store / list / ✕ delete /
+          count+article+weight / duplicate guard), scanning boxes into this JC. */}
+      <BoxScanPanel jcId={jcId} scanTitle="Scan Box QR" listHeading="Scanned boxes" emptyHint="Scan a box QR to add it." />
+
       {!isProducer && !isConsumer && (
         <EmptyHint>This stage neither produces nor consumes SFG — no boxes apply.</EmptyHint>
       )}

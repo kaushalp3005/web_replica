@@ -85,7 +85,17 @@ type BoxScan = {
 type ScanTotals = { boxes: number; net_weight: number; gross_weight: number; count: number };
 type Toast = { kind: "ok" | "err"; text: string } | null;
 
-export function RawMaterialTab({ jcId }: { jcId: number }) {
+export function RawMaterialTab({
+  jcId,
+  scanTitle = "Scan Raw Material QR",
+  listHeading = "Scanned raw-material boxes",
+  emptyHint = "Scan a raw-material QR to add its box.",
+}: {
+  jcId: number;
+  scanTitle?: string;
+  listHeading?: string;
+  emptyHint?: string;
+}) {
   const [boxes, setBoxes] = useState<BoxScan[]>([]);
   const [totals, setTotals] = useState<ScanTotals | null>(null);
   const [loadingList, setLoadingList] = useState(true);
@@ -201,7 +211,7 @@ export function RawMaterialTab({ jcId }: { jcId: number }) {
 
   return (
     <div className="space-y-4">
-      <QrScanner onResult={handleScan} warning={dupWarn} />
+      <QrScanner onResult={handleScan} warning={dupWarn} title={scanTitle} />
 
       {/* Detail applied to the NEXT scan. Auto-filled for a known box; for a new
           / unknown box, at least an Article is required to store it. */}
@@ -277,7 +287,7 @@ export function RawMaterialTab({ jcId }: { jcId: number }) {
       {/* Stored raw-material boxes for this job card — ✕ removes one box. */}
       <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
         <div className="px-4 py-3 border-b border-[var(--aws-border)] flex items-center justify-between gap-2">
-          <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">Scanned raw-material boxes</h3>
+          <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">{listHeading}</h3>
           {totals ? (
             <span className="text-[12px] text-[var(--text-muted)]">
               {totals.boxes} box{totals.boxes === 1 ? "" : "es"} · {totals.net_weight.toFixed(3)} kg · {totals.count} units
@@ -289,7 +299,7 @@ export function RawMaterialTab({ jcId }: { jcId: number }) {
           <div className="p-4 text-[12px] text-[var(--text-muted)]">Loading…</div>
         ) : boxes.length === 0 ? (
           <div className="p-4 text-center text-[12px] text-[var(--text-muted)]">
-            Scan a raw-material QR to add its box.
+            {emptyHint}
           </div>
         ) : (
           <ul className="divide-y divide-[var(--aws-border)]">
@@ -327,6 +337,10 @@ export function RawMaterialTab({ jcId }: { jcId: number }) {
     </div>
   );
 }
+
+// The exact same box-scan feature, reused verbatim in the "Boxes printing" tab —
+// only the visible labels differ (pass scanTitle / listHeading / emptyHint).
+export const BoxScanPanel = RawMaterialTab;
 
 // ── AR tap-to-capture ───────────────────────────────────────────────────────
 // Instead of auto-recording the instant a QR decodes, the scanner ARMS: it
@@ -433,7 +447,7 @@ function cameraErrorMessage(name: string | undefined): string {
   return "Could not start the camera. Check permissions and try again.";
 }
 
-function QrScanner({ onResult, warning }: { onResult?: (value: string) => void; warning?: string | null }) {
+function QrScanner({ onResult, warning, title = "Scan Raw Material QR" }: { onResult?: (value: string) => void; warning?: string | null; title?: string }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null); // offscreen decode buffer
   const streamRef = useRef<MediaStream | null>(null);
@@ -717,7 +731,7 @@ function QrScanner({ onResult, warning }: { onResult?: (value: string) => void; 
   return (
     <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-3 sm:p-4">
       <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-        <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">Scan Raw Material QR</h3>
+        <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">{title}</h3>
         {live ? (
           <button
             type="button"
