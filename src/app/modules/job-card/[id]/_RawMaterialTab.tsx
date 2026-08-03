@@ -778,10 +778,10 @@ function QrScanner({ onResult, warning }: { onResult?: (value: string) => void; 
           </div>
         ) : null}
 
-        {/* Redundant-box warning — a chip above the ROI box (mirrors the tap chip). */}
+        {/* Duplicate-box warning — a chip above the ROI box (mirrors the tap chip). */}
         {live && warning ? (
           <span className="pointer-events-none absolute top-3 left-1/2 z-20 -translate-x-1/2 max-w-[92%] rounded-full bg-[#c0392b] px-3 py-1 text-center text-[12px] font-semibold text-white shadow">
-            ⚠ Redundant box scanned — {warning}
+            ⚠ Duplicate box scanned — {warning}
           </span>
         ) : null}
 
