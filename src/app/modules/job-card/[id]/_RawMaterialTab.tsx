@@ -201,25 +201,7 @@ export function RawMaterialTab({ jcId }: { jcId: number }) {
 
   return (
     <div className="space-y-4">
-      <QrScanner onResult={handleScan} />
-
-      {/* Redundant-box warning, right below the QR. The box was NOT saved. */}
-      {dupWarn ? (
-        <div
-          role="alert"
-          className="px-3 py-2 text-[13px] rounded-[2px] border flex items-center justify-between gap-3 bg-[#fdecea] border-[#f5c6c2] text-[var(--text-danger)]"
-        >
-          <span className="break-all font-semibold">⚠ Redundant box scanned — {dupWarn} is already recorded, not saved.</span>
-          <button
-            type="button"
-            onClick={() => setDupWarn(null)}
-            aria-label="Dismiss"
-            className="shrink-0 text-[15px] leading-none text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-          >
-            ✕
-          </button>
-        </div>
-      ) : null}
+      <QrScanner onResult={handleScan} warning={dupWarn} />
 
       {/* Detail applied to the NEXT scan. Auto-filled for a known box; for a new
           / unknown box, at least an Article is required to store it. */}
@@ -451,7 +433,7 @@ function cameraErrorMessage(name: string | undefined): string {
   return "Could not start the camera. Check permissions and try again.";
 }
 
-function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
+function QrScanner({ onResult, warning }: { onResult?: (value: string) => void; warning?: string | null }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null); // offscreen decode buffer
   const streamRef = useRef<MediaStream | null>(null);
@@ -794,6 +776,13 @@ function QrScanner({ onResult }: { onResult?: (value: string) => void }) {
                 ))}
             </div>
           </div>
+        ) : null}
+
+        {/* Redundant-box warning — a chip above the ROI box (mirrors the tap chip). */}
+        {live && warning ? (
+          <span className="pointer-events-none absolute top-3 left-1/2 z-20 -translate-x-1/2 max-w-[92%] rounded-full bg-[#c0392b] px-3 py-1 text-center text-[12px] font-semibold text-white shadow">
+            ⚠ Redundant box scanned — {warning}
+          </span>
         ) : null}
 
         {/* Armed: highlight the live QR and capture ON TAP. Nothing records until
