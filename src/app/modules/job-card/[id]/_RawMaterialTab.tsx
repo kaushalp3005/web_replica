@@ -97,6 +97,7 @@ export function RawMaterialTab({ jcId }: { jcId: number }) {
   const [count, setCount] = useState("");
   const [toast, setToast] = useState<Toast>(null);
   const [busy, setBusy] = useState<string | null>(null); // box id mid-delete
+  const [dupWarn, setDupWarn] = useState<string | null>(null); // last redundant box id → red banner below the QR
   // Guards a double-tap double-submit while a store round-trip is in flight.
   const inFlightRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
@@ -135,6 +136,7 @@ export function RawMaterialTab({ jcId }: { jcId: number }) {
   const handleScan = useCallback((value: string) => {
     const raw = value.trim();
     if (!raw || inFlightRef.current) return;
+    setDupWarn(null); // clear any previous redundant-box warning on a fresh scan
     let code = raw;
     try {
       const j = JSON.parse(raw);
@@ -160,7 +162,11 @@ export function RawMaterialTab({ jcId }: { jcId: number }) {
           body: JSON.stringify(body),
         });
         if (!res.ok) {
-          flashToast({ kind: "err", text: await readApiErrorMessage(res, `Couldn't store ${code}`) });
+          if (res.status === 409) {
+            setDupWarn(code); // redundant box — persistent red banner below the QR
+          } else {
+            flashToast({ kind: "err", text: await readApiErrorMessage(res, `Couldn't store ${code}`) });
+          }
           return;
         }
         flashToast({ kind: "ok", text: `Stored ${code}` });
@@ -196,6 +202,24 @@ export function RawMaterialTab({ jcId }: { jcId: number }) {
   return (
     <div className="space-y-4">
       <QrScanner onResult={handleScan} />
+
+      {/* Redundant-box warning, right below the QR. The box was NOT saved. */}
+      {dupWarn ? (
+        <div
+          role="alert"
+          className="px-3 py-2 text-[13px] rounded-[2px] border flex items-center justify-between gap-3 bg-[#fdecea] border-[#f5c6c2] text-[var(--text-danger)]"
+        >
+          <span className="break-all font-semibold">⚠ Redundant box scanned — {dupWarn} is already recorded, not saved.</span>
+          <button
+            type="button"
+            onClick={() => setDupWarn(null)}
+            aria-label="Dismiss"
+            className="shrink-0 text-[15px] leading-none text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+          >
+            ✕
+          </button>
+        </div>
+      ) : null}
 
       {/* Detail applied to the NEXT scan. Auto-filled for a known box; for a new
           / unknown box, at least an Article is required to store it. */}
