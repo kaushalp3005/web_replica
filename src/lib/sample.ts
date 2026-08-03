@@ -400,6 +400,10 @@ export const npdReview = (
 export const issueOutward = (id: number, from_location?: string) => action(id, "outward", { from_location }, "Outward failed");
 export const dispatchInternal = (id: number) => action(id, "dispatch-internal", undefined, "Dispatch failed");
 export const startProduction = (id: number) => action(id, "start-production", undefined, "Start production failed");
+// Tell production an item has to be MADE for this sample (VA / RPC forms). No NPD
+// involvement — NPD runs its own requisition → job card → dispatch flow in its own module.
+export const requestProductionItem = (id: number, note?: string) =>
+  action(id, "request-production", { note }, "Production request failed");
 export const markPacking = (id: number) => action(id, "mark-packing", undefined, "Failed");
 export const markReady = (id: number) => action(id, "mark-ready", undefined, "Failed");
 export const invVerify = (id: number, remarks?: string) => action(id, "inv-verify", { remarks }, "Verify failed");
