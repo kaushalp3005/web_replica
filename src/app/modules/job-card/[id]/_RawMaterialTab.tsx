@@ -32,7 +32,7 @@
 // else (Chrome/Firefox on Windows & Linux, Safari). Either way we feed the
 // decoder ONLY the centred ROI canvas, never the whole frame.
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { BrowserQRCodeReader } from "@zxing/browser";
 import { BarcodeFormat, DecodeHintType } from "@zxing/library";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
@@ -84,17 +84,21 @@ type BoxScan = {
 };
 type ScanTotals = { boxes: number; net_weight: number; gross_weight: number; count: number };
 type Toast = { kind: "ok" | "err"; text: string } | null;
+// RM issued for the JC, rolled up per article from the scanned net weights.
+type ArticleIssue = { article: string; net_weight: number; boxes: number };
 
 export function RawMaterialTab({
   jcId,
   scanTitle = "Scan Raw Material QR",
   listHeading = "Scanned raw-material boxes",
   emptyHint = "Scan a raw-material QR to add its box.",
+  issuesHeading = "RM issued (per article)",
 }: {
   jcId: number;
   scanTitle?: string;
   listHeading?: string;
   emptyHint?: string;
+  issuesHeading?: string;
 }) {
   const [boxes, setBoxes] = useState<BoxScan[]>([]);
   const [totals, setTotals] = useState<ScanTotals | null>(null);
@@ -111,6 +115,20 @@ export function RawMaterialTab({
   // Guards a double-tap double-submit while a store round-trip is in flight.
   const inFlightRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
+
+  // RM issued per article: sum the scanned net weights by article. Blank article
+  // groups under "—"; heaviest first. Drives the summary block below the scanner.
+  const issues = useMemo<ArticleIssue[]>(() => {
+    const m = new Map<string, ArticleIssue>();
+    for (const b of boxes) {
+      const key = (b.article ?? "").trim() || "—";
+      const cur = m.get(key) ?? { article: key, net_weight: 0, boxes: 0 };
+      cur.net_weight += Number(b.net_weight) || 0;
+      cur.boxes += 1;
+      m.set(key, cur);
+    }
+    return [...m.values()].sort((a, b) => b.net_weight - a.net_weight);
+  }, [boxes]);
 
   const flashToast = useCallback((t: { kind: "ok" | "err"; text: string }) => {
     setToast(t);
@@ -281,6 +299,28 @@ export function RawMaterialTab({
           >
             ✕
           </button>
+        </div>
+      ) : null}
+
+      {/* RM issued, rolled up per article from the scanned net weights. */}
+      {issues.length > 0 ? (
+        <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
+          <div className="px-4 py-3 border-b border-[var(--aws-border)]">
+            <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">{issuesHeading}</h3>
+          </div>
+          <ul className="divide-y divide-[var(--aws-border)]">
+            {issues.map((it) => (
+              <li key={it.article} className="px-4 py-2.5 flex items-center justify-between gap-3">
+                <span className="text-[13px] text-[var(--text-primary)] break-all">{it.article}</span>
+                <span className="shrink-0 text-[13px] font-semibold text-[var(--text-primary)] tabular-nums">
+                  {it.net_weight.toFixed(3)} kg
+                  <span className="ml-2 text-[11px] font-normal text-[var(--text-muted)]">
+                    {it.boxes} box{it.boxes === 1 ? "" : "es"}
+                  </span>
+                </span>
+              </li>
+            ))}
+          </ul>
         </div>
       ) : null}
 
