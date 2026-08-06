@@ -435,6 +435,7 @@ export function BomPicker({ value, valueLabel, onChange, placeholder }: {
   const [query, setQuery] = useState("");
   const [rows, setRows] = useState<BomOption[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   // Browse tab — cascade over the article master joined to BOMs
   const [bType, setBType] = useState("");
   const [bGroup, setBGroup] = useState("");
@@ -455,8 +456,8 @@ export function BomPicker({ value, valueLabel, onChange, placeholder }: {
         if (cancelled) return;
         setLoading(true);
         searchBoms(query).then(
-          (r) => { if (!cancelled) { setRows(r); setLoading(false); } },
-          () => { if (!cancelled) setLoading(false); },
+          (r) => { if (!cancelled) { setRows(r); setError(null); setLoading(false); } },
+          (e) => { if (!cancelled) { setRows([]); setError(e?.message || "Couldn't load BOMs"); setLoading(false); } },
         );
       });
     }, 200);
@@ -546,8 +547,11 @@ export function BomPicker({ value, valueLabel, onChange, placeholder }: {
                 </div>
                 <ul className="max-h-56 overflow-auto py-1">
                   {loading && <li className="px-3 py-2 text-[12px] text-[var(--text-muted)]">Searching…</li>}
-                  {!loading && rows.map(bomRow)}
-                  {!loading && rows.length === 0 && (
+                  {!loading && error && (
+                    <li className="px-3 py-2 text-[12px] text-[var(--aws-error)]">{error}</li>
+                  )}
+                  {!loading && !error && rows.map(bomRow)}
+                  {!loading && !error && rows.length === 0 && (
                     <li className="px-3 py-2 text-[12px] text-[var(--text-muted)]">
                       {query.trim() ? "No matching BOMs." : "Type to search the BOM master."}
                     </li>

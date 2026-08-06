@@ -344,18 +344,15 @@ export async function browseBoms(params: BomBrowseParams): Promise<BomBrowseResu
   }
 }
 
-// Typeahead for the Base BOM picker. Swallows transport errors to an empty list
-// so the picker degrades to "no matches" rather than throwing in render.
+// Typeahead for the Base BOM picker. Throws on failure (with the server message
+// or an HTTP-status fallback) so the picker can show WHY it's empty — a silent
+// [] made a 401/404/500 look identical to "no BOMs", which is undiagnosable.
 export async function searchBoms(search: string): Promise<BomOption[]> {
-  try {
-    const q = new URLSearchParams({ limit: "30" });
-    if (search.trim()) q.set("search", search.trim());
-    const res = await apiFetch(`/api/v1/sample/boms?${q}`);
-    if (!res.ok) return [];
-    return (await res.json()) as BomOption[];
-  } catch {
-    return [];
-  }
+  const q = new URLSearchParams({ limit: "30" });
+  if (search.trim()) q.set("search", search.trim());
+  const res = await apiFetch(`/api/v1/sample/boms?${q}`);
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, `Couldn't load BOMs — HTTP ${res.status}`));
+  return (await res.json()) as BomOption[];
 }
 
 export async function createDevJobCard(body: DevJobCardCreate): Promise<DevJobCard> {
