@@ -532,6 +532,31 @@ function computeBatchSummary(
   };
 }
 
+// The RM/PM consumption catalogue computeBatchSummary keys against (RM vs PM
+// classification). Derived from the JC's BOM (falling back to indents), with the
+// SFG/WIP input line dropped on producer stages (it's the OUTPUT there, not a
+// consumable). Extracted so the Boxes tab can drive the same live accounting the
+// Accounting tab does, from the one detail object both tabs already share.
+function computeArticles(detail: JobCardDetail): BatchSummaryArticle[] {
+  const bom = detail.bom_lines ?? [];
+  let out: BatchSummaryArticle[];
+  if (bom.length > 0) {
+    out = bom.map((b) => ({
+      bom_line_id: b.bom_line_id,
+      material_sku_name: b.material_sku_name,
+      item_type: (b.item_type || "RM").toUpperCase(),
+      uom: b.uom || "kg",
+    }));
+  } else {
+    out = [];
+    for (const r of detail.rm_indents ?? []) out.push({ bom_line_id: r.bom_line_id ?? null, material_sku_name: r.material_sku_name ?? "Unknown", item_type: "RM", uom: r.uom || "kg" });
+    for (const p of detail.pm_indents ?? []) out.push({ bom_line_id: p.bom_line_id ?? null, material_sku_name: p.material_sku_name ?? "Unknown", item_type: "PM", uom: p.uom || "kg" });
+  }
+  const isProducer = ["SFG", "WIP"].includes((detail.output_kind ?? "").toUpperCase());
+  if (isProducer) out = out.filter((a) => a.item_type !== "SFG" && a.item_type !== "WIP");
+  return out;
+}
+
 // Off-Grade categories (renamed from "Rejection" per operator) — mirror
 // OutputAccountingFragment.REJ_KEYS / REJ_LABELS. R10/C6 — control_sample
 // is no longer an off-grade category; it has a dedicated "QC Sample" input
@@ -2468,7 +2493,7 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
   const canScan = useHasPermission("production", "job_cards", "material_scan", "scan");
 
   const [boxes, setBoxes] = useState<SfgBoxRow[]>([]);
-  const [batches, setBatches] = useState<BatchOpt[]>([]);
+  const [batches, setBatches] = useState<BatchRow[]>([]); // full rows — drives both the box grouping and the live accounting table
 
   const [loading, setLoading] = useState(true);   // mirrors Material-In's box fetch
   const [loadErr, setLoadErr] = useState<string | null>(null);
@@ -2476,6 +2501,7 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState<SfgScanResult | null>(null);
   const [scanErr, setScanErr] = useState<string | null>(null);
+  const [selBatch, setSelBatch] = useState<number | null>(null); // batch picked in the Accounting selector above the scanner
 
   const loadBoxes = useCallback(async () => {
     setLoading(true);
@@ -2506,7 +2532,7 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
       try {
         const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/batches`);
         if (!res.ok) return;
-        const data = (await res.json()) as { batches?: BatchOpt[] };
+        const data = (await res.json()) as { batches?: BatchRow[] };
         if (!cancelled) setBatches(Array.isArray(data.batches) ? data.batches : []);
       } catch { /* non-fatal */ }
     });
@@ -2548,11 +2574,96 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
     "border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white " +
     "disabled:opacity-50 disabled:cursor-not-allowed";
 
+  // Batch picked in the selector (defaults to the first accounting batch until
+  // the operator changes it). SFG/FG name is JC-level — shared by every batch.
+  const selectedBatchId = selBatch ?? batches[0]?.batch_id ?? null;
+  const fgName = detail.fg_sku_name || detail.output_code || "—";
+  // Live accounting, computed in the frontend — the SAME pure computeBatchSummary
+  // the Accounting tab uses, over the SAME shared `detail`. Recomputes whenever
+  // the batch rows or detail change (a box scan / save reloads both), so the
+  // numbers track the data as it loads. No server-stored percentages trusted;
+  // open batches balance live, closed batches show their persisted snapshot.
+  const articles = useMemo(() => computeArticles(detail), [detail]);
+  const perBatchSummaries = useMemo(
+    () => batches.map((b) => ({ batch: b, summary: computeBatchSummary(b, detail, articles) })),
+    [batches, detail, articles],
+  );
+
   return (
     <div className="space-y-4">
+      {/* Batch selector + LIVE accounting table, above the scanner. Batches come
+          from GET …/batches (job_card_batch_v2 — the Accounting tab's batches);
+          every kg column (input / output / loss / balance / is_balanced) is
+          recomputed client-side by computeBatchSummary, so it tracks live. */}
+      {batches.length > 0 ? (
+        <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-3 sm:p-4 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <label htmlFor="jc-batch-sel" className="text-[13px] font-semibold text-[var(--text-primary)]">Batch (from Accounting)</label>
+            <select
+              id="jc-batch-sel"
+              value={selectedBatchId ?? ""}
+              onChange={(e) => setSelBatch(e.target.value === "" ? null : Number(e.target.value))}
+              className="h-8 min-w-[180px] px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
+            >
+              {batches.map((b) => (
+                <option key={b.batch_id} value={b.batch_id}>
+                  {b.batch_label?.trim() || `Batch ${b.batch_number}`}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-[13px]">
+              <thead>
+                <tr className="text-left text-[11px] uppercase tracking-wide text-[var(--text-muted)] border-b border-[var(--aws-border)]">
+                  <th className="py-1.5 pr-3 font-semibold">Batch</th>
+                  <th className="py-1.5 pr-3 font-semibold">SFG / FG</th>
+                  <th className="py-1.5 pr-3 font-semibold text-right">Input</th>
+                  <th className="py-1.5 pr-3 font-semibold text-right">Output</th>
+                  <th className="py-1.5 pr-3 font-semibold text-right">Loss</th>
+                  <th className="py-1.5 pr-3 font-semibold text-right">Balance</th>
+                  <th className="py-1.5 font-semibold">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {perBatchSummaries.map(({ batch: b, summary: s }) => {
+                  const input = _num(b.input_qty_kg) || s.rmConsumedKg;
+                  const units = b.fg_actual_units == null ? null : Number(b.fg_actual_units);
+                  const sel = b.batch_id === selectedBatchId;
+                  return (
+                    <tr key={b.batch_id} className={`border-b border-[var(--aws-border)] last:border-0 ${sel ? "bg-[#fff4e6]" : ""}`}>
+                      <td className="py-1.5 pr-3 text-[var(--text-primary)]">{b.batch_label?.trim() || `Batch ${b.batch_number}`}</td>
+                      <td className="py-1.5 pr-3 text-[var(--text-primary)] break-all">{fgName}</td>
+                      <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-[var(--text-primary)]">{input > 0 ? `${input.toFixed(3)} kg` : "—"}</td>
+                      <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-[var(--text-primary)]">
+                        {s.fgOutKg > 0 ? `${s.fgOutKg.toFixed(3)} kg` : "—"}{units != null && Number.isFinite(units) && units > 0 ? ` · ${units}u` : ""}
+                      </td>
+                      <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-[var(--text-primary)]">{s.lossKg > 0 ? `${s.lossKg.toFixed(3)} kg` : "—"}</td>
+                      <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-[var(--text-primary)]">
+                        {s.balanceDiff != null ? `${s.balanceDiff > 0 ? "+" : ""}${s.balanceDiff.toFixed(3)} kg` : "—"}
+                      </td>
+                      <td className="py-1.5">
+                        {s.isBalanced == null ? (
+                          <span className="text-[11px] text-[var(--text-muted)]">—</span>
+                        ) : s.isBalanced ? (
+                          <span className="inline-block rounded-full bg-[#eaf6ed] px-2 py-0.5 text-[11px] font-semibold text-[var(--text-success)]">Balanced</span>
+                        ) : (
+                          <span className="inline-block rounded-full bg-[#fdecea] px-2 py-0.5 text-[11px] font-semibold text-[var(--text-danger)]">Off-balance</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
       {/* Same box-scan feature as the Raw Material tab (store / list / ✕ delete /
           count+article+weight / duplicate guard), scanning boxes into this JC. */}
-      <BoxScanPanel jcId={jcId} scanTitle="Scan Box QR" listHeading="Scanned boxes" emptyHint="Scan a box QR to add it." />
+      <BoxScanPanel jcId={jcId} scanTitle="Scan Box QR" listHeading="Scanned boxes" emptyHint="Scan a box QR to add it." issuesHeading="Boxed (per article)" />
 
       {!isProducer && !isConsumer && (
         <EmptyHint>This stage neither produces nor consumes SFG — no boxes apply.</EmptyHint>
@@ -3424,40 +3535,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   // backend's bom_lines (surfaced on every stage); fallback is the per-JC
   // indent rows (rm_indents + pm_indents) — same fallback the Java code
   // uses when bom_lines is empty.
-  const articles: { bom_line_id: number | null; material_sku_name: string; item_type: string; uom: string }[] =
-    useMemo(() => {
-      const bom = detail.bom_lines ?? [];
-      let out: { bom_line_id: number | null; material_sku_name: string; item_type: string; uom: string }[];
-      if (bom.length > 0) {
-        out = bom.map((b) => ({
-          bom_line_id: b.bom_line_id,
-          material_sku_name: b.material_sku_name,
-          // W3-CRIT-1 — normalise to canonical UPPERCASE so the EGA-RM
-          // filter (rmArticles) and the rm/pm consumption split below
-          // both agree. A lowercase 'pm' from the backend used to fall
-          // through the `=== 'PM'` test and silently route into
-          // rm_consumed, corrupting the variance / cost split.
-          item_type: (b.item_type || "RM").toUpperCase(),
-          uom: b.uom || "kg",
-        }));
-      } else {
-        out = [];
-        for (const r of detail.rm_indents ?? []) out.push({ bom_line_id: r.bom_line_id ?? null, material_sku_name: r.material_sku_name ?? "Unknown", item_type: "RM", uom: r.uom || "kg" });
-        for (const p of detail.pm_indents ?? []) out.push({ bom_line_id: p.bom_line_id ?? null, material_sku_name: p.material_sku_name ?? "Unknown", item_type: "PM", uom: p.uom || "kg" });
-      }
-      // Slice 4: bom_lines surface on every stage (same bom_id), so the SFG/WIP
-      // input line also rides onto the SFG-PRODUCING stage (Create-WIP), where
-      // the SFG is the OUTPUT — not a consumable input. Drop it from the
-      // consumption catalogue on producer stages (output_kind SFG/WIP) so it
-      // can't be typed, returned, or counted as input there. The consumer stage
-      // (output_kind FG / pack-of-existing-SFG) keeps it. Mirrors the isProducer
-      // test used by the Boxes/Create-WIP panels.
-      const isProducer = ["SFG", "WIP"].includes((detail.output_kind ?? "").toUpperCase());
-      if (isProducer) {
-        out = out.filter((a) => a.item_type !== "SFG" && a.item_type !== "WIP");
-      }
-      return out;
-    }, [detail]);
+  const articles = useMemo(() => computeArticles(detail), [detail]);
 
   // ── Initial state — R10 per-batch scoped.  Previously sourced from
   // section_5_output (JC-level), which carried Batch 1's saved FG /

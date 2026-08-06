@@ -21,12 +21,16 @@ import { printSfgBoxLabels } from "./_sfgBoxLabelPrint";
 const DISPLAY = 10; // boxes shown per page in a group
 
 export type BatchOpt = {
-  batch_id: number; batch_label: string | null; batch_number: number; status: string;
+  batch_id: number; batch_label?: string | null; batch_number: number; status: string;
   // Accounting weights (from GET /batches → job_card_batch_v2). The cap a batch's
   // box net must not exceed is the first of these that is set and > 0.
   produced_qty_kg?: number | string | null;
   input_qty_kg?: number | string | null;
   planned_qty_kg?: number | string | null;
+  // Actual output the batch was closed with (accounting). Output qty = the first
+  // of fg_actual_kg / produced_qty_kg that is set. In the /batches payload already.
+  fg_actual_kg?: number | string | null;
+  fg_actual_units?: number | string | null;
 };
 function batchOptLabel(b: BatchOpt): string {
   return b.batch_label?.trim() || `Batch ${b.batch_number}`;
