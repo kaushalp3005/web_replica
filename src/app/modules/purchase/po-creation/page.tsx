@@ -9,7 +9,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useRequireAuth, useHasPermission } from "@/lib/user";
+import { useRequireAuth, useHasPermission, useRequireModuleAccess } from "@/lib/user";
 import {
   type PreviewResponse,
   type CommitResponse,
@@ -57,6 +57,9 @@ function advKey(q: PoListQuery): string {
 export default function PoCreationPage(): React.JSX.Element {
   const router = useRouter();
   const authed = useRequireAuth(router.replace);
+  // A role scoped to another Purchase sub-route (store_head → Material In only)
+  // gets bounced to /modules when it deep-links here.
+  useRequireModuleAccess("purchase/po-creation", router.replace);
 
   // Permission gate (UX only — server still enforces). Upload/preview a PO
   // maps to purchase/po/create.

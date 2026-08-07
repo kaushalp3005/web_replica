@@ -4,7 +4,9 @@
 // PO Upload is the purchase entry point on the web.
 
 import { useRouter } from "next/navigation";
-import { useRequireAuth, useHasRole } from "@/lib/user";
+import { useRequireAuth, useHasRole, useMe, useIsAdmin } from "@/lib/user";
+import { roleNamesOf } from "@/lib/sample-roles";
+import { scopeAllowsRoute } from "@/lib/modules";
 import { BackLink } from "@/components/BackLink";
 import { PurchaseChrome } from "./_chrome";
 
@@ -29,6 +31,15 @@ export default function PurchaseLandingPage() {
   const isStoreHead = useHasRole("store_head");
   const canAccess = isPurchaseManager || isStoreHead;
 
+  // Per-sub-tile scope, same pattern as production/page.tsx: a role scoped to a
+  // sub-route (store_head → "purchase/material-in") reaches the tile but only
+  // its own screens. Unscoped roles + admins keep seeing all three.
+  const isAdmin = useIsAdmin();
+  const roles = roleNamesOf(useMe());
+  const visible = SUB_MODULES.filter(
+    (m) => scopeAllowsRoute(roles, isAdmin, m.route.replace("/modules/", "")),
+  );
+
   return (
     <PurchaseChrome title="Purchase">
       <div className="mb-3">
@@ -46,7 +57,7 @@ export default function PurchaseLandingPage() {
         </section>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {SUB_MODULES.map((m) => (
+          {visible.map((m) => (
             <button
               key={m.route}
               onClick={() => router.push(m.route)}

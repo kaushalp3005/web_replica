@@ -248,9 +248,14 @@ export const MODULES: ModuleItem[] = [
 // scoped. A user holding several scoped roles gets the union of their routes.
 export const ROLE_MODULE_SCOPE: Record<string, string[]> = {
   purchase_manager: ["purchase"],
-  // store_head = stores/Material-In clerk. Scope to the Purchase tile (Material
-  // In lives under it); the scope also overrides Purchase's adminOnly flag.
-  store_head:    ["purchase"],
+  // store_head = stores/Material-In clerk: receiving ONLY. Scoped to the
+  // material-in sub-route, not the whole tile — the Purchase tile still shows
+  // (a sub-route keeps its parent visible, see scopeAllowsRoute) but PO Upload
+  // and Vendor Management are hidden and their routes bounce. Mirrors the
+  // backend, where 085 grants store_head purchase.material_in.* and nothing
+  // else, so purchase.po.* / vendor.* would 403 anyway. The scope also
+  // overrides Purchase's adminOnly flag.
+  store_head:    ["purchase/material-in"],
   // Scoped production roles. Keys are either a top-level module route
   // ("job-card") or a "<module>/<sub>" sub-route for finer gating WITHIN a
   // landing page — SO Creation / Planning / Plan List all live under the one

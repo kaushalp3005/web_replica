@@ -5,7 +5,7 @@
 // vendors / detail / evaluation still live only in the desktop app.
 
 import { useRouter } from "next/navigation";
-import { useRequireAuth } from "@/lib/user";
+import { useRequireAuth, useRequireModuleAccess } from "@/lib/user";
 import { BackLink } from "@/components/BackLink";
 import { PurchaseChrome } from "../_chrome";
 
@@ -31,6 +31,8 @@ export default function VendorManagementLandingPage(): React.JSX.Element {
   // the sibling purchase/page.tsx so the SSR HTML and first client paint match
   // and there's no hydration mismatch. There's no on-mount fetch to guard here.
   useRequireAuth(router.replace);
+  // Stores (store_head) is scoped to Material In only — deep links bounce.
+  useRequireModuleAccess("purchase/vendor-management", router.replace);
 
   return (
     <PurchaseChrome title="Vendor Management">
