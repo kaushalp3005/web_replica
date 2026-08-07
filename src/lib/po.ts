@@ -282,12 +282,16 @@ export async function sendQcIntimation(transactionNo: string, body: QcIntimation
 // ── Walk-in (no-PO) Purchase Intimation ──────────────────────────────────────
 // Articles are chosen from the global SKU master (/api/v1/so/sku-lookup); the
 // backend records the arrival with po_number=null under a generated WI-* txn.
-export interface WalkInIntimationItem { sku_id?: number | null; sku_name: string; }
+// rate = ₹/kg, qty = kgs. GST% is looked up server-side from all_sku, so the
+// Base Value / GST Value columns in the WhatsApp intimation can't be spoofed.
+export interface WalkInIntimationItem { sku_id?: number | null; sku_name: string; rate?: number; qty?: number; }
 export interface WalkInIntimationBody {
   entity?: string; // "cfpl" | "cdpl"
   vendor_name?: string;
   vehicle_number?: string;
   invoice_no?: string;
+  warehouse?: string;
+  indentor?: string; // defaults to the signed-in user's name server-side
   items: WalkInIntimationItem[];
 }
 export interface WalkInIntimationResult extends QcIntimationResult {
