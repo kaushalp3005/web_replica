@@ -456,9 +456,10 @@ function computeBatchSummary(
     (s, [k, v]) => s + (isRmKey(k) ? _num(v) : 0),
     0,
   );
-  // Balance materials
+  // Balance materials — "returned to store". PM (pcs) is packaging; it never
+  // enters the kg balance, so only RM articles sum in (mirrors rmConsumedKg).
   const balance = balanceStateFromDetail(detail.balance_materials, batchId);
-  const balTotal = Object.values(balance).reduce((s, v) => s + _num(v), 0);
+  const balTotal = Object.entries(balance).reduce((s, [k, v]) => s + (isRmKey(k) ? _num(v) : 0), 0);
   // Off-grade (excluding wastage and control_sample) + wastage
   const rejections = rejectionsFromDetail(detail.byproducts, detail.balance_materials, batchId);
   const offgradeTotal = rejections.reduce(
@@ -3536,6 +3537,12 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   // indent rows (rm_indents + pm_indents) — same fallback the Java code
   // uses when bom_lines is empty.
   const articles = useMemo(() => computeArticles(detail), [detail]);
+  // RM vs PM split for the "Returned to store" inputs: RM returns are kg and
+  // feed the mass-balance; PM returns are pcs and get their own per-article
+  // accounting, kept out of the kg balance.
+  const isPmArticle = (a: BatchSummaryArticle) => (a.item_type || "").toUpperCase() === "PM";
+  const rmArticles = useMemo(() => articles.filter((a) => !isPmArticle(a)), [articles]);
+  const pmArticles = useMemo(() => articles.filter(isPmArticle), [articles]);
 
   // ── Initial state — R10 per-batch scoped.  Previously sourced from
   // section_5_output (JC-level), which carried Batch 1's saved FG /
@@ -4176,7 +4183,6 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       (acc, r) => acc + (r.category === "wastage" ? num(r.qty) : 0),
       0,
     );
-    const balTotal = Object.values(balance).reduce((acc, v) => acc + num(v), 0);
     const offgradeTotal = rejTotal; // off-grade = non-control, non-wastage rejections
     const fgOutKg = num(fgActualKg);
     const rawProcessLoss = num(processLoss);
@@ -4211,6 +4217,12 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       if (!a) return true;
       return (a.item_type || "").toUpperCase() !== "PM";
     };
+    // Returned-to-store kg total: RM only. PM (pcs) is packaging — it never
+    // enters the kg balance; PM returns are surfaced separately, per article.
+    const balTotal = Object.entries(balance).reduce(
+      (acc, [key, v]) => acc + (isRmKey(key) ? num(v) : 0),
+      0,
+    );
     const rmConsumptionTotal = Object.entries(consumption).reduce(
       (acc, [key, v]) => acc + (isRmKey(key) ? num(v) : 0),
       0,
@@ -4740,7 +4752,10 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
           (acc, r) => acc + (r.category === "wastage" ? num(r.qty) : 0),
           0,
         );
-        const balForSave = Object.values(balance).reduce((a, v) => a + num(v), 0);
+        // RM only — PM (pcs) returns are packaging, kept out of the kg
+        // balance_material_qty. They still persist as balance_materials rows
+        // (saved per article below) and show in the PM returns section.
+        const balForSave = Object.entries(balance).reduce((a, [k, v]) => a + (_isRmKey(k) ? num(v) : 0), 0);
         const fgUnitsVal = fgActualUnits.trim() === "" ? null : parseInt(fgActualUnits, 10);
         // Guard against the silent zero-input class of bugs: when
         // total_input_qty is 0 AND any output-side field is non-zero
@@ -5608,7 +5623,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
           <EmptyHint>No BOM articles attached to this job card.</EmptyHint>
         ) : (
           <div className="space-y-2">
-            {articles.map((a) => {
+            {rmArticles.map((a) => {
               const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
               return (
                 <div key={key} className="grid grid-cols-12 gap-2 items-center">
@@ -5629,8 +5644,46 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                 </div>
               );
             })}
+            {rmArticles.length === 0 ? (
+              <EmptyHint>No raw-material articles — see the PM section below.</EmptyHint>
+            ) : null}
           </div>
         )}
+
+        {/* PM returned to store — separate per-article accounting, in the item's
+            own unit (pcs/roll/…). Packaging material never enters the kg
+            mass-balance above; each PM article is counted on its own. */}
+        {pmArticles.length > 0 ? (
+          <>
+            <SubsectionLabel>Returned to store — PM (per article)</SubsectionLabel>
+            <p className="text-[11px] text-[var(--text-muted)] italic mb-2">
+              Packaging material is counted per article in its own unit — kept out of the kg balance.
+            </p>
+            <div className="space-y-2">
+              {pmArticles.map((a) => {
+                const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
+                return (
+                  <div key={key} className="grid grid-cols-12 gap-2 items-center">
+                    <div className="col-span-7 sm:col-span-8 text-[13px] text-[var(--text-primary)] truncate" title={a.material_sku_name}>
+                      {a.material_sku_name} <span className="text-[11px] text-[var(--text-muted)]">(PM)</span>
+                    </div>
+                    <input
+                      type="number" step="any" placeholder="0"
+                      className={`${inputCls} col-span-4 sm:col-span-3`}
+                      value={balance[key] ?? ""}
+                      onChange={(e) => { markSectionDirty("balance"); setBalance((b) => ({ ...b, [key]: e.target.value })); }}
+                      onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
+                      disabled={inputsDisabled}
+                      aria-disabled={inputsDisabled}
+                      aria-describedby={describedBy}
+                    />
+                    <span className="col-span-1 text-[11px] text-[var(--text-muted)]">{a.uom}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        ) : null}
       </Panel>
 
       {/* ── PM Variance (R11/C7) — packing stages only ──────────────────── */}
