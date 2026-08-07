@@ -346,6 +346,9 @@ export interface CrEmailRouting {
   warehouse_cc: { match_key: string; match_type: string; email: string }[];
   constant_cc: string[];
   notify_to: string | null;
+  // Standing deputies who hold the same Approve/Reject/Hold buttons as the CR's
+  // Business Head, so a return still closes the same day when the primary is away.
+  deputy_approver: { name: string; email: string }[];
 }
 
 export function getCrEmailRouting(): Promise<CrEmailRouting> {

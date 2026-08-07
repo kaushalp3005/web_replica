@@ -131,7 +131,10 @@ export default function CustomerReturnApprovePage() {
   // Terminal states can't be re-decided (backend treats them as already-actioned);
   // On Hold is still actionable. Drives whether the decision UI shows at all.
   const alreadyDecided = status === "Approved" || status === "Rejected";
-  const canDecide = !!recipients.approver && !alreadyDecided; // needs a mapped BH + a non-terminal status
+  // Needs SOMEONE who can approve (mapped BH or a standing deputy) + a non-terminal
+  // status. A CR with an unmapped BH is still actionable now — the deputies hold the
+  // same buttons, which is the point of having them.
+  const canDecide = recipients.approvers.length > 0 && !alreadyDecided;
   // Box entry is independent of the approval matrix — available on any real record,
   // regardless of status. Only the fixture fallback (no live CR) can't be edited.
   const boxesUnlocked = !usingSample;
@@ -150,7 +153,7 @@ export default function CustomerReturnApprovePage() {
       if (res.already_actioned) {
         setDecision(`This return was already “${res.status}” — no change applied.`);
       } else {
-        const actor = formatActor(routing, recipients.approver!.email);
+        const actor = formatActor(routing, (recipients.approver ?? recipients.approvers[0]).email);
         setDecision(
           `Marked “${res.status}” (attributed to ${actor})${remark ? ` · remark: “${remark}”` : ""}. ` +
             `A threaded mail was sent To ${recipients.to.join(", ")} and Cc ${recipients.cc.length} recipient` +
@@ -338,20 +341,31 @@ export default function CustomerReturnApprovePage() {
         <div className="space-y-4">
           {/* Approver */}
           <section className="bg-white border border-[var(--aws-border)] rounded-md p-4">
-            <h2 className="text-[13px] font-semibold text-[var(--text-primary)] mb-3">Approver</h2>
-            {recipients.approver ? (
-              <div className="rounded-md border border-[#b6dbb1] bg-[#f4faf5] px-3 py-2.5">
-                <div className="text-[13px] font-semibold text-[var(--text-primary)]">{recipients.approver.name}</div>
-                <div className="text-[12px] text-[var(--text-secondary)] break-all">{recipients.approver.email}</div>
-                <div className="text-[11px] text-[var(--text-secondary)] mt-1.5">
-                  Only the mapped Business Head receives the Approve / Reject / Hold buttons by mail — the decision is
-                  attributed to this address.
-                </div>
+            <h2 className="text-[13px] font-semibold text-[var(--text-primary)] mb-3">Approvers</h2>
+            {recipients.approvers.length > 0 ? (
+              <div className="space-y-2">
+                {recipients.approvers.map((a, i) => (
+                  <div key={a.email} className="rounded-md border border-[#b6dbb1] bg-[#f4faf5] px-3 py-2.5">
+                    <div className="text-[13px] font-semibold text-[var(--text-primary)]">
+                      {a.name}
+                      <span className="ml-2 text-[11px] font-normal text-[var(--text-secondary)]">
+                        {i === 0 && recipients.approver ? "Business Head" : "Deputy"}
+                      </span>
+                    </div>
+                    <div className="text-[12px] text-[var(--text-secondary)] break-all">{a.email}</div>
+                  </div>
+                ))}
+                <p className="text-[11px] text-[var(--text-secondary)]">
+                  Each of these receives the Approve / Reject / Hold buttons by mail and WhatsApp, so a return still
+                  closes the same day when the Business Head is unavailable. Whoever decides first is the decision;
+                  a later click is reported as already actioned.
+                </p>
               </div>
             ) : (
               <div className="rounded-md border border-[#ecd9a3] bg-[#fdf6e3] px-3 py-2.5 text-[12px] text-[#8a6d1a]">
-                No business head is mapped to an email, so this return has no mail approver and cannot be actioned.
-                Set a mapped Business Head ({data.business_head || "none"} is not in the map) on the detail screen first.
+                No business head is mapped to an email and no deputy approver is configured, so this return has no mail
+                approver and cannot be actioned. Set a mapped Business Head ({data.business_head || "none"} is not in
+                the map) on the detail screen first.
               </div>
             )}
           </section>
@@ -360,7 +374,7 @@ export default function CustomerReturnApprovePage() {
           <section className="bg-white border border-[var(--aws-border)] rounded-md p-4">
             <h2 className="text-[13px] font-semibold text-[var(--text-primary)] mb-1">Notification Matrix</h2>
             <p className="text-[11px] text-[var(--text-secondary)] mb-3">Who the decision mail would reach.</p>
-            <RecipientList label="To" emails={recipients.to} approverEmail={recipients.approver?.email} />
+            <RecipientList label="To" emails={recipients.to} approverEmails={recipients.approvers.map((a) => a.email)} />
             <div className="mt-3">
               <RecipientList label={`Cc (${recipients.cc.length})`} emails={recipients.cc} />
             </div>
@@ -449,7 +463,8 @@ export default function CustomerReturnApprovePage() {
   );
 }
 
-function RecipientList({ label, emails, approverEmail }: { label: string; emails: string[]; approverEmail?: string }) {
+function RecipientList({ label, emails, approverEmails }: { label: string; emails: string[]; approverEmails?: string[] }) {
+  const approvers = new Set((approverEmails ?? []).map((a) => a.toLowerCase()));
   return (
     <div>
       <div className="text-[11px] font-medium text-[var(--text-secondary)] uppercase tracking-wide mb-1.5">{label}</div>
@@ -458,7 +473,7 @@ function RecipientList({ label, emails, approverEmail }: { label: string; emails
       ) : (
         <div className="flex flex-wrap gap-1.5">
           {emails.map((e) => {
-            const isApprover = approverEmail && e.toLowerCase() === approverEmail.toLowerCase();
+            const isApprover = approvers.has(e.toLowerCase());
             return (
               <span
                 key={e}
@@ -468,7 +483,7 @@ function RecipientList({ label, emails, approverEmail }: { label: string; emails
                     ? "bg-[#eaf6ed] text-[var(--text-success)] border-[#b6dbb1] font-medium"
                     : "bg-[var(--background)] text-[var(--text-secondary)] border-[var(--aws-border)]")
                 }
-                title={isApprover ? "Approver (Business Head)" : undefined}
+                title={isApprover ? "Approver — receives the action buttons" : undefined}
               >
                 {isApprover ? "★ " : ""}{e}
               </span>

@@ -5,8 +5,9 @@
 // lives here now — who is TO / CC / approver, and the warehouse-canonicalization
 // test — with the values passed in.
 //
-// The rule that matters is unchanged: only the mapped Business Head receives the
-// action buttons, so the BH is THE approver; everyone else is TO(notify_to)/CC.
+// The rule: the mapped Business Head AND the standing deputy approvers receive the
+// action buttons; everyone else is TO(notify_to)/CC. The BH remains THE approver
+// for display — the deputies act only when the primary does not.
 
 import { normalizeWarehouseName } from "@/lib/transferBuildSummary";
 import type { CrEmailRouting } from "@/lib/customer-returns";
@@ -15,6 +16,7 @@ import type { CrEmailRouting } from "@/lib/customer-returns";
 // fails): no approver, no recipients, so the UI degrades to "cannot be actioned".
 export const EMPTY_ROUTING: CrEmailRouting = {
   business_head: [], sales_poc: [], warehouse_cc: [], constant_cc: [], notify_to: null,
+  deputy_approver: [],
 };
 
 // Case-insensitive display-name -> email over a [{name,email}] list.
@@ -76,20 +78,29 @@ export interface CRRecipientHeader {
 }
 
 export interface ApprovalRecipients {
-  approver: { name: string; email: string } | null; // the BH — gets the buttons
-  to: string[]; // TO line (approver + notify_to)
+  approver: { name: string; email: string } | null; // the BH — displayed as THE approver
+  approvers: { name: string; email: string }[]; // everyone holding buttons, BH first
+  to: string[]; // TO line (approvers + notify_to)
   cc: string[]; // deduped CC line
 }
 
-// Resolve the recipient matrix exactly like the legacy notify_rtv_created: the
-// mapped BH (if any) leads the TO alongside notify_to and is the sole approver;
-// CC = sales POC (mapped + manual) + constants + creator + warehouse owner,
-// deduped, with the TO addresses (and the approver) removed.
+// Resolve the recipient matrix, mirroring the backend mail_service.resolve_recipients:
+// the mapped BH (if any) plus the standing deputies lead the TO alongside notify_to
+// and are the approvers; CC = sales POC (mapped + manual) + constants + creator +
+// warehouse owner, deduped, with the TO addresses removed.
 export function resolveRecipients(routing: CrEmailRouting, h: CRRecipientHeader): ApprovalRecipients {
   const bhEmail = lookupBusinessHeadEmail(routing, h.business_head);
   const approver = bhEmail ? { name: (h.business_head || "").trim() || bhEmail, email: bhEmail } : null;
 
-  const to = [...(bhEmail ? [bhEmail] : []), ...(routing.notify_to ? [routing.notify_to] : [])];
+  const approvers = approver ? [approver] : [];
+  for (const d of routing.deputy_approver ?? []) {
+    const email = (d.email || "").trim();
+    if (email && !approvers.some((a) => a.email.trim().toLowerCase() === email.toLowerCase())) {
+      approvers.push({ name: (d.name || "").trim() || email, email });
+    }
+  }
+
+  const to = [...approvers.map((a) => a.email), ...(routing.notify_to ? [routing.notify_to] : [])];
   const toLower = new Set(to.map((a) => a.trim().toLowerCase()));
 
   const candidates: string[] = [];
@@ -109,7 +120,7 @@ export function resolveRecipients(routing: CrEmailRouting, h: CRRecipientHeader)
     seen.add(n);
     cc.push(addr.trim());
   }
-  return { approver, to, cc };
+  return { approver, approvers, to, cc };
 }
 
 // ── Runnable self-check (ponytail: one assert-based demo for the routing) ──
@@ -128,10 +139,14 @@ export function demo(): void {
       { name: "Shubham Seth", email: "shubham.seth@candorfoods.in" },
       { name: "B Hrithik", email: "b.hrithik@candorfoods.in" },
     ],
-    constant_cc: ["billing@candorfoods.in", "yash@candorfoods.in"],
+    constant_cc: ["billing@candorfoods.in", "yash@candorfoods.in", "rmpatil@candorfoods.in"],
     warehouse_cc: [
       { match_key: "savla", match_type: "substring", email: "vaibhav.kumkar@candorfoods.in" },
       { match_key: "a68", match_type: "code", email: "pankaj.ranga@candorfoods.in" },
+    ],
+    deputy_approver: [
+      { name: "Satyendra Kumar Garg", email: "satyendra@candorfoods.in" },
+      { name: "R M Patil", email: "rmpatil@candorfoods.in" },
     ],
   };
 
@@ -146,6 +161,12 @@ export function demo(): void {
   });
   assert(r.approver?.email === "yash@candorfoods.in", "approver = BH email");
   assert(r.to[0] === "yash@candorfoods.in" && r.to.includes("pooja.parkar@candorfoods.in"), "TO = BH + notify_to");
+  // Deputies hold buttons too, and lead TO with the BH — so they must not also
+  // appear in CC (rmpatil is a constant CC as well; TO wins, one copy each).
+  assert(r.approvers.map((a) => a.email).join() ===
+    "yash@candorfoods.in,satyendra@candorfoods.in,rmpatil@candorfoods.in", "approvers = BH then deputies");
+  assert(r.to.includes("satyendra@candorfoods.in") && r.to.includes("rmpatil@candorfoods.in"), "deputies in TO");
+  assert(!r.cc.some((a) => a.toLowerCase() === "rmpatil@candorfoods.in"), "deputy not duplicated into CC");
   assert(r.cc.includes("shubham.seth@candorfoods.in"), "POC email in CC");
   assert(r.cc.includes("vaibhav.kumkar@candorfoods.in"), "cold warehouse CC (bare D-39 canonicalized)");
   assert(r.cc.includes("warehouse@candorfoods.in"), "creator in CC");
@@ -163,15 +184,27 @@ export function demo(): void {
   assert(warehouseCcEmail(routing, "A-68") === "pankaj.ranga@candorfoods.in", "A68 -> stores CC");
   assert(warehouseCcEmail(routing, "Random Unit") === null, "unmapped unit -> no warehouse CC");
 
-  // No mapped BH -> no approver, TO is notify_to only.
+  // No mapped BH -> no primary approver, but the deputies still hold the buttons:
+  // an unmapped BH used to mean the return could not be actioned from the mail at all.
   const r2 = resolveRecipients(routing, { business_head: "Someone Else", factory_unit: "A-68" });
-  assert(r2.approver === null, "unmapped BH -> no approver");
-  assert(r2.to.length === 1 && r2.to[0] === "pooja.parkar@candorfoods.in", "TO = notify_to only");
+  assert(r2.approver === null, "unmapped BH -> no primary approver");
+  assert(r2.approvers.length === 2 && r2.approvers[0].email === "satyendra@candorfoods.in",
+    "unmapped BH -> deputies still approve");
+  assert(r2.to.includes("pooja.parkar@candorfoods.in") && r2.to.includes("satyendra@candorfoods.in"),
+    "TO = deputies + notify_to");
   assert(r2.cc.includes("pankaj.ranga@candorfoods.in"), "A68 warehouse CC");
+
+  // A deputy who is also the CR's own BH is one approver, not two.
+  const rDup = resolveRecipients(
+    { ...routing, business_head: [{ name: "Satyendra Kumar Garg", email: "satyendra@candorfoods.in" }] },
+    { business_head: "Satyendra Kumar Garg" });
+  assert(rDup.approvers.filter((a) => a.email === "satyendra@candorfoods.in").length === 1,
+    "BH who is also a deputy is not duplicated");
 
   // Empty routing -> nothing resolves (graceful degrade before the fetch lands).
   const rEmpty = resolveRecipients(EMPTY_ROUTING, { business_head: "Yash Gawdi", factory_unit: "D-39" });
-  assert(rEmpty.approver === null && rEmpty.to.length === 0 && rEmpty.cc.length === 0, "empty routing -> nothing");
+  assert(rEmpty.approver === null && rEmpty.approvers.length === 0
+    && rEmpty.to.length === 0 && rEmpty.cc.length === 0, "empty routing -> nothing");
 
   assert(formatActor(routing, "b.hrithik@candorfoods.in") === "B Hrithik (b.hrithik@candorfoods.in)", "actor known name");
   assert(formatActor(routing, "jane.doe@x.com") === "Jane Doe (jane.doe@x.com)", "actor derived name");
