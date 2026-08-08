@@ -113,6 +113,53 @@ export type ProcessClass = {
   producesSfg: boolean;
 };
 
+// ── Stage-wise material hierarchy: which stages consume PM ─────────────────
+// A BOM's PM articles belong to the packing / cartoning family of stages only.
+// Every other stage (Sorting, Roasting, Mixing, …) opens on RM or on the SFG
+// carried in from the previous stage, and must NOT render PM inputs — empty PM
+// fields on a Sorting card are what let PM consumption get booked against a
+// process stage (312 such rows exist in production today).
+//
+// Deliberately a SEPARATE list from _TERMINAL above, not a reuse: _TERMINAL
+// drives classifySteps' stage bucketing, it is missing "packing" (the single
+// most common process name in the route master), and widening it there would
+// shift Create-WIP/Final-FG classification for every caller. A handful of
+// duplicated strings is the smaller blast radius.
+// ponytail: plain substring match, same idiom as job_card_v2.is_packing_stage.
+// Upgrade path is an explicit stage catalogue keyed on process_name.
+// "pack" (not "packing"/"packaging") is deliberate: it also catches the
+// archetype-C step "Create WIP: (pack of existing SFG)", which packs an
+// existing SFG into FG and therefore does consume PM. No non-packing process
+// in PROCESS_OPTIONS or in the live route master contains the substring.
+//
+// Krugger / X-ray / Weighing are deliberately ABSENT even though _TERMINAL
+// above buckets them as "Packaging": operator spec is packing + mono carton +
+// master carton only, and on a real 6-step chain (Sorting → Roasting →
+// Weighing → Mixing → Krugger → Packaging) those three run as SFG → WIP
+// transforms with Packaging as the sole terminal step. Add a token back here
+// if a line genuinely issues packaging material at one of them — the
+// output_kind='FG' fallback in page.tsx already covers the case where such a
+// step is itself the terminal card.
+const _PM_BEARING_TOKENS = [
+  "pack", "monocarton", "mono carton", "master carton", "flow wrap",
+];
+
+// True when a job card's stage consumes packaging material. Takes any number of
+// name sources (process_name, stage) because the two disagree in live data —
+// e.g. stage='packaging' with process_name='Sorting + Packing'. Matching is
+// containment, so COMBINED cards ("Sorting + Packaging", "Flavouring (Bulk
+// Packaging") stay PM-bearing: they really do pack. Underscores normalise to
+// spaces so the stage token ('master_carton') matches the same list as the
+// process name ('Master Carton').
+//
+// Mirrored server-side by job_card_v2.is_pm_bearing_stage — keep the two token
+// lists in step, or the client will offer PM inputs the server rejects.
+export function isPmBearingStage(...names: (string | null | undefined)[]): boolean {
+  const hay = names.filter(Boolean).join(" ").toLowerCase().replace(/_/g, " ");
+  if (!hay.trim()) return false;
+  return _PM_BEARING_TOKENS.some((t) => hay.includes(t));
+}
+
 // Classify an FG's ORDERED steps (combine-aware: Roasting + a seasoning token
 // ⇒ the Roasting step becomes the combined "Roast & Flavour/Salt").
 export function classifySteps(stepNames: (string | null | undefined)[]): ProcessClass[] {
