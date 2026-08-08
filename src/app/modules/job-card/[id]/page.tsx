@@ -28,7 +28,7 @@ import { useParams, useRouter } from "next/navigation";
 import { apiFetch, readApiErrorMessage, userStore } from "@/lib/auth";
 import { useHasPermission, useIsAdmin, useMe, useRequireAuth, useUserInitial } from "@/lib/user";
 import { BALANCE_TOLERANCE_KG, WEIGHT_SAMPLE_COUNT } from "@/lib/constants";
-import { classifyProcess, classifySteps, STAGE_CREATE_WIP } from "@/lib/processCatalog";
+import { classifyProcess, classifySteps, isPmBearingStage, STAGE_CREATE_WIP } from "@/lib/processCatalog";
 import { friendlyApiError } from "@/lib/apiErrors";
 import { BackLink } from "@/components/BackLink";
 import { LockBanner } from "../_LockBanner";
@@ -589,6 +589,28 @@ function isPackingStageJc(stage: string | null | undefined): boolean {
   if (!stage) return false;
   const s = stage.toLowerCase();
   return PACKING_STAGE_TOKENS.some((t) => s.includes(t));
+}
+
+// ── ONE definition of "this card can handle packaging material" ────────────
+// Every PM surface keys off this: the Material Consumption grid, the PM
+// store-return list, the PM Variance panel and Extra Giveaway. Mirrored
+// server-side by job_card_v2.is_pm_bearing_stage, so the client never renders
+// an input the server will reject — previously the EGA field was offered on
+// 119 cards where the server refused the row.
+//
+// isPackingStageJc above answers a DIFFERENT question and is deliberately
+// kept narrow. Rule of thumb: this predicate widens a CAPABILITY (which inputs
+// appear), so a broad answer can only unblock work; isPackingStageJc gates a
+// REQUIREMENT (you must name the batch before opening it) and plan step
+// ordering, where widening would block operators who can work today.
+type PmStageFields = {
+  process_name?: string | null;
+  stage?: string | null;
+  output_kind?: string | null;
+};
+function isPmStageJc(d: PmStageFields): boolean {
+  return isPmBearingStage(d.process_name, d.stage)
+    || (d.output_kind ?? "").toUpperCase() === "FG";
 }
 
 // R11/C7 — PM variance categories. The backend's R11 work persists each of
@@ -1375,7 +1397,8 @@ function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
   const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
   const [closeModal, setCloseModal] = useState<BatchRow | null>(null);
 
-  const isPackingStage = isPackingStageJc(detail.stage);
+  // EGA is a PM capability, so it uses the canonical PM predicate.
+  const pmStage = isPmStageJc(detail);
 
   // W3-MED-6 — AbortController per call so a remount or rapid JC switch
   // doesn't leave a stale request racing the current one.  The current
@@ -1676,7 +1699,7 @@ function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
           <BatchCloseModal
             batch={closeModal}
             jcId={detail.job_card_id}
-            isPackingStage={isPackingStage}
+            pmStage={pmStage}
             defaults={{
               producedKg: fgKg != null ? String(fgKg) : "",
               rmConsumedKg: rmConsumedSum > 0 ? rmConsumedSum.toFixed(3) : "",
@@ -1706,11 +1729,11 @@ function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
 }
 
 function BatchCloseModal({
-  batch, jcId, isPackingStage, defaults, summarySnapshot, onClose, onDone,
+  batch, jcId, pmStage, defaults, summarySnapshot, onClose, onDone,
 }: {
   batch: BatchRow;
   jcId: number;
-  isPackingStage: boolean;
+  pmStage: boolean;
   /** Pre-fill values pulled from the JC detail (last saved output +
    *  consumption sum + persisted EGA). Empty strings show as blank
    *  placeholders. The operator can still type over them. */
@@ -1786,7 +1809,7 @@ function BatchCloseModal({
       const v = parseFloat(rmConsumedKg);
       if (Number.isFinite(v)) body.rm_consumed_kg = v;
     }
-    if (isPackingStage && extraGiveAway.trim() !== "") {
+    if (pmStage && extraGiveAway.trim() !== "") {
       const v = parseFloat(extraGiveAway);
       if (Number.isFinite(v)) body.extra_give_away_qty = v;
     }
@@ -1930,7 +1953,7 @@ function BatchCloseModal({
             disabled={busy}
             placeholder="0.00"
           />
-          {isPackingStage ? (
+          {pmStage ? (
             <FormNumber
               label="Extra give-away qty"
               value={extraGiveAway}
@@ -3541,8 +3564,138 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   // feed the mass-balance; PM returns are pcs and get their own per-article
   // accounting, kept out of the kg balance.
   const isPmArticle = (a: BatchSummaryArticle) => (a.item_type || "").toUpperCase() === "PM";
-  const rmArticles = useMemo(() => articles.filter((a) => !isPmArticle(a)), [articles]);
-  const pmArticles = useMemo(() => articles.filter(isPmArticle), [articles]);
+  // The unfiltered rm/pm splits that used to live here are gone: every consumer
+  // now takes the stage-filtered visibleRmArticles / visiblePmArticles below.
+
+  // ── Stage-wise material hierarchy (Phase 1) ───────────────────────────────
+  // PM belongs to the packing / cartoning family of stages only. On a Sorting
+  // or Roasting card the PM inputs were empty fields that invited consumption
+  // to be booked against a process stage.
+  //
+  // These lists are RENDER-ONLY. `articles` above stays UNFILTERED on purpose,
+  // and every non-render consumer keeps using it:
+  //   • computeBatchSummary keys its RM-vs-PM classification off this list and
+  //     falls back to "treat as RM" for an unknown key (see isRmKey, ~line 453)
+  //     — filtering it would pull historic PM qty into rmConsumedKg.
+  //   • the onSubmit loops iterate `articles` so a PM row already saved against
+  //     this card round-trips untouched instead of being silently dropped.
+  //   • the Off-Grade article picker stays on the full BOM: rejecting material
+  //     that came from an upstream stage is legitimate.
+  // Does the process/stage NAME identify this as a packing step?
+  const pmByStageName = useMemo(
+    () => isPmBearingStage(detail.process_name, detail.stage),
+    [detail.process_name, detail.stage],
+  );
+  const pmBearingStage = useMemo(
+    () => isPmStageJc(detail),
+    [detail],
+  );
+  // True when PM is only available because this card is TERMINAL — its process
+  // name doesn't say "packing" but it produces FG, so no other card in the
+  // chain could record the packaging. Real on live routes such as the
+  // single-stage "Sorting + Flavouring" chain (jc 2544737). Surfaced to the
+  // operator rather than left silent: seeing PM on a stage called "Sorting"
+  // otherwise looks like the stage filter is broken, and the underlying fix is
+  // to rename the route step.
+  const pmViaTerminalOnly = pmBearingStage && !pmByStageName;
+
+  // Articles this card has ALREADY recorded against (consumption or a store
+  // return), across any batch. These are NEVER hidden, whatever the stage rules
+  // say: 23 live cards booked PM on Sorting/Roasting before the gate existed,
+  // and re-mapping a BOM must not make a past entry vanish while it still
+  // round-trips on every save.
+  //
+  // Indexed under BOTH key forms. computeArticles keys an article `b{id}` when
+  // the BOM line has an id and `n{name}` otherwise; a saved row may carry a
+  // NULL bom_line_id for a material that DOES have one in the BOM (legacy rows
+  // predating migration 024). Keying on one form only would leave such a row
+  // hidden while it still round-trips on save — the exact failure this guard
+  // exists to prevent.
+  const keysWithData = useMemo(() => {
+    const keys = new Set<string>();
+    const add = (id: number | null | undefined, name: string | null | undefined) => {
+      if (id != null) keys.add(`b${id}`);
+      if (name) keys.add(`n${name}`);
+    };
+    for (const r of detail.consumption_lines ?? []) {
+      if (num(String(r.actual_consumed_qty ?? 0)) > 0) add(r.bom_line_id, r.material_sku_name);
+    }
+    for (const b of detail.balance_materials ?? []) {
+      if (num(String(b.qty_kg ?? 0)) > 0) add(b.bom_line_id, b.material_name);
+    }
+    return keys;
+  }, [detail.consumption_lines, detail.balance_materials]);
+
+  const hasRecordedData = useCallback(
+    (a: BatchSummaryArticle) =>
+      (a.bom_line_id != null && keysWithData.has(`b${a.bom_line_id}`))
+      || keysWithData.has(`n${a.material_sku_name}`),
+    [keysWithData],
+  );
+
+  // Whether this card opens on material handed over by an upstream stage.
+  // Single source for the carried-in panel, the empty-grid copy and the
+  // stage-1 test below, so they can never disagree.
+  const hasCarriedIn = (detail.step_number ?? 1) > 1 || detail.prev_job_card_id != null;
+  // Stage 1 is the only stage that opens on raw material from the BOM.
+  const isFirstStage = !hasCarriedIn;
+
+  // ── The inventory flow, derived — no mapping data to maintain ────────────
+  //   stage 1        : RM from the BOM (it opens the chain)
+  //   stage 2 … n    : the SFG carried in from the previous stage, automatic —
+  //                    the operator enters no RM unless they deliberately pull
+  //                    one in, which turns SFG into SFG2
+  //   packing family : PM (see pmBearingStage)
+  //
+  // The SFG/WIP BOM line is the chain seam itself, so it is never stage-gated:
+  // computeArticles already drops it on a producing stage, and on a consuming
+  // stage it IS the input.
+  const isSeamArticle = (a: BatchSummaryArticle) =>
+    ["SFG", "WIP"].includes((a.item_type || "").toUpperCase());
+
+  // Materials the operator has explicitly pulled into THIS stage from the BOM.
+  // Deliberately client-side and per-visit: once a qty is entered and saved the
+  // row is a real consumption line, and hasRecordedData keeps it visible for
+  // good. Persisting an empty pick would only add a table to hold "the operator
+  // opened a dropdown".
+  const [addedArticleKeys, setAddedArticleKeys] = useState<Set<string>>(new Set());
+  const articleKey = (a: BatchSummaryArticle) =>
+    a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
+
+  const keepArticle = useCallback(
+    (a: BatchSummaryArticle) => {
+      if (hasRecordedData(a)) return true;                 // never hide recorded work
+      if (addedArticleKeys.has(articleKey(a))) return true; // pulled in on this card
+      if (isSeamArticle(a)) return true;                    // the carried SFG line
+      if (isPmArticle(a)) return pmBearingStage;            // PM: packing family only
+      return isFirstStage;                                  // RM: opens the chain
+    },
+    [hasRecordedData, addedArticleKeys, pmBearingStage, isFirstStage],
+  );
+
+  const visibleArticles = useMemo(
+    () => articles.filter(keepArticle),
+    [articles, keepArticle],
+  );
+  // What the selector offers: BOM materials this stage isn't already showing.
+  // RM only — offering PM on a non-packing stage would re-open the exact hole
+  // this work closed, and on a packing stage every PM article is listed anyway.
+  const addableArticles = useMemo(
+    () => articles.filter((a) =>
+      !visibleArticles.includes(a) && !isPmArticle(a) && !isSeamArticle(a)),
+    [articles, visibleArticles],
+  );
+  // Store-return lists follow the same rule — returning material to store is
+  // per-stage too, so a stage shouldn't offer a return for something it never
+  // received.
+  const visibleRmArticles = useMemo(
+    () => visibleArticles.filter((a) => !isPmArticle(a)),
+    [visibleArticles],
+  );
+  const visiblePmArticles = useMemo(
+    () => visibleArticles.filter(isPmArticle),
+    [visibleArticles],
+  );
 
   // ── Initial state — R10 per-batch scoped.  Previously sourced from
   // section_5_output (JC-level), which carried Batch 1's saved FG /
@@ -3979,21 +4132,28 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
 
   // R10 — remaining FG to produce, net of what already-closed batches
   // booked. Once batch 1 closes with 500 kg of a 1000 kg JC, batch 2
-  // should see "Expected 500 kg" not "Expected 1000 kg". Open batches
-  // are excluded (their qty is still being typed); cancelled batches
-  // are excluded (zero contribution). Falls back to the JC-level
-  // expected when no batches have closed yet, and clamps at 0 so an
+  // should see "Remaining 500 kg" not 1000. Clamped at 0 so an
   // over-produced JC doesn't render a negative number.
+  //
+  // In "Remaining" mode (a batch has already closed) ALSO subtract the
+  // currently-open batch's typed FG Actual, so Remaining drops LIVE as the
+  // operator enters output instead of only after the batch is closed. The
+  // open batch is NOT in closedProduced* (only closed batches are), so no
+  // double-count; when it closes, its qty moves into closedProduced* and
+  // batchIsOpen goes false — the displayed number is unchanged across the
+  // transition. Skipped in "Expected" mode (no batch closed yet): that
+  // figure is the batch target, not a running remainder, so it must stay
+  // put as output is typed.
   const remainingExpectedKg = useMemo(() => {
     if (expectedKg == null) return null;
-    const remaining = Number(expectedKg) - batchRollup.closedProducedKg;
-    return Math.max(0, remaining);
-  }, [expectedKg, batchRollup.closedProducedKg]);
+    const openTyped = batchIsOpen && batchRollup.closedCount > 0 ? num(fgActualKg) : 0;
+    return Math.max(0, Number(expectedKg) - batchRollup.closedProducedKg - openTyped);
+  }, [expectedKg, batchRollup.closedProducedKg, batchRollup.closedCount, batchIsOpen, fgActualKg]);
   const remainingExpectedUnits = useMemo(() => {
     if (expectedUnits == null) return null;
-    const remaining = Number(expectedUnits) - batchRollup.closedProducedUnits;
-    return Math.max(0, remaining);
-  }, [expectedUnits, batchRollup.closedProducedUnits]);
+    const openTyped = batchIsOpen && batchRollup.closedCount > 0 ? num(fgActualUnits) : 0;
+    return Math.max(0, Number(expectedUnits) - batchRollup.closedProducedUnits - openTyped);
+  }, [expectedUnits, batchRollup.closedProducedUnits, batchRollup.closedCount, batchIsOpen, fgActualUnits]);
 
   // RM Issued (kg): sum of rm_indents.issued_qty. Stages 2+ stay at 0
   // because RM is only issued on stage 1 — same accounting as the Android.
@@ -4580,8 +4740,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     // a prior saved value and the operator has cleared it (qty <= 0), emit
     // qty_kg=0 so save_byproducts upserts the zero instead of orphaning the
     // server row. Without this the row stays on the JC forever once typed.
-    const isPackingStage = isPackingStageJc(detail.stage);
-    if (isPackingStage) {
+    if (pmBearingStage) {
       for (const cat of PM_VARIANCE_CATEGORIES) {
         const row = pmVariance[cat.key];
         const q = row ? num(row.qty) : 0;
@@ -4613,7 +4772,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     // recognises (job_card_v2.EGA_CONSOLIDATED_SENTINEL). bom_line_id
     // stays null. The packing-stage gate is the only check the server
     // runs for this row; the per-material item_type gate is skipped.
-    if (isPackingStage) {
+    if (pmBearingStage) {
       const extraKg = num(extraGiveawayQty);
       if (extraKg > 0) {
         balanceMaterials.push({
@@ -5253,18 +5412,71 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
           );
         })()}
 
-        {/* Material Consumption — one row per BOM article */}
+        {/* Carried-in SFG — the opening input of every stage after the first.
+            READ-ONLY by design: carried_in_kg already enters the conservation
+            identity as (rm_issued + carried_in) — see the summary memo above
+            and jc_accounting_v2.save_accounting. Re-entering it as a
+            consumption row would double-count it (Slice-5 review #4). */}
+        {hasCarriedIn ? (
+          <div className="mb-4 px-3 py-2 rounded border border-[var(--border-subtle,#e4e6eb)] bg-[var(--bg-subtle,#fafbfc)]">
+            <div className="text-[11px] uppercase tracking-wide text-[var(--text-muted)]">
+              Carried in from previous stage
+            </div>
+            <div className="text-[13px] text-[var(--text-primary)] mt-0.5">
+              {/* Distinguish "nothing has arrived yet" from a real zero — a bare
+                  0.00 kg on an unstarted stage reads as a broken calculation. */}
+              {carriedInKg > 0 ? fmtKg(carriedInKg) : (
+                <span className="text-[var(--text-muted)] italic">
+                  Awaiting dispatch from the previous stage
+                </span>
+              )}
+              {detail.input_code ? (
+                <span className="text-[11px] text-[var(--text-success)] font-medium ml-2">
+                  {detail.input_code}
+                </span>
+              ) : null}
+            </div>
+            {carriedInKg > 0 ? (
+              <div className="text-[11px] text-[var(--text-muted)] italic mt-0.5">
+                Counted as this stage&apos;s opening input — do not re-enter it below.
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {/* Material Consumption — one row per BOM article consumed at THIS stage */}
         <SubsectionLabel>Material Consumption</SubsectionLabel>
+        {pmViaTerminalOnly && visiblePmArticles.length > 0 ? (
+          <p className="text-[11px] text-[var(--aws-warning,#8a5e10)] italic mb-2">
+            Packaging material is listed here because this is the final stage of
+            the chain — its process name ({detail.process_name || "—"}) doesn&apos;t
+            identify it as a packing step. Rename the route step if that&apos;s wrong.
+          </p>
+        ) : null}
         {articles.length === 0 ? (
           <EmptyHint>No BOM articles attached to this job card.</EmptyHint>
+        ) : visibleArticles.length === 0 ? (
+          <EmptyHint>
+            {hasCarriedIn
+              ? `This stage runs on the ${detail.input_code || "SFG"} carried in above — no raw material is consumed here by default. Add one below if this stage does consume it.`
+              : "No material from this BOM is consumed at this stage."}
+          </EmptyHint>
         ) : (
           <div className="space-y-2 mb-4">
-            {articles.map((a) => {
+            {visibleArticles.map((a) => {
               const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
               return (
                 <div key={key} className="grid grid-cols-12 gap-2 items-center">
                   <div className="col-span-7 lg:col-span-5 text-[13px] text-[var(--text-primary)] truncate" title={a.material_sku_name}>
                     {a.material_sku_name} <span className={`text-[11px] ${a.item_type === "SFG" || a.item_type === "WIP" ? "text-[var(--text-success)] font-medium" : "text-[var(--text-muted)]"}`}>({a.item_type})</span>
+                    {addedArticleKeys.has(key) ? (
+                      <span
+                        className="ml-1.5 text-[10px] px-1 py-px rounded bg-[#eef6ff] border border-[#a7c9ec] text-[#0d5aa7] align-middle"
+                        title="Pulled into this stage from the BOM. Enter a quantity and save to keep it."
+                      >
+                        added at this stage
+                      </span>
+                    ) : null}
                   </div>
                   <input
                     type="number" step="any" placeholder={`Qty (${a.uom})`}
@@ -5295,6 +5507,51 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
             })}
           </div>
         )}
+
+        {/* Pull a BOM material into THIS stage.
+            The default flow is derived, not configured: stage 1 opens on RM,
+            every later stage runs on the SFG carried in above. This selector is
+            the exception path — when a later stage really does add a raw
+            material to that SFG (producing SFG2), the operator picks it here
+            instead of the whole BOM being listed on every card "just in case",
+            which is what let PM get booked against Sorting.
+
+            PM is deliberately NOT offered on a non-packing stage: that is the
+            hole this work closed. On a packing stage its PM is already listed,
+            so nothing is lost. */}
+        {addableArticles.length > 0 ? (
+          <div className="mb-4">
+            <div className="grid grid-cols-12 gap-2 items-center">
+              <select
+                className={`${inputCls} col-span-12 sm:col-span-7`}
+                value=""
+                onChange={(e) => {
+                  const k = e.target.value;
+                  if (!k) return;
+                  markSectionDirty("consumption");
+                  setAddedArticleKeys((prev) => new Set(prev).add(k));
+                }}
+                disabled={inputsDisabled}
+                aria-disabled={inputsDisabled}
+                aria-describedby={describedBy}
+                aria-label="Add a raw material from the BOM to this stage"
+              >
+                <option value="">+ Use another BOM material at this stage…</option>
+                {addableArticles.map((a) => {
+                  const k = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
+                  return (
+                    <option key={k} value={k}>
+                      {a.material_sku_name} ({a.item_type})
+                    </option>
+                  );
+                })}
+              </select>
+              <span className="col-span-12 sm:col-span-5 text-[11px] text-[var(--text-muted)] italic">
+                Adds it to the grid above. Enter a quantity and save to keep it.
+              </span>
+            </div>
+          </div>
+        ) : null}
 
         {/* Additives — data-keeping consumption for fully-consumed
             seasoning (Salt, Sugar, Citric Acid, Oils, etc.).  Optional;
@@ -5532,7 +5789,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
             Consolidated capture (operator-stated): per-RM attribution is
             unknowable post-run, so the dropdown is removed and the qty
             posts as a single sentinel row to the server. */}
-        {isPackingStage ? (
+        {pmBearingStage ? (
           <>
             <SubsectionLabel className="mt-4">Extra Giveaway (EGA)</SubsectionLabel>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -5623,7 +5880,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
           <EmptyHint>No BOM articles attached to this job card.</EmptyHint>
         ) : (
           <div className="space-y-2">
-            {rmArticles.map((a) => {
+            {visibleRmArticles.map((a) => {
               const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
               return (
                 <div key={key} className="grid grid-cols-12 gap-2 items-center">
@@ -5644,8 +5901,12 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                 </div>
               );
             })}
-            {rmArticles.length === 0 ? (
-              <EmptyHint>No raw-material articles — see the PM section below.</EmptyHint>
+            {visibleRmArticles.length === 0 ? (
+              <EmptyHint>
+                {pmBearingStage
+                  ? "No raw-material articles — see the PM section below."
+                  : "No raw-material articles. This BOM carries packaging material only, which is returned on the packing / cartoning stage."}
+              </EmptyHint>
             ) : null}
           </div>
         )}
@@ -5653,14 +5914,14 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
         {/* PM returned to store — separate per-article accounting, in the item's
             own unit (pcs/roll/…). Packaging material never enters the kg
             mass-balance above; each PM article is counted on its own. */}
-        {pmArticles.length > 0 ? (
+        {visiblePmArticles.length > 0 ? (
           <>
             <SubsectionLabel>Returned to store — PM (per article)</SubsectionLabel>
             <p className="text-[11px] text-[var(--text-muted)] italic mb-2">
               Packaging material is counted per article in its own unit — kept out of the kg balance.
             </p>
             <div className="space-y-2">
-              {pmArticles.map((a) => {
+              {visiblePmArticles.map((a) => {
                 const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
                 return (
                   <div key={key} className="grid grid-cols-12 gap-2 items-center">
@@ -5687,7 +5948,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       </Panel>
 
       {/* ── PM Variance (R11/C7) — packing stages only ──────────────────── */}
-      {isPackingStage ? (
+      {pmBearingStage ? (
         <Panel title="PM Variance">
           <p className="text-[11px] text-[var(--text-muted)] italic mb-3">
             Packaging material variance categories. Each is recorded as a
@@ -5788,7 +6049,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
         <BatchCloseModal
           batch={closeBatchModal}
           jcId={detail.job_card_id}
-          isPackingStage={isPackingStageJc(detail.stage)}
+          pmStage={pmBearingStage}
           defaults={{
             producedKg: fgActualKg,
             // R10 — pre-fill from the operator's typed RM consumption

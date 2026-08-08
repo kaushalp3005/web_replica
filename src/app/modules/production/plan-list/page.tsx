@@ -2097,9 +2097,11 @@ function CreateJobCardModal({
     );
   }
 
-  // Need ≥1 WIP + the terminal (≥2 rows); every row needs a process + floor.
-  // The last row IS the packaging stage, so there's no separate packaging gate.
-  const wipOk = wipSteps.length >= 2 && wipSteps.every((s) => s.process !== "" && s.floor !== "");
+  // Every row needs a process + floor. The last row IS the terminal Final-FG
+  // stage. CREATE allows a single-process route (1 row → one RM→FG card); EDIT
+  // still needs ≥2 (the replace path can't collapse a chain to a lone stage).
+  const minRows = mode === "create" ? 1 : 2;
+  const wipOk = wipSteps.length >= minRows && wipSteps.every((s) => s.process !== "" && s.floor !== "");
   const canCreate = qtyKg.trim() !== "" && Number(qtyKg) > 0 && wipOk;
 
   // Quantity cap (decision: cap-at-remaining). A carded line's remaining balance
@@ -2883,14 +2885,25 @@ function MaterialsByStep({
             </div>
           ))}
 
-          {/* Packaging — the Final FG stage; consumes the SFG opening input. */}
+          {/* Terminal Final-FG stage. Multi-stage: consumes the SFG opening
+              input. Single-process (no WIP rows): this card IS stage 1, so it
+              issues the fresh RM + PM instead — mirror the first-WIP body. */}
           <div className="border border-[var(--aws-border)] rounded px-2 py-1.5 bg-white">
             <div className="flex items-center gap-1.5 text-[11px] font-semibold text-[var(--text-primary)]">
               <span className="shrink-0 inline-flex items-center justify-center w-4 h-4 rounded-full bg-[var(--aws-orange)] text-white text-[9px] font-bold">P</span>
               <span className="truncate" title={term?.process || undefined}>{term?.process || "Packaging"}</span>
               {term?.floor ? <span className="shrink-0 text-[10px] font-normal text-[var(--text-muted)]">· {term.floor}</span> : null}
             </div>
-            {sfg.length > 0 ? (
+            {wip.length === 0 ? (
+              rm.length + pm.length === 0 ? (
+                <p className="mt-1 text-[10px] italic text-[var(--text-muted)]">No RM/PM in this BOM.</p>
+              ) : (
+                <>
+                  {renderRows(rm)}
+                  {renderRows(pm)}
+                </>
+              )
+            ) : sfg.length > 0 ? (
               renderRows(sfg)
             ) : (
               <p className="mt-1 text-[10px] italic text-[var(--text-muted)]">
