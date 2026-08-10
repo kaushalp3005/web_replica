@@ -1,0 +1,98 @@
+@import "tailwindcss";
+
+/* CFERP crimson theme — rebuild marker v2 */
+:root {
+  --background: #f2f3f3;
+  --foreground: #16191f;
+  /* Brand palette — locked to the Candor CF logo: rgb(154,57,62) #9a393e.
+     (Token names kept as --aws-* so the ~12 page files don't all need edits;
+     only the values changed from the old AWS console scheme to CFERP maroon.) */
+  --aws-navy: #7a2d31;          /* deep maroon header bar */
+  --aws-orange: #9a393e;        /* primary brand accent = logo color */
+  --aws-orange-hover: #b14a4f;
+  --aws-orange-active: #832f34;
+  --aws-link: #9a393e;          /* links in brand maroon */
+  --aws-link-hover: #832f34;
+  --aws-border: #d5dbdb;
+  --aws-border-strong: #aab7b8;
+  --aws-error: #d13212;
+
+  /* Semantic text colours — promote the four most common hex literals
+     scattered through the page files so a theme tweak is one-line. */
+  --text-primary:   #16191f; /* primary body / headings */
+  --text-secondary: #414d5c; /* labels, captions */
+  --text-muted:     #687078; /* placeholders, hints */
+  --text-disabled:  #aab7b8; /* disabled controls */
+
+  /* Surface tints — quiet backgrounds the row tables / form panels use. */
+  --surface-subtle:   #fafafa; /* table headers, ghost rows */
+  --surface-disabled: #f4f4f4; /* disabled input fills */
+  --surface-divider:  #eaeded; /* horizontal rules, chip wells */
+
+  /* Semantic status text. The pill backgrounds stay inline because each
+     status row also needs a paired ring colour. */
+  --text-success: #1d8102;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: "Amazon Ember", "Helvetica Neue", Roboto, Arial, sans-serif;
+}
+
+/* Shared form-input utility — the admin pages have dozens of inputs and the
+   inline tailwind chain would be 60+ chars repeated. Anchored to the AWS
+   tokens defined above so a theme tweak ripples to every form. */
+.form-input {
+  width: 100%;
+  height: 36px;
+  padding: 0 8px;
+  font-size: 13px;
+  background: #fff;
+  border: 1px solid var(--aws-border-strong);
+  border-radius: 2px;
+  outline: none;
+  color: var(--text-primary);
+}
+.form-input:focus {
+  border-color: var(--aws-orange);
+  box-shadow: 0 0 0 1px var(--aws-orange);
+}
+.form-input:disabled {
+  background: var(--surface-disabled);
+  color: var(--text-disabled);
+  cursor: not-allowed;
+}
+.form-input::placeholder {
+  color: var(--text-muted);
+}
+
+/* Numeric-input hardening. Hides the native up/down spinner arrows; pair with
+   an onWheel→blur handler on the <input> so a stray mouse-wheel scroll over a
+   focused number field can't silently change its value. Applied to the
+   SO-creation plan-builder card + the SO line editor where operators type
+   pack counts / weights and accidental wheel edits were corrupting values. */
+.no-spinner::-webkit-outer-spin-button,
+.no-spinner::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.no-spinner {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* QR scanner ROI scan-line sweep (transfer-OUT camera scanner _QRScanner.tsx).
+   Drives the green line up/down inside the centred region-of-interest box. */
+@keyframes qrroi-scan {
+  0%   { top: 6%;  opacity: 0.35; }
+  50%  { top: 90%; opacity: 1; }
+  100% { top: 6%;  opacity: 0.35; }
+}

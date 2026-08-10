@@ -1,0 +1,83 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Netlify deployment configuration for the web_replica Next.js 16 app.
+#
+# The Netlify Next.js Runtime (v5+) auto-detects this project, but we pin
+# the build command + Node version explicitly so a deploy stays
+# reproducible across runtime upgrades.
+#
+# Required environment variables (set in Netlify Site Configuration →
+# Environment variables, NOT here):
+#   NEXT_PUBLIC_API_BASE_URL   Origin of the FastAPI backend, e.g.
+#                              https://api.yourdomain.com — leave empty for
+#                              same-origin requests. Must be a fully-qualified
+#                              URL when the backend is on a different host;
+#                              otherwise the auth/refresh fetch calls will
+#                              hit Netlify's edge instead of the API.
+# ─────────────────────────────────────────────────────────────────────────
+
+[build]
+  command = "npm run build"
+  # Required by the Next.js Runtime (v5.15+). Without this Netlify falls
+  # back to whatever the UI has under Site Configuration → Build &
+  # deploy → Publish directory, which is often the repo root — and the
+  # runtime refuses with "publish directory cannot be the same as the
+  # base directory" (we hit this on first deploy). Pinning here keeps
+  # the publish path in version control instead of UI state.
+  publish = ".next"
+
+[build.environment]
+  # Pinned to Node 20 LTS — matches Next.js 16's supported runtime and
+  # Netlify's default. Bump only after testing locally with the new major.
+  NODE_VERSION = "20"
+  # Skip Husky / postinstall hooks when CI runs `npm install` — Netlify
+  # doesn't need them and they slow the build.
+  HUSKY = "0"
+
+# ── Security headers (apply to every response) ───────────────────────────
+# Netlify merges these with anything Next.js itself sets. The headers below
+# are deliberately conservative — they protect against the OWASP basics
+# without breaking any of the app's current features (no third-party iframes,
+# no inline geolocation/camera use, no cross-origin form posts).
+[[headers]]
+  for = "/*"
+  [headers.values]
+    # Block being framed by other origins — defends against clickjacking
+    # on the admin pages and the auth/login forms.
+    X-Frame-Options = "DENY"
+    # Stop browsers from MIME-sniffing static assets into executable types.
+    X-Content-Type-Options = "nosniff"
+    # Only send the full referrer to same-origin requests; strip down to
+    # origin-only for cross-origin links. Keeps sensitive paths (e.g.
+    # /modules/admin/users/123) out of third-party analytics referers.
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    # Explicitly disable powerful APIs the app doesn't use. Each entry
+    # narrows what a future XSS could reach for.
+    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    # Tell the browser to enforce HTTPS for a year on every subdomain.
+    # Safe on Netlify — Netlify-hosted sites are HTTPS-only by default.
+    Strict-Transport-Security = "max-age=31536000; includeSubDomains"
+
+# Long-cache the Next.js immutable asset bundles. The chunk hashes change
+# on every code edit so this never serves stale code.
+[[headers]]
+  for = "/_next/static/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# Logo + svg icons in /public — week-long cache; they rarely change and
+# are not hash-fingerprinted.
+[[headers]]
+  for = "/*.svg"
+  [headers.values]
+    Cache-Control = "public, max-age=604800"
+
+# ── Notes ────────────────────────────────────────────────────────────────
+# • The Next.js Runtime takes care of SSR functions, image optimization,
+#   and the route → Netlify Function mapping. No [[plugins]] block needed
+#   for the modern runtime; if a deploy ever needs the legacy
+#   @netlify/plugin-nextjs, add it back here.
+# • [[redirects]] is intentionally absent. Next.js's own routing handles
+#   404s and any `redirects()` declared in next.config.ts.
+# • Do NOT put secrets here. .toml is checked into git; secrets belong in
+#   Site Configuration → Environment variables (which are encrypted at rest
+#   and injected at build + function-runtime).
