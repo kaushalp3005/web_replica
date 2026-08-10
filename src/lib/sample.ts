@@ -262,8 +262,14 @@ export async function listRequestors(sampleTypes?: string): Promise<string[]> {
   }
 }
 
-export async function getRequisition(id: number): Promise<Requisition> {
-  return jsonOrThrow(await apiFetch(`/api/v1/sample/requisitions/${id}`), "Failed to load requisition");
+/** `signal` is optional so bulk callers can impose a per-request timeout —
+ *  apiFetch has none of its own, and one hung detail would otherwise hold a
+ *  hydration slot open indefinitely. */
+export async function getRequisition(id: number, signal?: AbortSignal): Promise<Requisition> {
+  return jsonOrThrow(
+    await apiFetch(`/api/v1/sample/requisitions/${id}`, { signal }),
+    "Failed to load requisition",
+  );
 }
 
 export interface RequisitionCreate {
