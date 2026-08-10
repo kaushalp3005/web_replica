@@ -636,6 +636,17 @@ function JobCardListingPageBody() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-4">
+            {/* Gated on isAdmin to match the Summary page's own access rule —
+                offering a link that only lands on "Access restricted" is worse
+                than not offering it. */}
+            {isAdmin && (
+              <button
+                onClick={() => router.push("/modules/job-card/dashboard")}
+                className="px-3 py-1.5 text-[12px] border border-[var(--aws-border)] rounded hover:border-[var(--aws-navy)]"
+              >
+                View Summary
+              </button>
+            )}
             <ChipGroup
               label="Entity"
               value={entity}
