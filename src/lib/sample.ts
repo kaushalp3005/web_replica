@@ -222,6 +222,33 @@ export async function listRequisitions(f: ListFilters = {}): Promise<Requisition
   return jsonOrThrow(await apiFetch(`/api/v1/sample/requisitions?${q}`), "Failed to load requisitions");
 }
 
+/** Every requisition matching `f`, walking `offset` until a short page lands.
+ *
+ *  The endpoint caps `limit` at 200 and returns a bare array — no total, no
+ *  next-page marker. A caller that asks for 200 and gets exactly 200 back
+ *  cannot tell a complete result from a truncated one, so anything totalling
+ *  or aggregating over requisitions must page rather than take one slice.
+ *
+ *  `limit` / `offset` on `f` are ignored; this owns the walk. `capped` is
+ *  true when maxPages ran out with a full page still coming, meaning the
+ *  result is short and any total derived from it understates.
+ */
+export async function listAllRequisitions(
+  f: ListFilters = {},
+  opts: { maxPages?: number } = {},
+): Promise<{ rows: Requisition[]; capped: boolean }> {
+  const per = 200;                        // server ceiling: limit = Query(50, le=200)
+  const maxPages = opts.maxPages ?? 25;   // 5,000-row guard rail against a runaway walk
+  const out: Requisition[] = [];
+
+  for (let page = 0; page < maxPages; page++) {
+    const batch = await listRequisitions({ ...f, limit: per, offset: page * per });
+    out.push(...batch);
+    if (batch.length < per) return { rows: out, capped: false };
+  }
+  return { rows: out, capped: true };
+}
+
 // Distinct requestor labels for the queue's Requestor filter dropdown.
 export async function listRequestors(sampleTypes?: string): Promise<string[]> {
   const q = new URLSearchParams();
