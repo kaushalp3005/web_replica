@@ -2120,11 +2120,35 @@ function CreateJobCardModal({
   const overQty = capKg != null && Number(qtyKg) > capKg + 0.001;
   const overBlocks = mode === "create" && overQty;
 
+  // What the SERVER requires, checked here so the button can't fire a request
+  // that is guaranteed to 400.
+  //
+  // create_job_cards_for_line rejects:
+  //   qty_kg <= 0            -> "Quantity (kg) must be greater than 0"
+  //   blank terminal floor   -> "A process floor is required"
+  //
+  // Both are reachable from the modal's own initial state — qtyKg starts "" and
+  // only auto-fills when a default qty exists, and the terminal row starts with
+  // floor: "". Previously canSubmit checked neither, so Create Job Card was
+  // live in states the server always refused; pressing it just produced a
+  // toast, which is why the same line 400s repeatedly.
+  const termStep = wipSteps[wipSteps.length - 1];
+  const blockers: string[] = [];
+  if (!(Number(qtyKg) > 0)) blockers.push("enter a quantity in kg");
+  if (!termStep) blockers.push("add at least one process step");
+  else if (!termStep.floor.trim()) blockers.push(`pick a floor for “${termStep.process || "the final step"}”`);
+  // A WIP row with a process but no floor would dispatch a card nowhere.
+  const flooredWip = wipSteps.slice(0, -1).filter((s) => s.process.trim() && !s.floor.trim());
+  if (flooredWip.length) {
+    blockers.push(`pick a floor for ${flooredWip.map((s) => `“${s.process}”`).join(", ")}`);
+  }
+
   // Create + un-started edit go through the replace path (needs `editable`);
   // a started chain goes through the live apply-edits path (always submittable).
   // Over-remaining on a create is a HARD block (cap-at-remaining).
   const canSubmit =
-    canCreate && (mode === "create" || editable || liveEdit) && !overBlocks;
+    canCreate && (mode === "create" || editable || liveEdit) && !overBlocks
+    && blockers.length === 0;
 
   // Remove a WIP row. A started row force-records its job-card data on the
   // server, so we capture a reason first (the operator must confirm).
@@ -2415,6 +2439,13 @@ function CreateJobCardModal({
               >
                 Back
               </button>
+              {/* Lives in the footer, not the (scrollable) body, so the reason
+                  the button is dead is visible at the moment it's pressed. */}
+              {blockers.length > 0 && !overBlocks ? (
+                <p className="flex-1 px-3 text-[11px] text-[#9a393e] leading-tight">
+                  To create: {blockers.join("; ")}.
+                </p>
+              ) : null}
               <div className="flex items-center gap-2">
                 <button
                   type="button"
