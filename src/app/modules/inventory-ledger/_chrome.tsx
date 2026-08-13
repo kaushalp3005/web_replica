@@ -42,12 +42,18 @@ export function LedgerChrome({ title, children }: LedgerChromeProps) {
         </nav>
         <div className="flex-1" />
         {source === "live" && (
-          <span
-            title="Only the Inward column is wired to live data. The other movement columns are zero, so Closing is cumulative inward — not a stock balance."
-            className="font-mono text-[10.5px] px-[8px] py-[3px] rounded-[6px] bg-[#fdf3e2] text-[#8a5a00] border border-[#e8c98a] whitespace-nowrap"
-          >
-            Inward only
-          </span>
+          <>
+            <span
+              aria-describedby="ledger-inward-only-desc"
+              title="Only the Inward column is wired to live data. The other movement columns are zero, so Closing is cumulative inward — not a stock balance."
+              className="font-mono text-[10.5px] px-[8px] py-[3px] rounded-[6px] bg-[#fdf3e2] text-[#8a5a00] border border-[#e8c98a] whitespace-nowrap"
+            >
+              Inward only
+            </span>
+            <span id="ledger-inward-only-desc" className="sr-only">
+              Only the Inward column is wired to live data. The other movement columns are zero, so Closing is cumulative inward — not a stock balance.
+            </span>
+          </>
         )}
         <button
           onClick={() => router.push("/modules/profile")}
