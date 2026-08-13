@@ -3,8 +3,8 @@
 // The single data seam for the Inventory Ledger module. Everything the module
 // shows is derived from one flat leaf set; this provider supplies it from either
 // the built-in FIXTURES or the LIVE backend (GET /api/v1/ledger/leaves), chosen
-// by a feature flag + a runtime toggle. Swap the whole module to real data by
-// setting NEXT_PUBLIC_LEDGER_LIVE=1 (or flicking the Sample/Live switch).
+// by a feature flag + a runtime toggle. LIVE is the default — set
+// NEXT_PUBLIC_LEDGER_LIVE=0 (or flick the Sample/Live switch) to use fixtures.
 //
 // Hydration-safe: the initial source is the env default on both server and the
 // client's first paint; the toggle only changes it after mount. The layout keeps
@@ -17,7 +17,7 @@ import type { LeafItem } from "@/lib/ledger";
 import { LEDGER_LEAVES } from "./_fixtures";
 
 export type LedgerSource = "fixtures" | "live";
-const ENV_LIVE = process.env.NEXT_PUBLIC_LEDGER_LIVE === "1";
+const ENV_LIVE = process.env.NEXT_PUBLIC_LEDGER_LIVE !== "0";
 
 export interface LedgerData {
   leaves: LeafItem[];
@@ -46,7 +46,7 @@ export function LedgerDataProvider({ children }: { children: React.ReactNode }) 
     void (async () => {
       setRemote({ loading: true, error: null, data: null });
       try {
-        const res = await LedgerApi.leaves(ac.signal);
+        const res = await LedgerApi.leaves("both", ac.signal);
         if (!cancelled) setRemote({ loading: false, error: null, data: res.data ?? [] });
       } catch (e) {
         if (!cancelled && !ac.signal.aborted) {
