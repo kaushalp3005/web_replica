@@ -8,14 +8,45 @@
 import type {
   LeafItem, VoucherRow, MonthlyRow, Lot, AgeingRow, FifoFlag, Direction,
 } from "@/lib/ledger";
-import { computeClosing } from "./_tree";
+import { computeClosing, MCOLS } from "./_tree";
 import { slugifySku } from "./_ItemSearch";
 
 const AS_OF = "2026-07-07";
 const MONTH_NAMES: Record<number, string> = { 4: "April", 5: "May", 6: "June", 7: "July" };
 
+// The backend emits one leaf per (sku, godown, entity), so a SKU stocked in two
+// godowns arrives as two rows. Returning only the first would make the item hub
+// disagree with the Stock Summary, which sums them.
+export function findLeafParts(slug: string, leaves: LeafItem[]): LeafItem[] {
+  const matches = leaves.filter((l) => slugifySku(l.label) === slug);
+  if (matches.length === 0) return [];
+  // Quantities never cross UOM classes — if a sku appears as both RM (kg) and PM
+  // (nos), the hub shows the first class rather than adding kilograms to pieces.
+  const uom = matches[0].uom_class;
+  return matches.filter((l) => l.uom_class === uom);
+}
+
+/** The SKU as one row: movement columns and value summed across every godown and
+ *  entity in the current leaf set, so the hub ties to the Stock Summary total. */
+export function aggregateLeaves(parts: LeafItem[]): LeafItem | undefined {
+  if (parts.length === 0) return undefined;
+  if (parts.length === 1) return parts[0];
+  const total: LeafItem = { ...parts[0] };
+  for (const k of MCOLS) total[k] = 0;
+  total.value_indicative = 0;
+  for (const p of parts) {
+    for (const k of MCOLS) total[k] += p[k];
+    total.value_indicative += p.value_indicative;
+  }
+  return total;
+}
+
 export function findLeaf(slug: string, leaves: LeafItem[]): LeafItem | undefined {
-  return leaves.find((l) => slugifySku(l.label) === slug);
+  return aggregateLeaves(findLeafParts(slug, leaves));
+}
+
+export function godownsOf(parts: LeafItem[]): string[] {
+  return Array.from(new Set(parts.map((p) => p.godown)));
 }
 
 function round3(n: number): number {
@@ -203,12 +234,18 @@ export function buildAgeing(lots: Lot[], uom: LeafItem["uom_class"], group: stri
 }
 
 export interface GodownRow { godown: string; qty: number; uom_class: string; note?: string; }
-export function buildGodown(leaf: LeafItem): GodownRow[] {
+// `parts` are the per-godown leaves behind the aggregated `leaf`. Defaults to the
+// single-row case, so a leaf set with one row per SKU renders exactly as before.
+export function buildGodown(leaf: LeafItem, parts: LeafItem[] = [leaf]): GodownRow[] {
+  const perGodown = new Map<string, number>();
+  for (const p of parts) {
+    perGodown.set(p.godown, (perGodown.get(p.godown) ?? 0) + computeClosing(p));
+  }
   const closing = computeClosing(leaf);
-  const rows: GodownRow[] = [{
-    godown: `${leaf.godown}${leaf.godown === "Savla D-39" ? " · Factory" : ""}`,
-    qty: round3(Math.max(closing, 0)), uom_class: leaf.uom_class,
-  }];
+  const rows: GodownRow[] = Array.from(perGodown.entries()).map(([g, qty]) => ({
+    godown: `${g}${g === "Savla D-39" ? " · Factory" : ""}`,
+    qty: round3(Math.max(qty, 0)), uom_class: leaf.uom_class,
+  }));
   if (leaf.transfer_out_qty > 0) {
     rows.push({ godown: "Transferred out (period)", qty: round3(leaf.transfer_out_qty), uom_class: leaf.uom_class, note: "moved" });
   }

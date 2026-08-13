@@ -4,7 +4,7 @@
 // only ever summed WITHIN a UOM class; a node spanning classes is "mixed" (its
 // numeric columns are null) and carries a per-UOM breakdown in `uom_subtotals`.
 
-import type { LeafItem, LedgerNode, MovementCols, UomClass, UomSubtotal } from "@/lib/ledger";
+import type { Entity, LeafItem, LedgerNode, MovementCols, UomClass, UomSubtotal } from "@/lib/ledger";
 
 export const MCOLS: (keyof MovementCols)[] = [
   "opening_qty", "inward_qty", "production_qty", "returns_qty",
@@ -72,9 +72,27 @@ function rollup(
   };
 }
 
+// A leaf is one (sku, godown, entity, item_type, group, subgroup) row — the
+// backend emits one per godown per entity, so `item-${sku_id}` alone collides
+// between sibling godowns (duplicate React key + unreliable row reconciliation).
+// This mirrors the backend's leaf identity exactly, which matters for
+// buildWarehouseTree: there, leaves are grouped by godown only, so two rows of
+// one sku differing solely by category are siblings.
+//
+// The parts are joined on NUL because it cannot occur in any of them, so no
+// combination of field values can forge another leaf's key. It must stay written
+// as the escape sequence below, never as a literal control character: a raw NUL
+// in the source makes git treat this file as binary — no textual diffs, no
+// normal merges, and an invisible character for whoever edits it next.
+export function leafKey(l: LeafItem): string {
+  return [
+    "item", l.sku_id, l.entity, l.godown, l.item_type, l.group, l.subgroup,
+  ].join("\u0000");
+}
+
 function leafNode(l: LeafItem): LedgerNode {
   return {
-    key: `item-${l.sku_id}`, label: l.label, level: "item", uom_class: l.uom_class,
+    key: leafKey(l), label: l.label, level: "item", uom_class: l.uom_class,
     opening_qty: l.opening_qty, inward_qty: l.inward_qty, production_qty: l.production_qty,
     returns_qty: l.returns_qty, consumption_qty: l.consumption_qty, outward_qty: l.outward_qty,
     transfer_out_qty: l.transfer_out_qty, closing_qty: computeClosing(l),
@@ -110,10 +128,18 @@ export function buildWarehouseTree(leaves: LeafItem[]): LedgerNode[] {
   );
 }
 
-export interface LeafFilter { q?: string; godown?: string; uom?: UomClass | ""; }
+// `entity: "both"` (or omitted) means no entity filter — every other value keeps
+// only leaves stamped with that company.
+export interface LeafFilter {
+  q?: string;
+  godown?: string;
+  uom?: UomClass | "";
+  entity?: Entity | "both";
+}
 export function filterLeaves(leaves: LeafItem[], f: LeafFilter): LeafItem[] {
   const q = (f.q ?? "").trim().toLowerCase();
   return leaves.filter((l) => {
+    if (f.entity && f.entity !== "both" && l.entity !== f.entity) return false;
     if (f.godown && l.godown !== f.godown) return false;
     if (f.uom && l.uom_class !== f.uom) return false;
     if (q && !(`${l.label} ${l.group} ${l.subgroup}`.toLowerCase().includes(q))) return false;

@@ -11,16 +11,30 @@
 // this provider mounted across the module's routes, so a chosen source persists
 // while navigating group → item → ledger (a full reload resets to the default).
 
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { LedgerApi } from "@/lib/ledger";
-import type { LeafItem } from "@/lib/ledger";
+import type { Entity, LeafItem } from "@/lib/ledger";
+import { filterLeaves } from "./_tree";
 import { LEDGER_LEAVES } from "./_fixtures";
 
 export type LedgerSource = "fixtures" | "live";
+export type EntityScope = Entity | "both";
 const ENV_LIVE = process.env.NEXT_PUBLIC_LEDGER_LIVE !== "0";
 
+export const ENTITY_LABELS: Record<EntityScope, string> = {
+  cfpl: "CFPL", cdpl: "CDPL", both: "Both",
+};
+export const ENTITY_SCOPES: EntityScope[] = ["cfpl", "cdpl", "both"];
+const EMPTY_LEAVES: LeafItem[] = [];
+
 export interface LedgerData {
+  /** Leaves for the selected entity — what every view must derive from. */
   leaves: LeafItem[];
+  /** Every loaded leaf, before the entity filter. Only for "did the backend
+   *  return anything at all?" checks; never build a figure from this. */
+  allLeaves: LeafItem[];
+  entity: EntityScope;
+  setEntity: (e: EntityScope) => void;
   loading: boolean;
   error: string | null;
   source: LedgerSource;
@@ -32,6 +46,10 @@ const Ctx = createContext<LedgerData | null>(null);
 
 export function LedgerDataProvider({ children }: { children: React.ReactNode }) {
   const [source, setSourceState] = useState<LedgerSource>(ENV_LIVE ? "live" : "fixtures");
+  // The header's CFPL/CDPL/Both selector lives here rather than on the page so
+  // the choice survives navigation into the group drill and item hub, and so
+  // every view filters the SAME leaf set. Default matches the old page default.
+  const [entity, setEntity] = useState<EntityScope>("cfpl");
   const [remote, setRemote] = useState<{ loading: boolean; error: string | null; data: LeafItem[] | null }>({
     loading: false, error: null, data: null,
   });
@@ -63,9 +81,22 @@ export function LedgerDataProvider({ children }: { children: React.ReactNode }) 
   }, []);
   const reload = useCallback(() => setReloadKey((k) => k + 1), []);
 
-  const value: LedgerData = source === "live"
-    ? { leaves: remote.data ?? [], loading: remote.loading, error: remote.error, source, setSource, reload }
-    : { leaves: LEDGER_LEAVES, loading: false, error: null, source, setSource, reload };
+  // Memoised so the `remote.data ?? []` fallback doesn't hand a fresh array to
+  // the filter below on every render.
+  const allLeaves = useMemo(
+    () => (source === "live" ? (remote.data ?? EMPTY_LEAVES) : LEDGER_LEAVES),
+    [source, remote.data],
+  );
+  // Applied once, here, so no view can forget it and silently show CFPL+CDPL
+  // under a "CFPL" label. Uses the module's normal LeafFilter mechanism.
+  const leaves = useMemo(() => filterLeaves(allLeaves, { entity }), [allLeaves, entity]);
+
+  const value: LedgerData = {
+    leaves, allLeaves, entity, setEntity,
+    loading: source === "live" ? remote.loading : false,
+    error: source === "live" ? remote.error : null,
+    source, setSource, reload,
+  };
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
@@ -78,7 +109,7 @@ export function useLedgerLeaves(): LedgerData {
 
 // ── Loading / error / empty gate ───────────────────────────────────
 export function LedgerGate({ children }: { children: React.ReactNode }) {
-  const { leaves, loading, error, reload, source } = useLedgerLeaves();
+  const { leaves, allLeaves, entity, loading, error, reload, source } = useLedgerLeaves();
   if (source === "live" && loading) {
     return (
       <div className="flex flex-col gap-[9px]" aria-busy="true" aria-live="polite">
@@ -98,10 +129,35 @@ export function LedgerGate({ children }: { children: React.ReactNode }) {
       </div>
     );
   }
-  if (source === "live" && leaves.length === 0) {
+  if (source === "live" && allLeaves.length === 0) {
     return <div className="rounded-[11px] border border-[var(--aws-border)] bg-white p-[14px] font-mono text-[12px] text-[var(--text-muted)]">No ledger data returned. Once the backend is seeded this will populate.</div>;
   }
+  // Data loaded, but the entity selector filtered all of it away — say so rather
+  // than implying the backend returned nothing.
+  if (leaves.length === 0 && allLeaves.length > 0) {
+    return <div className="rounded-[11px] border border-[var(--aws-border)] bg-white p-[14px] font-mono text-[12px] text-[var(--text-muted)]">No rows for {ENTITY_LABELS[entity]}. Switch the entity selector to see the other company.</div>;
+  }
   return <>{children}</>;
+}
+
+// ── CFPL / CDPL / Both selector (for the page header) ──────────────
+// Drives the real entity filter in this provider — not a decorative control.
+export function LedgerEntityToggle() {
+  const { entity, setEntity } = useLedgerLeaves();
+  return (
+    <div className="inline-flex bg-white border border-[var(--aws-border)] rounded-[8px] p-[2px] gap-[2px]" title="Filter the ledger to one company, or combine both">
+      {ENTITY_SCOPES.map((e) => (
+        <button
+          key={e}
+          onClick={() => setEntity(e)}
+          aria-pressed={entity === e}
+          className={`font-mono text-[11px] px-[11px] py-[4px] rounded-[6px] ${
+            entity === e ? "bg-[var(--aws-navy)] text-white font-semibold" : "text-[var(--text-secondary)]"
+          }`}
+        >{ENTITY_LABELS[e]}</button>
+      ))}
+    </div>
+  );
 }
 
 // ── Sample / Live toggle (for the page header) ─────────────────────

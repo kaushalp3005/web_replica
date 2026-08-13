@@ -85,7 +85,8 @@ export interface LeafItem extends MovementCols {
   godown: string;
   value_indicative: number;
   // Which company the row came from. The header's CFPL/CDPL/Both selector
-  // filters on this; without it the selector cannot do anything.
+  // filters on this — see LedgerDataProvider, which applies the filter once for
+  // the whole module (filterLeaves in _tree.ts handles the `entity` predicate).
   entity: Entity;
 }
 
