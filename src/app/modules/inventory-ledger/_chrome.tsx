@@ -7,6 +7,7 @@
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { useUserInitial } from "@/lib/user";
+import { useLedgerLeaves } from "./_LedgerData";
 
 export interface LedgerChromeProps {
   title: string;
@@ -16,6 +17,7 @@ export interface LedgerChromeProps {
 export function LedgerChrome({ title, children }: LedgerChromeProps) {
   const router = useRouter();
   const initial = useUserInitial();
+  const { source } = useLedgerLeaves();
   const atRoot = title === "Stock Summary";
 
   return (
@@ -39,6 +41,14 @@ export function LedgerChrome({ title, children }: LedgerChromeProps) {
           )}
         </nav>
         <div className="flex-1" />
+        {source === "live" && (
+          <span
+            title="Only the Inward column is wired to live data. The other movement columns are zero, so Closing is cumulative inward — not a stock balance."
+            className="font-mono text-[10.5px] px-[8px] py-[3px] rounded-[6px] bg-[#fdf3e2] text-[#8a5a00] border border-[#e8c98a] whitespace-nowrap"
+          >
+            Inward only
+          </span>
+        )}
         <button
           onClick={() => router.push("/modules/profile")}
           aria-label="Open profile" title="Profile"
