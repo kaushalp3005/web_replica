@@ -265,6 +265,13 @@ export function ArticlePicker({ onAdd, restrictItemType }: {
   const [results, setResults] = useState<string[]>([]);
   const [searching, setSearching] = useState(false);
 
+  // Why the list is empty. Both tabs used to drop a rejected lookup on the floor
+  // and render "No matching articles." / "No options yet.", so a 403 from
+  // /so/sku-lookup looked exactly like a SKU that isn't in the master — which is
+  // how the npd_team RBAC gap (migration 090) stayed invisible. Same reasoning as
+  // searchBoms in lib/npd-dev.ts, which already throws rather than returning [].
+  const [error, setError] = useState<string | null>(null);
+
   // Browse cascade options refresh whenever an upstream key changes. Deferred to
   // a microtask (react-hooks/set-state-in-effect); cleanup aborts the in-flight
   // request so a fast operator never sees stale options land.
@@ -279,8 +286,14 @@ export function ArticlePicker({ onAdd, restrictItemType }: {
         { item_type: itemType || undefined, item_group: itemGroup || undefined, sub_group: subGroup || undefined },
         c.signal,
       ).then(
-        (r) => { if (!c.signal.aborted) { setOpts(r.options ?? {}); setLoading(false); } },
-        () => { if (!c.signal.aborted) setLoading(false); },
+        (r) => { if (!c.signal.aborted) { setOpts(r.options ?? {}); setError(null); setLoading(false); } },
+        (e: unknown) => {
+          // An abort rejects too — that's a superseded request, not a failure.
+          if (c.signal.aborted) return;
+          setOpts({});
+          setError(e instanceof Error ? e.message : "Couldn't load the article master");
+          setLoading(false);
+        },
       );
     });
     return () => c.abort();
@@ -295,7 +308,7 @@ export function ArticlePicker({ onAdd, restrictItemType }: {
     const t = setTimeout(() => {
       queueMicrotask(() => {
         if (cancelled) return;
-        if (!q) { setResults([]); setSearching(false); return; }
+        if (!q) { setResults([]); setError(null); setSearching(false); return; }
         setSearching(true);
         // sku-lookup's item_type filter is single-valued, so query once per
         // allowed type (or once unscoped) and union the names.
@@ -305,9 +318,15 @@ export function ArticlePicker({ onAdd, restrictItemType }: {
             if (cancelled) return;
             const names = lists.flatMap((r) => r.options?.particulars ?? []);
             setResults(Array.from(new Set(names)).slice(0, 50));
+            setError(null);
             setSearching(false);
           },
-          () => { if (!cancelled) setSearching(false); },
+          (e: unknown) => {
+            if (cancelled) return;
+            setResults([]);
+            setError(e instanceof Error ? e.message : "Couldn't search the article master");
+            setSearching(false);
+          },
         );
       });
     }, q ? 200 : 0);
@@ -374,13 +393,22 @@ export function ArticlePicker({ onAdd, restrictItemType }: {
                     className="block w-full text-left px-3 py-1.5 text-[13px] hover:bg-[var(--surface-subtle)] disabled:opacity-50">{name}</button>
                 </li>
               ))}
-              {!searching && query.trim() && results.length === 0 && (
+              {/* The lookup failing and the name genuinely not existing are
+                  different answers — say which. */}
+              {!searching && error && (
+                <li className="px-3 py-2 text-[12px] text-[var(--aws-error)]">Couldn&apos;t search the article master — {error}</li>
+              )}
+              {!searching && !error && query.trim() && results.length === 0 && (
                 <li className="px-3 py-2 text-[12px] text-[var(--text-muted)]">No matching articles.</li>
               )}
             </ul>
           )}
         </div>
       ) : (
+        <div>
+        {error && (
+          <p className="mb-2 text-[12px] text-[var(--aws-error)]">Couldn&apos;t load the article master — {error}</p>
+        )}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
           {singleType ? (
             <div>
@@ -405,6 +433,7 @@ export function ArticlePicker({ onAdd, restrictItemType }: {
             onChange={(v) => { setSubGroup(v); setParticulars(""); }} />
           <CascadeDropdown label="Particulars" value={particulars} options={opts.particulars ?? []} disabled={busy}
             placeholder={loading ? "Loading…" : "Select article…"} onChange={choose} />
+        </div>
         </div>
       )}
 
