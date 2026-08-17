@@ -3,7 +3,7 @@
 // scripts. Ten endpoints in total, all under /api/v1/so/ (one fulfillment
 // sync endpoint lives under /api/v1/production/).
 
-import { apiFetch } from "./auth";
+import { apiFetch, readApiErrorMessage } from "./auth";
 
 // ── Listing types ─────────────────────────────────────────────────────────
 
@@ -356,7 +356,11 @@ export async function lookupSku(
     if (v != null && v !== "") p.set(k, String(v));
   }
   const res = await apiFetch(`/api/v1/so/sku-lookup?${p}`, { signal });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  // Carry the server's message, not just the status. A bare "HTTP 403" left the
+  // ArticlePicker's empty dropdown indistinguishable from "no such article" —
+  // the RBAC gap that hid this endpoint from npd_team for so long read as a
+  // missing SKU. The 403 envelope says "Permission denied: so/sku_lookup/view".
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
   return (await res.json()) as SkuLookupResponse;
 }
 
