@@ -51,25 +51,65 @@ type Entry = {
   net_weight: number; gross_weight: number; lot_number: string; batch_number: string;
 };
 
+// The identity create_service parks on: article upper-cased + trimmed, lot trimmed.
+// Must stay in step with it — see buildEntries. Encoded as a JSON pair rather
+// than concatenated so ("AB","C") and ("A","BC") cannot collide.
+function coverKey(article: string | null | undefined, lot: string | null | undefined): string {
+  return JSON.stringify([(article || "").trim().toUpperCase(), (lot || "").trim()]);
+}
+
 function buildEntries(t: TransferDetail | null): Entry[] {
   if (!t) return [];
-  const realBoxes = (t.boxes ?? []).filter((b) => !!b.box_id);
   const out: Entry[] = [];
   let sr = 0;
-  if (realBoxes.length) {
-    for (const b of realBoxes) {
-      sr += 1;
-      out.push({
-        sr, key: String(b.id), box_id: b.box_id!, out_box_id: b.id, synthetic: false,
-        article: b.article || "—", transaction_no: b.transaction_no || "", case_pack: "",
-        net_weight: num(b.net_weight), gross_weight: num(b.gross_weight),
-        lot_number: b.lot_number || "", batch_number: b.batch_number || "",
-      });
-    }
-    return out;
+  const realBoxes = (t.boxes ?? []).filter((b) => !!b.box_id);
+  for (const b of realBoxes) {
+    sr += 1;
+    out.push({
+      sr, key: String(b.id), box_id: b.box_id!, out_box_id: b.id, synthetic: false,
+      article: b.article || "—", transaction_no: b.transaction_no || "", case_pack: "",
+      net_weight: num(b.net_weight), gross_weight: num(b.gross_weight),
+      lot_number: b.lot_number || "", batch_number: b.batch_number || "",
+    });
   }
-  // line flow: expand each line into `qty` entries (one per box).
+
+  // A dispatch can MIX scanned boxes with quantity-only lines — cartons scanned for
+  // some materials, a typed quantity for others. This used to `return out` after the
+  // box loop, so on a mixed dispatch every quantity-only line vanished: it could not
+  // be acknowledged, issued or printed, the per-article chips read "all resolved" on
+  // the boxes alone, and Confirm Receipt deleted the line's parked in-transit rows
+  // with the GRN recording nothing for that material.
+  //
+  // Which lines are box-backed is decided EXACTLY as create_service decides what to
+  // park: key on (article, lot), each line consuming ONE box from that pool. Both
+  // directions of getting this wrong are silent — over-cover and the material
+  // disappears again; under-cover and the operator gets phantom rows with no parked
+  // row behind them. Matching it keeps the synthetic LINE-<id>-<n> ids below paired
+  // 1:1 with the rows park_lines wrote, which is what the receive side's
+  // _claimed_pending_box_ids resolves a receipt against.
+  //
+  // The pool counts only the RENDERABLE boxes, which is the one place this
+  // deliberately departs from create_service: that builds `covered` from box_input
+  // before any box_id filter, so a box with a blank box_id suppresses its line's
+  // parked rows. Dispatch 67639269 is exactly that — 20 boxes, every box_id blank,
+  // 20 lines — and counting them here would cover all 20 lines while none of the
+  // boxes can render, leaving the screen completely empty. A box with no id is not
+  // scannable, ackable or printable, so it cannot stand in for its line; erring
+  // toward a visible row is the whole point of this function. The cost is the
+  // inverse case — a synthetic row whose line the backend did cover, so there is no
+  // parked row to claim — where acking it still records the receipt on the GRN and
+  // deletes nothing. Invisible material is the failure worth avoiding.
+  const pool = new Map<string, number>();
+  for (const b of realBoxes) {
+    const k = coverKey(b.article, b.lot_number);
+    pool.set(k, (pool.get(k) ?? 0) + 1);
+  }
+
+  // line flow: expand each box-less line into `qty` entries (one per box).
   for (const l of t.lines ?? []) {
+    const k = coverKey(l.item_description, l.lot_number);
+    const covered = pool.get(k) ?? 0;
+    if (covered > 0) { pool.set(k, covered - 1); continue; }   // box-backed — rendered above
     const q = Math.max(1, Math.round(num(l.quantity)));
     const perNet = num(l.net_weight) / q;
     const perGross = num(l.total_weight) / q;
