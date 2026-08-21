@@ -39,7 +39,10 @@ export function StatusPill({ status }: { status?: string | null }) {
 //   Hold     ← ON_HOLD (the Hold pill's tooltip shows the reason)
 //   Accepted ← BH_APPROVED and everything downstream (in production … closed)
 // CANCELLED / BH_REJECTED are terminal negatives, shown as "Cancelled".
-export type NpdReviewStatus = "PENDING" | "HOLD" | "ACCEPTED" | "CANCELLED";
+// BH_PENDING (086) is a PILL state, not a filter bucket: it lives on bh_signoff_state,
+// not on `status`, so the server-side status filters below cannot express it. A request
+// waiting on its business head still files under "Pending" — it just says so honestly.
+export type NpdReviewStatus = "PENDING" | "BH_PENDING" | "HOLD" | "ACCEPTED" | "CANCELLED";
 
 // Filter buckets (the 3 active states) → the underlying statuses they cover.
 export const NPD_STATUS_FILTERS: { value: NpdReviewStatus; label: string; statuses: string[] }[] = [
@@ -52,7 +55,13 @@ export const NPD_STATUS_FILTERS: { value: NpdReviewStatus; label: string; status
   },
 ];
 
-export function npdReviewStatus(raw?: string | null): NpdReviewStatus {
+export function npdReviewStatus(
+  raw?: string | null, bhSignoffState?: string | null,
+): NpdReviewStatus {
+  // The BH gate outranks the raw status: a SUBMITTED request whose business head has not
+  // approved yet was never handed to NPD, and showing it as plain "Pending" invites a
+  // reviewer to act on something the server will refuse.
+  if (bhSignoffState === "PENDING") return "BH_PENDING";
   switch (raw) {
     case "ON_HOLD": return "HOLD";
     case "CANCELLED":
@@ -71,25 +80,47 @@ export function npdReviewStatus(raw?: string | null): NpdReviewStatus {
 
 const NPD_STATUS_STYLES: Record<NpdReviewStatus, { bg: string; fg: string; ring: string; label: string }> = {
   PENDING:   { bg: "#eaf3ff", fg: "#1d4ed8", ring: "#bbd9f3", label: "Pending" },
+  BH_PENDING: { bg: "#eef2ff", fg: "#4338ca", ring: "#c7d2fe", label: "Awaiting BH" },
   HOLD:      { bg: "#fef9c3", fg: "#854d0e", ring: "#fde68a", label: "Hold" },
   ACCEPTED:  { bg: "#eaf6ed", fg: "#1d8102", ring: "#b6dbb1", label: "Accepted" },
   CANCELLED: { bg: "#f4f4f4", fg: "#687078", ring: "#d5dbdb", label: "Cancelled" },
 };
 
 // Simplified NPD status pill. For a HOLD, hovering shows the reason.
-export function NpdStatusPill({ status, holdReason }: { status?: string | null; holdReason?: string | null }) {
-  const key = npdReviewStatus(status);
+export function NpdStatusPill({ status, holdReason, bhSignoffState }: {
+  status?: string | null; holdReason?: string | null; bhSignoffState?: string | null;
+}) {
+  const key = npdReviewStatus(status, bhSignoffState);
   const s = NPD_STATUS_STYLES[key];
-  const title = key === "HOLD" && holdReason ? `On hold — ${holdReason}` : undefined;
+  const title = key === "HOLD" && holdReason ? `On hold — ${holdReason}`
+    : key === "BH_PENDING" ? "Waiting on the business head — it reaches NPD once they approve"
+    : undefined;
   return (
     <span
       className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap"
       style={{ background: s.bg, color: s.fg, boxShadow: `inset 0 0 0 1px ${s.ring}` }}
       title={title}
     >
+      {/* The ⓘ marks a tooltip that carries DATA (the hold reason). BH_PENDING's tooltip
+          only explains the state, and the queue's fixed-width Status column has no room
+          to spare — so it goes without. */}
       {s.label}{key === "HOLD" && holdReason ? " ⓘ" : ""}
     </span>
   );
+}
+
+// Compact billing summary for a list row (NPD/TRIAL): return type + paid amount.
+// "—" when nothing is set (e.g. non-NPD requisitions). Shared by the Sample queue and
+// the NPD Development queue so the two never drift on how billing reads.
+export function billingSummary(r: {
+  returnable?: boolean | null; non_returnable?: boolean | null;
+  paid?: boolean | null; amount?: number | null;
+}): string {
+  const rt = r.returnable ? "Returnable" : r.non_returnable ? "Non-returnable" : "";
+  const paid = r.paid
+    ? `Paid ${Number(r.amount ?? 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : "";
+  return [rt, paid].filter(Boolean).join(" · ") || "—";
 }
 
 // Standalone NPD development job-card statuses (own vocabulary, own palette).

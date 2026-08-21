@@ -13,7 +13,7 @@ import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, SAMPLE_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useHasPermission } from "@/lib/user";
 import {
-  createNpdRequisition, NPD_SAMPLE_TYPES, NPD_WAREHOUSES,
+  createNpdRequisition, NPD_SAMPLE_TYPES, NPD_WAREHOUSES, DEFAULT_NPD_WAREHOUSE,
   type NpdSampleType, type PurposeTag,
 } from "@/lib/sample";
 import {
@@ -40,7 +40,8 @@ export default function NewNpdRequisitionPage() {
   const [description, setDescription] = useState("");
   const [purposeTag, setPurposeTag] = useState<PurposeTag | "">("");
   const [requestorTeam, setRequestorTeam] = useState("");
-  const [warehouse, setWarehouse] = useState<(typeof NPD_WAREHOUSES)[number] | "">("");
+  // Pre-selected: W202 is where NPD samples are raised from (see DEFAULT_NPD_WAREHOUSE).
+  const [warehouse, setWarehouse] = useState<(typeof NPD_WAREHOUSES)[number] | "">(DEFAULT_NPD_WAREHOUSE);
   // Customer + dispatch planning (Company / Customer mandatory).
   const [companyName, setCompanyName] = useState("");
   const [customerName, setCustomerName] = useState("");

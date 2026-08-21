@@ -20,7 +20,8 @@ import {
   WAREHOUSES, NPD_WAREHOUSES, NPD_SAMPLE_TYPES,
   type Requisition, type PurposeTag, type Warehouse, type BusinessHead,
 } from "@/lib/sample";
-import { NpdStatusPill, NPD_STATUS_FILTERS } from "../sample/_shared";
+import { NpdStatusPill, NPD_STATUS_FILTERS, billingSummary } from "../sample/_shared";
+import { CELL, Sub, Hover, Field, Pair, day, joinLines, shouldFlip } from "./_queue-ui";
 import {
   BillingFields, billingError, billingPayload, billingFrom, EMPTY_BILLING, type BillingValue,
 } from "../sample/_form";
@@ -41,6 +42,117 @@ const PURPOSE_OPTIONS: { value: PurposeTag; label: string }[] = [
   { value: "INTERNAL_OTHER", label: "Internal / other" },
 ];
 
+const PURPOSE_LABELS: Record<string, string> =
+  Object.fromEntries(PURPOSE_OPTIONS.map((p) => [p.value, p.label]));
+
+function purposeLabel(r: Requisition): string {
+  const tag = r.purpose_tag ?? "";
+  return PURPOSE_LABELS[tag] ?? (r.purpose_note ?? tag ?? "");
+}
+
+function desc(r: Requisition): string {
+  return (r.description ?? "").trim();
+}
+
+/** Every target article on the request with its own pcs × weight → quantity.
+ *  The row can only show target #1 (the header mirror), so a multi-article request
+ *  looks like a single-article one until you hover it. */
+function TargetsPanel({ r }: { r: Requisition }) {
+  const targets = r.npd_targets?.length
+    ? r.npd_targets
+    : [{ name: r.npd_target_name ?? "—", pcs: r.pcs, weight_per_piece: r.weight_per_piece, quantity: r.quantity }];
+  const total = targets.reduce((n, t) => n + (Number(t.quantity) || 0), 0);
+  return (
+    <>
+      <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)]">
+        {targets.length} target article{targets.length === 1 ? "" : "s"}
+      </div>
+      <table className="w-full text-[12px]">
+        <tbody>
+          {targets.map((t, i) => (
+            <tr key={t.id ?? i} className="align-top">
+              <td className="py-[3px] pr-2 text-[var(--text-primary)] break-words">{t.name || "—"}</td>
+              <td className="py-[3px] whitespace-nowrap text-right tabular-nums text-[var(--text-secondary)]">
+                {t.pcs != null && t.weight_per_piece != null
+                  ? `${t.pcs} pcs × ${t.weight_per_piece} kg`
+                  : "—"}
+              </td>
+              <td className="py-[3px] pl-2 whitespace-nowrap text-right tabular-nums font-medium">
+                {t.quantity != null ? `${t.quantity} kg` : "—"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+        {targets.length > 1 && (
+          <tfoot>
+            <tr className="border-t border-[var(--surface-divider)]">
+              <td className="pt-1.5 text-[11px] text-[var(--text-muted)]" colSpan={2}>Total</td>
+              <td className="pt-1.5 pl-2 whitespace-nowrap text-right tabular-nums font-semibold">
+                {Math.round(total * 1000) / 1000} kg
+              </td>
+            </tr>
+          </tfoot>
+        )}
+      </table>
+    </>
+  );
+}
+
+/** The whole request, as it was raised — every field the form collects, so the queue
+ *  answers "what is this?" without a round trip to the detail page. */
+function EntryPanel({ r }: { r: Requisition }) {
+  const poc = r.sales_poc_name ?? r.sales_poc_email ?? "";
+  const purpose = purposeLabel(r);
+  const ship = r.customer_ship_to_address ?? "";
+  const targets = r.npd_targets?.length
+    ? r.npd_targets
+    : [{ name: r.npd_target_name, quantity: r.quantity }];
+  return (
+    <>
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="text-[13px] font-semibold tabular-nums">{r.request_id ?? "—"}</span>
+        <NpdStatusPill status={r.status} holdReason={r.hold_reason} bhSignoffState={r.bh_signoff_state} />
+      </div>
+      <div className="divide-y divide-[var(--surface-divider)]">
+        {/* Scalars two-up; only the free-text fields get a full line. */}
+        <div className="pb-1">
+          <Pair a={["Type", typeLabel(r.sample_type)]} b={["Warehouse", r.warehouse ?? "—"]} />
+          <Pair a={["Raised", day(r.created_at) || "—"]}
+                b={["Dispatch", day(r.confirmed_dispatch_date)
+                    ? `✓ ${day(r.confirmed_dispatch_date)}`
+                    : day(r.expected_dispatch_date) || "TBC"]} />
+          <Pair a={["Business head", r.requestor_team || "—"]} b={poc ? ["Sales POC", poc] : undefined} />
+          {(purpose || r.mode_of_transport) && (
+            <Pair a={["Purpose", purpose || "—"]}
+                  b={r.mode_of_transport ? ["Transport", r.mode_of_transport] : undefined} />
+          )}
+          {/* Full width, not paired: "Non-returnable · Paid 12,500.00" is the one scalar
+              here that a half-width cell truncates. */}
+          <Field label="Billing">{billingSummary(r)}</Field>
+        </div>
+        <div className="py-1">
+          <Field label={targets.length > 1 ? `Articles (${targets.length})` : "Article"}>
+            {targets.map((t, i) => (
+              <span key={i} className="block">
+                {t.name || "—"}{t.quantity != null ? ` — ${t.quantity} kg` : ""}
+              </span>
+            ))}
+          </Field>
+        </div>
+        <div className="py-1">
+          <Field label="Customer">
+            {r.customer_name || "—"}{r.company_name ? ` · ${r.company_name}` : ""}
+          </Field>
+          {r.customer_contact && <Field label="Contact">{r.customer_contact}</Field>}
+          {ship && <Field label="Ship to">{ship}</Field>}
+        </div>
+        {desc(r) && <div className="py-1"><Field label="Description">{desc(r)}</Field></div>}
+        {r.hold_reason && <div className="pt-1"><Field label="Hold reason">{r.hold_reason}</Field></div>}
+      </div>
+    </>
+  );
+}
+
 // Which row actions are available given status + caps. The NPD reviewer's verbs
 // are Accept + Hold; Cancel/Edit are the Sales (business requestor) actions.
 // Develop/Open live on the request's detail page (reached via View).
@@ -50,9 +162,12 @@ function rowActionFlags(
 ) {
   const s = r.status;
   const terminal = s === "CLOSED" || s === "CANCELLED";
+  // 086: a request still waiting on its business head was never handed to NPD — the
+  // server refuses the review (awaiting_bh_signoff), so don't offer the verbs.
+  const heldForBh = r.bh_signoff_state === "PENDING";
   return {
-    accept: canNpd && canReview && (s === "SUBMITTED" || s === "ON_HOLD"),
-    hold: canNpd && canReview && s === "SUBMITTED",
+    accept: canNpd && canReview && !heldForBh && (s === "SUBMITTED" || s === "ON_HOLD"),
+    hold: canNpd && canReview && !heldForBh && s === "SUBMITTED",
     cancel: canEdit && canDeleteReq && !terminal,
     edit: canEdit && canEditReq && (s === "DRAFT" || s === "SUBMITTED" || s === "BH_REJECTED"),
   };
@@ -97,10 +212,12 @@ function RowActions({ flags, busy, onView, onAccept, onHold, onCancel, onEdit }:
   onView: () => void; onAccept: () => void; onHold: () => void; onCancel: () => void;
   onEdit: () => void;
 }) {
-  const btn = "h-7 px-2.5 rounded-[2px] text-[12px] font-medium disabled:opacity-50";
+  // Sized to fit the Actions column at its share of a no-scroll table: two buttons
+  // ("View" + "Cancel") sit side by side, more than two wrap onto a second line.
+  const btn = "h-7 px-2 rounded-[2px] text-[11px] font-medium disabled:opacity-50";
   const neutral = `${btn} border border-[var(--aws-border-strong)] bg-white hover:bg-[var(--surface-subtle)]`;
   return (
-    <div className="flex flex-wrap gap-1.5">
+    <div className="flex flex-wrap justify-center gap-1.5">
       <button onClick={(e) => { e.stopPropagation(); onView(); }} className={neutral}>View</button>
       {flags.accept && (
         <button disabled={busy} onClick={(e) => { e.stopPropagation(); onAccept(); }}
@@ -364,7 +481,7 @@ export default function NpdQueuePage() {
         <div className="flex flex-col w-full sm:w-auto">
           <label className="text-[11px] text-[var(--text-muted)] mb-0.5">Search</label>
           <input
-            className="form-input w-full sm:w-56!" placeholder="ID, number, article, requestor…"
+            className="form-input w-full sm:w-56!" placeholder="ID, article, customer, requestor…"
             value={searchInput} onChange={(e) => setSearchInput(e.target.value)} aria-label="Search"
           />
         </div>
@@ -423,8 +540,10 @@ export default function NpdQueuePage() {
         </div>
       ) : (
         <>
-          {/* Mobile: cards. md+: full table. */}
-          <div className="grid grid-cols-1 gap-2 md:hidden">
+          {/* Under 1024px: cards. lg+: the full table. The switch is at `lg`, not `md`,
+              because the 9-column table only fits without spilling from ~1024px up —
+              measured, not guessed. The cards below carry the same fields, stacked. */}
+          <div className="grid grid-cols-1 gap-2 lg:hidden">
             {rows.map((r) => {
               const flags = rowActionFlags(r, caps.canNpd, caps.canEdit, canNpdCreate, canEditReq, canDeleteReq);
               return (
@@ -435,16 +554,40 @@ export default function NpdQueuePage() {
                         title={`Warehouse: ${r.warehouse ?? "—"} · Type: ${typeLabel(r.sample_type)}`}>
                         {r.request_id ?? "—"}
                       </span>
-                      <NpdStatusPill status={r.status} holdReason={r.hold_reason} />
+                      <NpdStatusPill status={r.status} holdReason={r.hold_reason} bhSignoffState={r.bh_signoff_state} />
                     </div>
                     <div className="mt-1 text-[12px] text-[var(--text-secondary)] flex flex-wrap gap-x-3 gap-y-0.5">
-                      <span>{(r.created_at ?? "").slice(0, 10)}</span>
+                      <span>{day(r.created_at)}</span>
+                      <span>{typeLabel(r.sample_type)}</span>
                       {r.quantity != null && <span>Qty {r.quantity}</span>}
-                      {r.requestor_team && <span>{r.requestor_team}</span>}
+                      {r.warehouse && <span>{r.warehouse}</span>}
                     </div>
-                    {r.npd_target_name && (
-                      <div className="mt-1 text-[12px] text-[var(--text-secondary)] truncate" title={r.npd_target_name}>Target: {r.npd_target_name}</div>
+                    {/* The card lists EVERY target article with its own quantity — the
+                        hover panel's job on the desktop table, done inline here where
+                        there is nothing to hover. */}
+                    {(r.npd_targets?.length ? r.npd_targets : r.npd_target_name
+                      ? [{ name: r.npd_target_name, quantity: r.quantity }] : []
+                    ).map((t, i) => (
+                      <div key={i} className="mt-1 text-[12px] text-[var(--text-secondary)] truncate"
+                        title={`${t.name ?? ""}${t.quantity != null ? ` — ${t.quantity} kg` : ""}`}>
+                        {i === 0 ? "Target: " : ""}{t.name}
+                        {t.quantity != null && <span className="text-[var(--text-muted)]"> — {t.quantity} kg</span>}
+                      </div>
+                    ))}
+                    {/* Customer — the field this queue was read for and never showed. */}
+                    {(r.customer_name || r.company_name) && (
+                      <div className="mt-0.5 text-[12px] text-[var(--text-secondary)] truncate"
+                        title={joinLines(r.customer_name, r.company_name, r.customer_contact, r.customer_ship_to_address)}>
+                        Customer: {r.customer_name || "—"}{r.company_name ? ` · ${r.company_name}` : ""}
+                      </div>
                     )}
+                    <div className="mt-0.5 text-[12px] text-[var(--text-muted)] flex flex-wrap gap-x-3 gap-y-0.5">
+                      {r.requestor_team && <span>BH {r.requestor_team}</span>}
+                      {(r.sales_poc_name || r.sales_poc_email) && <span>POC {r.sales_poc_name ?? r.sales_poc_email}</span>}
+                      <span>Disp {day(r.confirmed_dispatch_date) || day(r.expected_dispatch_date) || "TBC"}</span>
+                      <span>{billingSummary(r)}</span>
+                      {purposeLabel(r) && <span>{purposeLabel(r)}</span>}
+                    </div>
                     {r.description && (
                       <div className="mt-0.5 text-[12px] text-[var(--text-muted)] truncate" title={r.description}>{r.description}</div>
                     )}
@@ -460,42 +603,110 @@ export default function NpdQueuePage() {
             })}
           </div>
 
-          <div className="hidden md:block bg-white border border-[var(--aws-border)] rounded-md overflow-x-auto">
-            <table className="w-full text-[13px]">
+          {/* `table-fixed` + the colgroup below is what keeps this inside the 1280px
+              shell with NO horizontal scroll: the columns are shares of the available
+              width, so long values truncate instead of pushing the table wider. Every
+              field still on the row that lost its own column rides a second line under
+              the value it belongs to (see the widths comment), and the full text is on
+              each cell's tooltip. */}
+          {/* `table-fixed` with no column widths gives NINE EVEN columns, and is also what
+              keeps the table inside the 1280px shell with no horizontal scroll: each
+              column is a fixed share of the available width, so long values truncate
+              rather than pushing the table wider. Truncation is safe here because the
+              two cells that carry the most text — Request and Target article — open a
+              hover panel with the full picture, and every other cell keeps a tooltip. */}
+          <div className="hidden lg:block bg-white border border-[var(--aws-border)] rounded-md">
+            <table className="w-full table-fixed border-collapse text-[13px] text-center">
               <thead>
-                <tr className="bg-[var(--surface-subtle)] text-left text-[12px] text-[var(--text-secondary)]">
-                  <th className="px-3 py-2 font-semibold">Request ID</th>
-                  <th className="px-3 py-2 font-semibold">Created</th>
-                  <th className="px-3 py-2 font-semibold">Target article</th>
-                  <th className="px-3 py-2 font-semibold text-right">Qty</th>
-                  <th className="px-3 py-2 font-semibold">Description</th>
-                  <th className="px-3 py-2 font-semibold">Business head</th>
-                  <th className="px-3 py-2 font-semibold">Status</th>
-                  <th className="px-3 py-2 font-semibold">Actions</th>
+                <tr className="bg-[var(--surface-subtle)] text-[12px] text-[var(--text-secondary)]">
+                  {["Request", "Target article", "Customer", "Qty", "Dates",
+                    "Description", "Business head", "Status", "Actions"].map((h) => (
+                    <th key={h} className={`${CELL} py-2 font-semibold`}>{h}</th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => {
+                {rows.map((r, i) => {
                   const flags = rowActionFlags(r, caps.canNpd, caps.canEdit, canNpdCreate, canEditReq, canDeleteReq);
                   const desc = r.description ?? "";
+                  const purpose = purposeLabel(r);
+                  const poc = r.sales_poc_name ?? r.sales_poc_email ?? "";
+                  const confirmed = day(r.confirmed_dispatch_date);
+                  const expected = day(r.expected_dispatch_date);
+                  const billing = billingSummary(r);
+                  const targets = r.npd_targets ?? [];
+                  const flip = shouldFlip(i, rows.length);
                   return (
                     <tr key={r.id} onClick={() => openRow(r.id)}
-                      className="border-t border-[var(--surface-divider)] hover:bg-[var(--surface-subtle)] cursor-pointer">
-                      <td className="px-3 py-2 text-[var(--text-secondary)] tabular-nums whitespace-nowrap underline decoration-dotted underline-offset-2"
-                        title={`Warehouse: ${r.warehouse ?? "—"} · Type: ${typeLabel(r.sample_type)}`}>
-                        {r.request_id ?? "—"}
+                      className="hover:bg-[var(--surface-subtle)] cursor-pointer">
+                      {/* Request ID — hovering opens the WHOLE entry. */}
+                      <td className={`${CELL} py-2 text-[var(--text-secondary)] tabular-nums align-top`}>
+                        <Hover flip={flip} panel={<EntryPanel r={r} />}>
+                          <div className="truncate underline decoration-dotted underline-offset-2">
+                            {r.request_id ?? "—"}
+                          </div>
+                        </Hover>
+                        <Sub>{typeLabel(r.sample_type)}{r.warehouse ? ` · ${r.warehouse}` : ""}</Sub>
                       </td>
-                      <td className="px-3 py-2 text-[var(--text-secondary)] whitespace-nowrap">{(r.created_at ?? "").slice(0, 10)}</td>
-                      <td className="px-3 py-2 max-w-[200px] truncate" title={r.npd_target_name ?? ""}>{r.npd_target_name ?? "—"}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{r.quantity ?? "—"}</td>
-                      <td className="px-3 py-2 max-w-[220px] truncate" title={desc}>{desc || "—"}</td>
-                      <td className="px-3 py-2 max-w-[140px] truncate" title={r.requestor_team ?? ""}>{r.requestor_team ?? "—"}</td>
-                      <td className="px-3 py-2"><NpdStatusPill status={r.status} holdReason={r.hold_reason} /></td>
-                      <td className="px-3 py-2">
-                        <RowActions flags={flags} busy={busyId === r.id}
-                          onView={() => openRow(r.id)}
-                          onAccept={() => run(r.id, () => npdReview(r.id, "ACCEPT"))}
-                          onHold={() => openHold(r)} onCancel={() => openCancel(r)} onEdit={() => openEdit(r)} />
+                      {/* Target article — the row shows target #1; hovering lists them ALL
+                          with their own pcs × weight and quantity. */}
+                      <td className={`${CELL} py-2 align-top`}>
+                        <Hover flip={flip} panel={<TargetsPanel r={r} />}>
+                          <div className="truncate">{r.npd_target_name ?? "—"}</div>
+                        </Hover>
+                        <Sub title={purpose}>
+                          {targets.length > 1 ? `+${targets.length - 1} more` : purpose}
+                        </Sub>
+                      </td>
+                      {/* Customer — the field this queue was read for and never showed. */}
+                      <td className={`${CELL} py-2 align-top`}>
+                        <div className="truncate"
+                          title={joinLines(r.customer_name, r.customer_contact, r.customer_ship_to_address)}>
+                          {r.customer_name || "—"}
+                        </div>
+                        {r.company_name && <Sub title={r.company_name}>{r.company_name}</Sub>}
+                      </td>
+                      <td className={`${CELL} py-2 tabular-nums align-top`}>
+                        <div className="truncate">
+                          {targets.length > 1
+                            ? `${Math.round(targets.reduce((n, t) => n + (Number(t.quantity) || 0), 0) * 1000) / 1000} kg`
+                            : r.quantity != null ? `${r.quantity} kg` : "—"}
+                        </div>
+                        <Sub title={targets.length > 1 ? `Total across ${targets.length} articles` : ""}>
+                          {targets.length > 1
+                            ? `${targets.length} articles`
+                            : r.pcs != null && r.weight_per_piece != null ? `${r.pcs} × ${r.weight_per_piece}` : ""}
+                        </Sub>
+                      </td>
+                      {/* Raised on, then the dispatch date — NPD's confirmed one once it
+                          exists, else the BD team's expected one. */}
+                      <td className={`${CELL} py-2 tabular-nums align-top`}>
+                        <div className="truncate" title={`Raised ${day(r.created_at) || "—"}`}>{day(r.created_at) || "—"}</div>
+                        <Sub title={joinLines(
+                          expected ? `Expected dispatch ${expected}` : "Expected dispatch TBC",
+                          confirmed ? `Confirmed by NPD ${confirmed}` : "",
+                          r.mode_of_transport ? `By ${r.mode_of_transport}` : "")}>
+                          {confirmed ? `✓ ${confirmed}` : `→ ${expected || "TBC"}`}
+                        </Sub>
+                      </td>
+                      <td className={`${CELL} py-2 align-top`}>
+                        <div className="truncate" title={desc}>{desc || "—"}</div>
+                        <Sub title={billing}>{billing}</Sub>
+                      </td>
+                      <td className={`${CELL} py-2 align-top`}>
+                        <div className="truncate" title={r.requestor_team ?? ""}>{r.requestor_team ?? "—"}</div>
+                        {poc && <Sub title={`Sales POC: ${poc}`}>POC {poc}</Sub>}
+                      </td>
+                      <td className={`${CELL} py-2 align-top`}>
+                        <NpdStatusPill status={r.status} holdReason={r.hold_reason} bhSignoffState={r.bh_signoff_state} />
+                      </td>
+                      <td className={`${CELL} py-2 align-top`}>
+                        <div className="flex justify-center">
+                          <RowActions flags={flags} busy={busyId === r.id}
+                            onView={() => openRow(r.id)}
+                            onAccept={() => run(r.id, () => npdReview(r.id, "ACCEPT"))}
+                            onHold={() => openHold(r)} onCancel={() => openCancel(r)} onEdit={() => openEdit(r)} />
+                        </div>
                       </td>
                     </tr>
                   );
