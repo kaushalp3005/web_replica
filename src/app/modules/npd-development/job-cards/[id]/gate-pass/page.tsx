@@ -10,6 +10,7 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useRequireAuth, useMe } from "@/lib/user";
 import { sampleCaps } from "@/lib/sample-roles";
+import { buildOutpass, formatTotals, parseDispatchIds } from "@/lib/outpass";
 import { getDevJobCard, type DevJobCard } from "@/lib/npd-dev";
 
 const BURGUNDY = "#8B4049";
@@ -53,9 +54,12 @@ export default function DevJcGatePassPage() {
 
   const [jc, setJc] = useState<DevJobCard | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Optional ?dispatch=<id> — when present this outpass is for that single partial
-  // out (its qty + sub-number), not the full finalized output.
-  const [dispatchId, setDispatchId] = useState<number | null>(null);
+  // Optional ?dispatch=<id> — this outpass is for that single partial out (its qty +
+  // sub-number), not the full finalized output. It also accepts a COMMA-SEPARATED
+  // selection (?dispatch=12,13,14): one combined challan carrying only those parts,
+  // each on its own line with its own quantity. One id is just a selection of one, so
+  // the existing single-part links keep working untouched.
+  const [dispatchIds, setDispatchIds] = useState<number[]>([]);
   // ?merge=1 → one combined outpass listing EVERY article (each its own line), instead of
   // a single-item full/partial outpass.
   const [mergeAll, setMergeAll] = useState(false);
@@ -67,9 +71,12 @@ export default function DevJcGatePassPage() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     const sp = new URLSearchParams(window.location.search);
-    const v = sp.get("dispatch");
-    if (v) setDispatchId(Number(v));
-    if (sp.get("merge") === "1") setMergeAll(true);
+    const ids = parseDispatchIds(sp.get("dispatch"));
+    const merge = sp.get("merge") === "1";
+    if (!ids.length && !merge) return;
+    // Deferred past the effect body (the house pattern here — see the `mounted` gate)
+    // so the params land as one follow-up render rather than a cascade.
+    queueMicrotask(() => { setDispatchIds(ids); setMergeAll(merge); });
   }, []);
 
   // NPD module members (npd_team, BH, inventory_manager, sales) + admin. Anyone outside
@@ -105,39 +112,36 @@ export default function DevJcGatePassPage() {
     return <div style={{ padding: 24, fontFamily: "Arial, sans-serif", color: "#666" }}>Loading outpass…</div>;
   }
 
-  // Partial out (078): when ?dispatch=<id> resolves to a ledger row, the outpass
-  // shows THAT part's qty and a sub-numbered outpass no; otherwise it's the full
-  // finalized output (backward compatible).
-  const disp = dispatchId != null
-    ? (jc.dispatches ?? []).find((d) => Number(d.dispatch_id) === dispatchId) ?? null
-    : null;
-  const outQty = disp ? disp.qty : jc.output_qty;
-  const outpassNo = disp ? `${id}-${disp.seq}` : String(id);
-
-  // Per-article dispatch (083): the outpass names THAT article's product + uom, not the
-  // card-level (article-#1 mirror) header.
-  const dispArticle = disp?.article_id != null
-    ? (jc.articles ?? []).find((a) => a.article_id === disp.article_id) ?? null
-    : null;
-  const itemDesc = dispArticle?.name || jc.fg_sku_name || jc.title || "—";
-  const uom = dispArticle?.output_uom || jc.output_uom || jc.uom || "kg";
-
-  // Line items on the challan/outpass:
-  //  • merge=1 → EVERY article with a finalized output, one line each (combined challan)
-  //  • ?dispatch=<id> → that single dispatched part; else the card's full finalized output.
-  const artItems = (jc.articles ?? [])
-    .filter((a) => a.article_id != null && Number(a.output_qty) > 0)
-    .map((a) => ({ desc: a.name, qty: Number(a.output_qty) || 0,
-                   uom: a.output_uom || jc.output_uom || jc.uom || "kg" }));
-  const items = mergeAll && artItems.length > 0
-    ? artItems
-    : [{ desc: itemDesc, qty: Number(outQty) || 0, uom: disp?.uom || uom }];   // 084: a part's own unit
-  const totalQty = items.reduce((s, it) => s + it.qty, 0);
-  const date = ((disp?.dispatched_at ?? jc.closed_at ?? jc.dispatched_at) ?? "").slice(0, 10) || "—";
+  // The document itself — which lines, at which quantities, under which outpass number.
+  // See lib/outpass.ts: one part, a chosen SET of parts (?dispatch=a,b,c), every article
+  // (merge=1), or the card's full finalized output.
+  const doc = buildOutpass({
+    jcId: id,
+    selectedIds: dispatchIds,
+    mergeAll,
+    articles: jc.articles ?? [],
+    dispatches: jc.dispatches ?? [],
+    fgSkuName: jc.fg_sku_name,
+    title: jc.title,
+    outputQty: jc.output_qty,
+    outputUom: jc.output_uom,
+    cardUom: jc.uom,
+    dispatchRecipient: jc.dispatch_recipient,
+    closedAt: jc.closed_at,
+    dispatchedAt: jc.dispatched_at,
+  });
+  const { items, totalQty, outpassNo, date, recipient } = doc;
+  // With one unit on the document the total prints as a plain figure under its own unit
+  // label; with several it prints the per-unit breakdown instead, because there is no
+  // single number that means anything across them (see lib/outpass sumByUom).
+  const totalUnit = doc.mixedUnits ? "" : ` (${doc.totals[0]?.uom ?? "kg"})`;
+  const totalCell = doc.mixedUnits ? formatTotals(doc.totals, (v) => n(v)) : qtyStr(totalQty);
+  const totalAmt = (dp = 3) => doc.mixedUnits
+    ? formatTotals(doc.totals, (v) => n(v, dp))
+    : n(totalQty, dp);
   const toName = jc.customer_name || jc.company_name || "—";
   const toAddr = jc.customer_ship_to_address || "";
   const fromAddr = (jc.warehouse && WAREHOUSE_ADDR[jc.warehouse]) || jc.warehouse || "—";
-  const recipient = disp?.recipient || jc.dispatch_recipient || "—";
   const expDate = jc.expected_dispatch_date ? String(jc.expected_dispatch_date).slice(0, 10) : "—";
   const reason = jc.output_notes || `NPD stock dispatch — ${outpassNo}`;
   // Promote-gate digital signatures (name + decided date) — BH = REQUESTOR_BH, Inventory
@@ -261,13 +265,13 @@ export default function DevJcGatePassPage() {
           ))}
           <tr style={{ backgroundColor: "#f0ebe3" }}>
             <td colSpan={2} style={cell({ fontWeight: "bold", textAlign: "right" })}>TOTAL ({items.length} item{items.length > 1 ? "s" : ""}):</td>
-            <td style={cell({ textAlign: "center", fontWeight: "bold" })}>{qtyStr(totalQty)}</td>
+            <td style={cell({ textAlign: "center", fontWeight: "bold" })}>{totalCell}</td>
             <td style={cell()}>&nbsp;</td>
-            <td style={cell({ textAlign: "right", fontWeight: "bold" })}>{n(totalQty)}</td>
+            <td style={cell({ textAlign: "right", fontWeight: "bold" })}>{totalAmt()}</td>
           </tr>
           <tr style={{ backgroundColor: "#fdf8f4" }}>
-            <td colSpan={3} style={cell({ fontWeight: "bold", textAlign: "right", whiteSpace: "normal" })}>TOTAL FG (kg):</td>
-            <td colSpan={2} style={cell({ textAlign: "right", fontWeight: "bold", color: BURGUNDY, fontSize: "12px" })}>{n(totalQty)}</td>
+            <td colSpan={3} style={cell({ fontWeight: "bold", textAlign: "right", whiteSpace: "normal" })}>TOTAL FG{totalUnit}:</td>
+            <td colSpan={2} style={cell({ textAlign: "right", fontWeight: "bold", color: BURGUNDY, fontSize: "12px" })}>{totalAmt()}</td>
           </tr>
           <tr><td colSpan={COLS} style={{ padding: "10px", border: "1px solid #000" }}><strong>Reason:</strong> {reason}</td></tr>
           <tr>
@@ -337,8 +341,8 @@ export default function DevJcGatePassPage() {
             </tr>
           ))}
           <tr style={{ backgroundColor: "#fdf8f4" }}>
-            <td colSpan={4} style={{ ...td, fontWeight: "bold", textAlign: "right" }}>Total FG (kg):</td>
-            <td style={{ ...td, textAlign: "right", fontWeight: "bold", color: BURGUNDY }}>{n(totalQty, 2)}</td>
+            <td colSpan={4} style={{ ...td, fontWeight: "bold", textAlign: "right" }}>Total FG{totalUnit}:</td>
+            <td style={{ ...td, textAlign: "right", fontWeight: "bold", color: BURGUNDY }}>{totalAmt(2)}</td>
           </tr>
           {/* Digital approvals captured on the promote gate */}
           <tr style={{ backgroundColor: "#f8f9fa" }}>

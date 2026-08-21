@@ -13,6 +13,10 @@ export type SampleStatus =
   | "INTERNALLY_DISPATCHED" | "PARTIALLY_CONVERTED"
   | "GATE_PASS_ISSUED" | "CLOSED" | "CANCELLED";
 
+// Requisition-stage business-head gate (086) — see approval_service.bh_signoff_decision.
+export type BhSignoffState =
+  | "PENDING" | "APPROVED" | "AUTO_APPROVED" | "REJECTED" | "NOT_REQUIRED";
+
 export type ArticleRole = "RM" | "FG" | "NPD_INPUT" | "NPD_OUTPUT";
 export type PurposeTag =
   | "CUSTOMER_DISPLAY" | "CUSTOMER_ISSUE" | "TASTING_SENSORY"
@@ -73,7 +77,14 @@ export interface Requisition {
   sample_type: SampleType;
   status: SampleStatus;
   requestor_user_id?: number;        // the business head this request is raised FOR (085)
+  business_head_user_id?: number | null;  // that same BH, bound to the approval gates (085)
   requestor_team?: string | null;    // display mirror of that BH's name
+  // Requisition-stage business-head approval (086). PENDING holds the request back from
+  // the NPD team until that BH approves; AUTO_APPROVED means the sales POC IS the BH, so
+  // nobody was asked. NULL / undefined on requisitions raised before 086 — no gate.
+  bh_signoff_state?: BhSignoffState | null;
+  bh_signoff_at?: string | null;
+  bh_signoff_by?: number | null;
   // Sales point of contact (085) — defaults to whoever raised the request, editable.
   sales_poc_user_id?: number | null;
   sales_poc_name?: string | null;
@@ -289,6 +300,9 @@ export const NPD_SAMPLE_TYPES: { value: NpdSampleType; label: string }[] = [
   { value: "TRIAL", label: "Pilot Customer trial" },
 ];
 export const NPD_WAREHOUSES = ["W202", "A185", "A68", "F53", "A101"] as const;
+// Pre-selected on the NPD request forms — W202 is where these samples are actually
+// raised from, so it is the default rather than an empty "Select…".
+export const DEFAULT_NPD_WAREHOUSE: (typeof NPD_WAREHOUSES)[number] = "W202";
 
 // One requested target product. Each carries its own pcs × weight → quantity.
 export interface NpdTargetInput {
@@ -394,6 +408,20 @@ export const cancelRequisition = (id: number, reason: string) => action(id, "can
 export const closeRequisition = (id: number) => action(id, "close", undefined, "Close failed");
 export const approveRequisition = (id: number, act: "APPROVED" | "REJECTED", remarks?: string) =>
   action(id, "approve", { action: act, remarks }, "Approval failed");
+// 086 — the bound business head approves/rejects a held NPD/TRIAL request. Approving
+// releases it to the NPD team; rejecting moves it to BH_REJECTED with the reason.
+export const bhSignoff = (id: number, act: "APPROVED" | "REJECTED", remarks?: string) =>
+  action(id, "bh-signoff", { action: act, remarks }, "Business-head approval failed");
+// Email-driven reject: the BH approval mail's Reject button lands on the request page
+// with ?bh_reject=<request_id>&email=<addr>; the reason dialog submits here. PUBLIC —
+// authenticated by `email` being the request's bound business head (mandatory), so it
+// works with no session. Goes through the same-origin /api proxy (no mixed content).
+export const bhSignoffRejectByEmail = (
+  requestId: number, email: string, remarks: string,
+) => jsonOrThrow<Requisition>(
+  post(`/api/v1/sample/email/bh-signoff-reject`, { request_id: requestId, email, remarks }),
+  "Reject failed");
+
 export const npdReview = (
   id: number, act: "ACCEPT" | "REJECT" | "HOLD", reason?: string, start_date?: string,
 ) => action(id, "npd-review", { action: act, reason, start_date }, "NPD review failed");

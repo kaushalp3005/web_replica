@@ -13,7 +13,7 @@ import { useRequireAuth, useUserInitial, useMe, useIsAdmin, useHasPermission } f
 import { sampleCaps } from "@/lib/sample-roles";
 import { listRequisitions, WAREHOUSES, type Requisition } from "@/lib/sample";
 import { loadSampleListCache, saveSampleListCache } from "@/lib/sample-list-cache";
-import { STATUS_STYLES, TYPE_LABEL, StatusPill } from "./_shared";
+import { STATUS_STYLES, TYPE_LABEL, StatusPill, billingSummary } from "./_shared";
 
 const STATUS_OPTIONS = Object.keys(STATUS_STYLES);
 const TYPE_OPTIONS = Object.keys(TYPE_LABEL);
@@ -45,16 +45,6 @@ function Shell({ initial, router, children }: {
       <main className="flex-1 max-w-[1280px] w-full mx-auto px-4 sm:px-6 py-6">{children}</main>
     </div>
   );
-}
-
-// Compact billing summary for a list row (NPD/TRIAL): return type + paid amount.
-// "—" when nothing is set (e.g. non-NPD requisitions).
-function billingSummary(r: Requisition): string {
-  const rt = r.returnable ? "Returnable" : r.non_returnable ? "Non-returnable" : "";
-  const paid = r.paid
-    ? `Paid ${Number(r.amount ?? 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-    : "";
-  return [rt, paid].filter(Boolean).join(" · ") || "—";
 }
 
 export default function SampleQueuePage() {

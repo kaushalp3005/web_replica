@@ -4,19 +4,20 @@
 // DRAFT, start development (locks the recipe), then record the output and close —
 // which promotes the recipe into a live BOM. Decoupled from sample requisitions.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe, useHasPermission } from "@/lib/user";
 import { sampleCaps, roleNamesOf, isAdminMe } from "@/lib/sample-roles";
+import { sumByUom, formatTotals } from "@/lib/outpass";
 import type { MeResponse } from "@/lib/auth";
 import {
   getDevJobCard, replaceDevLines, startDevJobCard, closeDevJobCard, cancelDevJobCard,
   addDevPhase, replacePhaseLines, startDevPhase, completeDevPhase, deleteDevPhase, promoteApproval,
   promoteRejectByEmail, dispatchDevJobCard, replaceDevArticles, updateDevJobCardDetails,
   type DevJobCard, type DevLine, type DevPhase, type DevPhaseCompleteBody, type PromoteGate,
-  type DevArticle, type DevJobCardCloseBody, type DevJobCardDetailsInput,
+  type DevArticle, type DevJobCardCloseBody, type DevJobCardDetailsInput, type DevDispatch,
 } from "@/lib/npd-dev";
 import {
   ArticleEditor, articleToDraft, draftToInput, emptyArticle, articlesValid,
@@ -284,6 +285,13 @@ export default function DevJobCardDetailPage() {
     // A dispatchId prints that single partial out; omitted → the full finalized output.
     const q = dispatchId != null ? `?dispatch=${dispatchId}` : "";
     window.open(`/modules/npd-development/job-cards/${id}/gate-pass${q}`, "_blank", "noopener");
+  }
+  // One combined outpass for a CHOSEN SET of dispatched parts — each on its own line at
+  // its own quantity. Same route as a single part; ?dispatch just takes a list.
+  function openSelectedOutpass(dispatchIds: number[]) {
+    if (dispatchIds.length === 0) return;
+    window.open(`/modules/npd-development/job-cards/${id}/gate-pass?dispatch=${dispatchIds.join(",")}`,
+      "_blank", "noopener");
   }
   // One combined outpass listing EVERY article (each its own line) — merge=1.
   function openMergedOutpass() {
@@ -776,7 +784,7 @@ export default function DevJobCardDetailPage() {
               <DispatchPanel jc={jc} busy={busy}
                 qty={dispQty} setQty={setDispQty}
                 recipient={dispRecipient} setRecipient={setDispRecipient}
-                onDispatch={doDispatch} onOutpass={openGatePass} />
+                onDispatch={doDispatch} onOutpass={openGatePass} onOutpassMany={openSelectedOutpass} />
             )}
 
             {/* Per-article output & dispatch (083) — each article dispatches its OWN
@@ -795,7 +803,8 @@ export default function DevJobCardDetailPage() {
                 )}
                 {(jc.articles ?? []).filter((a) => a.article_id != null).map((a) => (
                   <PerArticleDispatchPanel key={a.article_id} jc={jc} article={a} busy={busy}
-                    onDispatch={doDispatchArticle} onOutpass={openGatePass} />
+                    onDispatch={doDispatchArticle} onOutpass={openGatePass}
+                    onOutpassMany={openSelectedOutpass} />
                 ))}
               </>
             )}
@@ -1319,12 +1328,264 @@ function PerArticlePromoteCard({ jc, busy, requested, onSubmit }: {
   );
 }
 
+const PRINTER_ICON = (
+  <svg viewBox="0 0 24 24" className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 9V2h12v7" />
+    <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+    <path d="M6 14h12v8H6z" />
+  </svg>
+);
+
+// One definition of a cell's gridline + gutter across both tables in this panel, so the
+// balances strip and the tracking ledger read as one grid rather than two styles.
+const DCELL = "border border-[var(--surface-divider)] px-3";
+const DHEAD = `${DCELL} py-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)]`;
+
+// ── Dispatch balances ────────────────────────────────────────────────────────
+// Output / dispatched / remaining as a table rather than a definition list, so it lines
+// up with the ledger under it. Units sit ON the figures, not in the column headings —
+// a part can be labelled in its own unit (084), so "Dispatched (kg)" over a mixed
+// balance would be a heading that lies.
+function DispatchBalances({ uom, out, total, remaining, fmt }: {
+  uom: string; out: number; total: number; remaining: number; fmt: (v: number) => string;
+}) {
+  const pct = out > 1e-6 ? Math.min(100, Math.round((total / out) * 100)) : 0;
+  const done = remaining <= 1e-6 && out > 1e-6;
+  return (
+    <table className="w-full table-fixed border-collapse text-[13px] text-center mb-3">
+      <thead>
+        <tr className="bg-[var(--surface-subtle)]">
+          <th className={DHEAD}>Output</th>
+          <th className={DHEAD}>Dispatched</th>
+          <th className={DHEAD}>Remaining</th>
+          <th className={DHEAD}>Progress</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td className={`${DCELL} py-2 tabular-nums font-medium`}>{fmt(out)} <span className="text-[11px] text-[var(--text-muted)]">{uom}</span></td>
+          <td className={`${DCELL} py-2 tabular-nums font-medium`}>{fmt(total)} <span className="text-[11px] text-[var(--text-muted)]">{uom}</span></td>
+          <td className={`${DCELL} py-2 tabular-nums font-medium ${done ? "text-[#1d8102]" : ""}`}>
+            {fmt(remaining)} <span className="text-[11px] text-[var(--text-muted)]">{uom}</span>
+          </td>
+          <td className={`${DCELL} py-2`}>
+            <div className="flex items-center gap-2">
+              <div className="flex-1 h-1.5 rounded-full bg-[var(--surface-divider)] overflow-hidden">
+                <div className={`h-full rounded-full ${done ? "bg-[#1d8102]" : "bg-[var(--aws-orange)]"}`}
+                  style={{ width: `${pct}%` }} />
+              </div>
+              <span className="text-[11px] tabular-nums text-[var(--text-secondary)] w-9 text-right">{pct}%</span>
+            </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  );
+}
+
+/** The "add a part" inputs, rendered as the NEXT ROW of the tracking table.
+ *
+ *  There is no unit picker: a part goes out in the BALANCE's unit, full stop. 084 allowed
+ *  a part to carry its own label, but the quantity behind it is never converted — so
+ *  labelling 0.5 off a kg balance as "gm" decremented the balance by 0.5 kg while every
+ *  document said grams. The unit is shown, not chosen. */
+interface DispatchForm {
+  qty: string; setQty: (v: string) => void;
+  recipient: string; setRecipient: (v: string) => void;
+  max: number; placeholder: string;
+  canSubmit: boolean; onSubmit: () => void;
+}
+
+// ── Dispatch tracking ledger ─────────────────────────────────────────────────
+// Every part issued out of this balance, in order, with its own PRINT action — and the
+// form for the next part as the last row, so each input sits under the column it becomes.
+//
+// The print is deliberately PER PART, never per balance: each part fired its own 265
+// goods issue, and its outpass (No <job card>-<seq>) is the document that authorizes
+// that movement. A single full-quantity doc alongside them would authorize the same
+// stock twice — which is why the "Download full outpass" button disappears as soon as
+// the first part is dispatched. Ticking several parts prints ONE document covering
+// exactly those (see lib/outpass).
+function DispatchLedger({ dispatches, uom, total, remaining, fmt, onPrint, onPrintSelected, form, note }: {
+  dispatches: DevDispatch[]; uom: string; total: number; remaining: number;
+  fmt: (v: number) => string; onPrint: (dispatchId: number) => void;
+  onPrintSelected: (dispatchIds: number[]) => void;
+  form: DispatchForm | null;
+  /** Shown in place of the form row when there is nothing to dispatch. */
+  note: React.ReactNode;
+}) {
+  // Tick parts to print ONE outpass covering just those. Held as ids, not indices, and
+  // intersected with the live ledger on every render — dispatching a new part reloads
+  // the card, and a stale id would otherwise print a document for something not on it.
+  const [ticked, setTicked] = useState<number[]>([]);
+  const ids = dispatches.map((d) => d.dispatch_id);
+  const selected = ticked.filter((t) => ids.includes(t));
+  const allOn = selected.length > 0 && selected.length === ids.length;
+  const headRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    // Indeterminate is a DOM property, not an attribute — React cannot set it in JSX.
+    if (headRef.current) headRef.current.indeterminate = selected.length > 0 && !allOn;
+  }, [selected.length, allOn]);
+  const toggle = (did: number) =>
+    setTicked((prev) => (prev.includes(did) ? prev.filter((x) => x !== did) : [...prev, did]));
+  // Print in ledger order, not click order, so the document reads like the list above it.
+  const selectedInOrder = ids.filter((i) => selected.includes(i));
+  // Per unit, for the same reason the printed total is (see lib/outpass sumByUom): a part
+  // carries its own unit label and the quantity is not converted, so one summed figure
+  // under one unit would misstate what was ticked.
+  const selectedLabel = formatTotals(
+    sumByUom(dispatches.filter((d) => selected.includes(d.dispatch_id)), uom), fmt);
+
+  const COLS = 6;
+  return (
+    <div className="rounded-md border border-[var(--aws-border)] overflow-hidden">
+      <div className="bg-[var(--surface-subtle)] border-b border-[var(--surface-divider)] px-3 py-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        <span className="text-[12px] font-semibold text-[var(--text-secondary)]">
+          Dispatch tracking · {dispatches.length} part{dispatches.length === 1 ? "" : "s"}
+        </span>
+        <div className="flex-1" />
+        {selected.length > 0 && (
+          <>
+            <span className="text-[12px] text-[var(--text-secondary)] tabular-nums">
+              {selected.length} selected · {selectedLabel}
+            </span>
+            <button onClick={() => setTicked([])}
+              className="text-[12px] text-[var(--text-muted)] hover:underline">Clear</button>
+            <button onClick={() => onPrintSelected(selectedInOrder)}
+              title="One outpass covering only the ticked parts, each at its own quantity"
+              className="h-7 px-2.5 rounded-[2px] text-[12px] font-medium bg-[var(--aws-orange)] text-white hover:bg-[var(--aws-orange-hover)] inline-flex items-center gap-1.5 whitespace-nowrap">
+              {PRINTER_ICON}
+              Print selected ({selected.length})
+            </button>
+          </>
+        )}
+      </div>
+      <table className="w-full border-collapse text-[13px]">
+        <thead>
+          <tr className="bg-[var(--surface-subtle)]">
+            <th className={`${DHEAD} w-9 !px-2`}>
+              <input ref={headRef} type="checkbox" aria-label="Select all parts"
+                className="align-middle" checked={allOn} disabled={ids.length === 0}
+                onChange={() => setTicked(allOn ? [] : ids)} />
+            </th>
+            <th className={`${DHEAD} w-10 !px-2`}>#</th>
+            <th className={`${DHEAD} text-right w-36`}>Qty</th>
+            {/* The flexible column — everything else is bounded so the driver's name gets
+                the slack. It used to wrap to three lines at this panel's real width. */}
+            <th className={`${DHEAD} text-left`}>Recipient / driver</th>
+            {/* Date + its goods issue share a column: they are one fact (when it left and
+                under which 265), and two columns starved the name beside them. */}
+            <th className={`${DHEAD} text-left w-28`}>Dispatched</th>
+            <th className={`${DHEAD} text-right w-36`}>Outpass</th>
+          </tr>
+        </thead>
+        <tbody>
+          {dispatches.length === 0 && (
+            <tr>
+              <td colSpan={COLS} className={`${DCELL} py-4 text-center`}>
+                <p className="text-[13px] text-[var(--text-muted)]">No parts dispatched yet.</p>
+                <p className="mt-0.5 text-[12px] text-[var(--text-muted)]">
+                  Each part you dispatch is tracked here with its own printable outpass.
+                </p>
+              </td>
+            </tr>
+          )}
+          {dispatches.map((d) => (
+            <tr key={d.dispatch_id}
+              className={selected.includes(d.dispatch_id) ? "bg-[#fff8f0]" : "hover:bg-[var(--surface-subtle)]"}>
+              <td className={`${DCELL} py-2 text-center !px-2`}>
+                <input type="checkbox" className="align-middle"
+                  aria-label={`Select part ${d.dev_jc_id}-${d.seq}`}
+                  checked={selected.includes(d.dispatch_id)}
+                  onChange={() => toggle(d.dispatch_id)} />
+              </td>
+              <td className={`${DCELL} py-2 text-center !px-2`}>
+                <span className="text-[11px] w-6 h-6 rounded-full bg-[var(--surface-divider)] text-[var(--text-secondary)] inline-flex items-center justify-center">{d.seq}</span>
+              </td>
+              <td className={`${DCELL} py-2 text-right font-medium tabular-nums whitespace-nowrap`}>
+                {fmt(Number(d.qty) || 0)} <span className="text-[11px] text-[var(--text-muted)]">{d.uom || uom}</span>
+              </td>
+              <td className={`${DCELL} py-2 text-[var(--text-secondary)]`}>{d.recipient || "—"}</td>
+              <td className={`${DCELL} py-2 text-[var(--text-secondary)] tabular-nums whitespace-nowrap`}>
+                <div>{(d.dispatched_at ?? "").slice(0, 10) || "—"}</div>
+                <div className="text-[11px] text-[var(--text-muted)]" title={d.mat_doc_id ? `Goods issue ${d.mat_doc_id}` : ""}>
+                  {d.mat_doc_id ? `GI ${d.mat_doc_id}` : "—"}
+                </div>
+              </td>
+              <td className={`${DCELL} py-2 text-right`}>
+                {/* Prints ONLY this part: ?dispatch=<id> resolves to this ledger row, so
+                    the challan carries its qty, its unit and outpass No <jc>-<seq>. */}
+                <button onClick={() => onPrint(d.dispatch_id)}
+                  title={`Print outpass ${d.dev_jc_id}-${d.seq} — this part only`}
+                  className="h-7 px-2.5 rounded-[2px] text-[12px] font-medium border border-[var(--aws-border-strong)] bg-white hover:bg-[var(--surface-subtle)] inline-flex items-center gap-1.5 whitespace-nowrap">
+                  {PRINTER_ICON}
+                  Print #{d.dev_jc_id}-{d.seq}
+                </button>
+              </td>
+            </tr>
+          ))}
+          {/* The next part, as a row of this same table — each input under the column it
+              becomes once dispatched. */}
+          {form ? (
+            <tr className="bg-[var(--surface-subtle)]">
+              <td className={`${DCELL} py-2 !px-2`} />
+              <td className={`${DCELL} py-2 text-center !px-2 text-[var(--text-muted)]`}>+</td>
+              <td className={`${DCELL} py-2`}>
+                <div className="flex items-center gap-1 justify-end">
+                  <input className="form-input !w-24 text-right !px-2" type="number" min="0" step="0.001" max={form.max}
+                    aria-label="Quantity to dispatch"
+                    placeholder={form.placeholder} value={form.qty}
+                    onChange={(e) => form.setQty(e.target.value)}
+                    onWheel={(e) => e.currentTarget.blur()} />
+                  <span className="text-[12px] text-[var(--text-secondary)] w-10">{uom}</span>
+                </div>
+              </td>
+              <td className={`${DCELL} py-2`}>
+                <input className="form-input" value={form.recipient} placeholder="Name…"
+                  aria-label="Recipient / driver"
+                  onChange={(e) => form.setRecipient(e.target.value)} />
+              </td>
+              <td className={`${DCELL} py-2 text-[12px] text-[var(--text-muted)]`}>on dispatch</td>
+              <td className={`${DCELL} py-2 text-right`}>
+                <button disabled={!form.canSubmit} onClick={form.onSubmit}
+                  className="h-7 px-3 rounded-[2px] bg-[var(--aws-orange)] text-white text-[12px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)] whitespace-nowrap">
+                  Dispatch part
+                </button>
+              </td>
+            </tr>
+          ) : (
+            <tr>
+              <td colSpan={COLS} className={`${DCELL} py-2`}>{note}</td>
+            </tr>
+          )}
+        </tbody>
+        {dispatches.length > 0 && (
+          <tfoot>
+            <tr className="bg-[var(--surface-subtle)] text-[12px]">
+              <td className={`${DCELL} py-2 text-right text-[var(--text-muted)]`} colSpan={2}>Total</td>
+              <td className={`${DCELL} py-2 text-right tabular-nums font-semibold`}>
+                {fmt(total)} <span className="text-[11px] font-normal text-[var(--text-muted)]">{uom}</span>
+              </td>
+              <td className={`${DCELL} py-2 text-[var(--text-muted)]`} colSpan={3}>
+                {remaining > 1e-6
+                  ? <>{fmt(remaining)} {uom} still to send</>
+                  : <span className="text-[#1d8102]">Fully dispatched</span>}
+              </td>
+            </tr>
+          </tfoot>
+        )}
+      </table>
+    </div>
+  );
+}
+
 // ── Per-article dispatch (083): one article's finalized output issued out in parts,
 // each bounded by ITS own output balance, each part printing its own outpass. ───────
-function PerArticleDispatchPanel({ jc, article, busy, onDispatch, onOutpass }: {
+function PerArticleDispatchPanel({ jc, article, busy, onDispatch, onOutpass, onOutpassMany }: {
   jc: DevJobCard; article: DevArticle; busy: boolean;
   onDispatch: (articleId: number, qty: string, uom: string, recipient: string, reset: () => void) => void;
   onOutpass: (dispatchId?: number) => void;
+  onOutpassMany: (dispatchIds: number[]) => void;
 }) {
   const uom = article.output_uom || jc.uom || "kg";   // the balance unit (Output/Remaining)
   const out = Number(article.output_qty) || 0;
@@ -1333,7 +1594,6 @@ function PerArticleDispatchPanel({ jc, article, busy, onDispatch, onOutpass }: {
     : dispatches.reduce((s, d) => s + (Number(d.qty) || 0), 0);
   const remaining = article.remaining_qty != null ? Number(article.remaining_qty) : out - total;
   const [qty, setQty] = useState("");
-  const [dispUom, setDispUom] = useState(uom);   // custom unit for THIS part (084); default = balance unit
   const [recipient, setRecipient] = useState("");
   const qn = qty === "" ? NaN : Number(qty);
   const invalid = qty !== "" && (!Number.isFinite(qn) || qn <= 0 || qn > remaining + 1e-6);
@@ -1341,74 +1601,38 @@ function PerArticleDispatchPanel({ jc, article, busy, onDispatch, onOutpass }: {
   const f = (v: number) => Number(v.toFixed(3)).toLocaleString("en-IN");
   return (
     <Card title={`Dispatch / outpass — ${article.name}`}>
-      <dl className="grid grid-cols-3 gap-x-4 gap-y-1 text-[13px] mb-3">
-        <Field label={`Output (${uom})`} value={f(out)} />
-        <Field label={`Dispatched (${uom})`} value={f(total)} />
-        <Field label={`Remaining (${uom})`} value={f(remaining)} />
-      </dl>
-      {out <= 1e-6 ? (
-        <div className="mb-3 rounded-md border border-[var(--aws-border)] bg-[var(--surface-subtle)] px-3 py-2 text-[13px] text-[var(--text-secondary)]">
-          No finalized output to dispatch for this article.
-        </div>
-      ) : remaining > 1e-6 ? (
-        <div className="flex flex-wrap items-end gap-2 mb-1">
-          <label className="text-[11px] text-[var(--text-secondary)]">Qty
-            <input className="form-input mt-0.5 !w-24" type="number" min="0" step="0.001" max={remaining}
-              placeholder={`${f(remaining)} (all)`} value={qty} onChange={(e) => setQty(e.target.value)} onWheel={(e) => e.currentTarget.blur()} />
-          </label>
-          <label className="text-[11px] text-[var(--text-secondary)]">Unit
-            <UomSelect className="mt-0.5 !w-24" value={dispUom} onChange={setDispUom} />
-          </label>
-          <label className="text-[11px] text-[var(--text-secondary)] flex-1 min-w-[140px]">Recipient / driver
-            <input className="form-input mt-0.5" value={recipient} placeholder="Name…" onChange={(e) => setRecipient(e.target.value)} />
-          </label>
-          <button disabled={!canDispatch} onClick={() => onDispatch(article.article_id as number, qty, dispUom, recipient, () => { setQty(""); setDispUom(uom); setRecipient(""); })}
-            className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">
-            Dispatch part
-          </button>
-        </div>
-      ) : (
-        <div className="mb-3 rounded-md border border-[#b6dbb1] bg-[#eaf6ed] px-3 py-2 text-[13px] text-[#1d8102]">
-          Fully dispatched — this article&apos;s entire finalized output has been issued out.
-        </div>
-      )}
-      {invalid && (
-        <p className="text-[12px] text-[var(--aws-error)] mb-3">Enter a quantity between 0 and the remaining {f(remaining)} {uom}, or leave blank to send the rest.</p>
-      )}
-      <div className="mt-3">
-        {dispatches.length === 0 ? (
-          <Empty>No parts dispatched yet.</Empty>
-        ) : (
-          <ul className="border border-[var(--aws-border)] rounded-md divide-y divide-[var(--surface-divider)]">
-            {dispatches.map((d) => (
-              <li key={d.dispatch_id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-[13px]">
-                <span className="text-[11px] w-6 h-6 rounded-full bg-[var(--surface-divider)] text-[var(--text-secondary)] flex items-center justify-center shrink-0">{d.seq}</span>
-                <span className="font-medium text-[var(--text-primary)] tabular-nums">{f(Number(d.qty) || 0)} {d.uom || uom}</span>
-                <span className="text-[var(--text-secondary)]">{d.recipient || "—"}</span>
-                <span className="text-[var(--text-muted)] text-[12px]">{(d.dispatched_at ?? "").slice(0, 10)}</span>
-                {d.mat_doc_id && <span className="text-[var(--text-muted)] text-[12px]">GI {d.mat_doc_id}</span>}
-                <div className="flex-1" />
-                <button onClick={() => onOutpass(d.dispatch_id)}
-                  className="h-7 px-2.5 rounded-[2px] text-[12px] font-medium border border-[var(--aws-border-strong)] bg-white hover:bg-[var(--surface-subtle)]">
-                  Outpass #{d.dev_jc_id}-{d.seq}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      <DispatchBalances uom={uom} out={out} total={total} remaining={remaining} fmt={f} />
+      <DispatchLedger dispatches={dispatches} uom={uom} total={total} remaining={remaining}
+        fmt={f} onPrint={onOutpass} onPrintSelected={onOutpassMany}
+        note={out <= 1e-6
+          ? <span className="text-[13px] text-[var(--text-secondary)]">No finalized output to dispatch for this article.</span>
+          : <span className="text-[13px] text-[#1d8102]">Fully dispatched — this article&apos;s entire finalized output has been issued out.</span>}
+        form={out > 1e-6 && remaining > 1e-6 ? {
+          qty, setQty, recipient, setRecipient, max: remaining,
+          placeholder: f(remaining),
+          canSubmit: canDispatch,
+          // The part goes out in the balance's own unit — see DispatchForm.
+          onSubmit: () => onDispatch(article.article_id as number, qty, uom, recipient,
+            () => { setQty(""); setRecipient(""); }),
+        } : null} />
+      {invalid ? (
+        <p className="text-[12px] text-[var(--aws-error)] mt-2">Enter a quantity between 0 and the remaining {f(remaining)} {uom}, or leave blank to send the rest.</p>
+      ) : remaining > 1e-6 && out > 1e-6 ? (
+        <p className="text-[11px] text-[var(--text-muted)] mt-2">Leave the quantity blank to send the whole remaining {f(remaining)} {uom}.</p>
+      ) : null}
     </Card>
   );
 }
 
 // Partial-out panel (CLOSED card): issue the finalized FG sample in parts. Shows
-// output / dispatched / remaining, a qty+recipient form bounded by the remaining
+// output / dispatched / remaining, a qty+recipient row bounded by the remaining
 // balance, and the ledger of parts already sent — each with its own outpass.
-function DispatchPanel({ jc, busy, qty, setQty, recipient, setRecipient, onDispatch, onOutpass }: {
+function DispatchPanel({ jc, busy, qty, setQty, recipient, setRecipient, onDispatch, onOutpass, onOutpassMany }: {
   jc: DevJobCard; busy: boolean;
   qty: string; setQty: (v: string) => void;
   recipient: string; setRecipient: (v: string) => void;
   onDispatch: () => void; onOutpass: (dispatchId?: number) => void;
+  onOutpassMany: (dispatchIds: number[]) => void;
 }) {
   const uom = jc.output_uom || jc.uom || "kg";
   const out = Number(jc.output_qty) || 0;
@@ -1425,60 +1649,22 @@ function DispatchPanel({ jc, busy, qty, setQty, recipient, setRecipient, onDispa
       <p className="text-[12px] text-[var(--text-muted)] mb-3">
         Issue the finalized FG sample out in parts — each part fires a goods issue and prints its own outpass. Dispatch again until the whole output is sent.
       </p>
-      <dl className="grid grid-cols-3 gap-x-4 gap-y-1 text-[13px] mb-3">
-        <Field label={`Output (${uom})`} value={f(out)} />
-        <Field label={`Dispatched (${uom})`} value={f(total)} />
-        <Field label={`Remaining (${uom})`} value={f(remaining)} />
-      </dl>
-      {out <= 1e-6 ? (
-        <div className="mb-3 rounded-md border border-[var(--aws-border)] bg-[var(--surface-subtle)] px-3 py-2 text-[13px] text-[var(--text-secondary)]">
-          No finalized output to dispatch.
-        </div>
-      ) : remaining > 1e-6 ? (
-        <div className="flex flex-wrap items-end gap-2 mb-1">
-          <label className="text-[11px] text-[var(--text-secondary)]">Qty ({uom})
-            <input className="form-input mt-0.5 !w-32" type="number" min="0" step="0.001" max={remaining}
-              placeholder={`${f(remaining)} (all)`} value={qty} onChange={(e) => setQty(e.target.value)} />
-          </label>
-          <label className="text-[11px] text-[var(--text-secondary)] flex-1 min-w-[160px]">Recipient / driver
-            <input className="form-input mt-0.5" value={recipient} placeholder="Name…"
-              onChange={(e) => setRecipient(e.target.value)} />
-          </label>
-          <button disabled={!canDispatch} onClick={onDispatch}
-            className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">
-            Dispatch part
-          </button>
-        </div>
-      ) : (
-        <div className="mb-3 rounded-md border border-[#b6dbb1] bg-[#eaf6ed] px-3 py-2 text-[13px] text-[#1d8102]">
-          Fully dispatched — the entire finalized output has been issued out.
-        </div>
-      )}
-      {invalid && (
-        <p className="text-[12px] text-[var(--aws-error)] mb-3">Enter a quantity between 0 and the remaining {f(remaining)} {uom}, or leave blank to send the rest.</p>
-      )}
-      <div className="mt-3">
-        {dispatches.length === 0 ? (
-          <Empty>No parts dispatched yet.</Empty>
-        ) : (
-          <ul className="border border-[var(--aws-border)] rounded-md divide-y divide-[var(--surface-divider)]">
-            {dispatches.map((d) => (
-              <li key={d.dispatch_id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-[13px]">
-                <span className="text-[11px] w-6 h-6 rounded-full bg-[var(--surface-divider)] text-[var(--text-secondary)] flex items-center justify-center shrink-0">{d.seq}</span>
-                <span className="font-medium text-[var(--text-primary)] tabular-nums">{f(Number(d.qty) || 0)} {d.uom || uom}</span>
-                <span className="text-[var(--text-secondary)]">{d.recipient || "—"}</span>
-                <span className="text-[var(--text-muted)] text-[12px]">{(d.dispatched_at ?? "").slice(0, 10)}</span>
-                {d.mat_doc_id && <span className="text-[var(--text-muted)] text-[12px]">GI {d.mat_doc_id}</span>}
-                <div className="flex-1" />
-                <button onClick={() => onOutpass(d.dispatch_id)}
-                  className="h-7 px-2.5 rounded-[2px] text-[12px] font-medium border border-[var(--aws-border-strong)] bg-white hover:bg-[var(--surface-subtle)]">
-                  Outpass #{d.dev_jc_id}-{d.seq}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      <DispatchBalances uom={uom} out={out} total={total} remaining={remaining} fmt={f} />
+      <DispatchLedger dispatches={dispatches} uom={uom} total={total} remaining={remaining}
+        fmt={f} onPrint={onOutpass} onPrintSelected={onOutpassMany}
+        note={out <= 1e-6
+          ? <span className="text-[13px] text-[var(--text-secondary)]">No finalized output to dispatch.</span>
+          : <span className="text-[13px] text-[#1d8102]">Fully dispatched — the entire finalized output has been issued out.</span>}
+        form={out > 1e-6 && remaining > 1e-6 ? {
+          qty, setQty, recipient, setRecipient, max: remaining,
+          placeholder: f(remaining),
+          canSubmit: canDispatch, onSubmit: onDispatch,
+        } : null} />
+      {invalid ? (
+        <p className="text-[12px] text-[var(--aws-error)] mt-2">Enter a quantity between 0 and the remaining {f(remaining)} {uom}, or leave blank to send the rest.</p>
+      ) : remaining > 1e-6 && out > 1e-6 ? (
+        <p className="text-[11px] text-[var(--text-muted)] mt-2">Leave the quantity blank to send the whole remaining {f(remaining)} {uom}.</p>
+      ) : null}
     </Card>
   );
 }

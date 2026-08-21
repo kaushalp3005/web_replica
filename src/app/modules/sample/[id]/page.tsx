@@ -14,7 +14,8 @@ import { useRequireAuth, useUserInitial, useMe, useHasPermission } from "@/lib/u
 import { sampleCaps } from "@/lib/sample-roles";
 import {
   getRequisition, submitRequisition, cancelRequisition, closeRequisition,
-  approveRequisition, npdReview, issueOutward, dispatchInternal, startProduction,
+  approveRequisition, bhSignoff, bhSignoffRejectByEmail, npdReview, issueOutward,
+  dispatchInternal, startProduction,
   markPacking, markReady, invVerify, issueGatePass, convertFull, convertPartial,
   printGatePassBlob, updateRequisition, listBusinessHeads, WAREHOUSES,
   type Requisition, type RecipientBody, type RequisitionCreate,
@@ -28,7 +29,7 @@ import {
 
 type ModalMode =
   | null | "reject" | "cancel" | "gatePass" | "convertFull" | "convertPartial"
-  | "npdReject" | "npdHold";
+  | "npdReject" | "npdHold" | "bhReject";
 
 const PURPOSE_OPTIONS: { value: PurposeTag; label: string }[] = [
   { value: "CUSTOMER_DISPLAY", label: "Customer display" },
@@ -56,6 +57,10 @@ export default function SampleDetailPage() {
   const [busy, setBusy] = useState(false);
   const [modal, setModal] = useState<ModalMode>(null);
   const [editing, setEditing] = useState(false);
+  // Set when the reject dialog was opened from the BH approval mail's Reject button
+  // (?bh_reject=<request_id>&email=<addr>). The submit then goes through the
+  // email-authenticated endpoint — the BH may have no portal session at all.
+  const [emailReject, setEmailReject] = useState<{ requestId: number; email: string } | null>(null);
 
   // Hydration gate. This page is server-rendered, where useRequireAuth returns
   // true (no token store) but the first browser render starts authed=false — so
@@ -82,6 +87,20 @@ export default function SampleDetailPage() {
     if (!authed || !Number.isFinite(id)) return;
     queueMicrotask(() => { void refresh(); });
   }, [authed, id, refresh]);
+
+  // Arriving from the BH approval mail's Reject button → pop the reason dialog bound to
+  // that request + email. Strip the params so a manual refresh doesn't re-open it. Runs
+  // once on mount (client-only — no SSR query access needed).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sp = new URLSearchParams(window.location.search);
+    const rid = Number(sp.get("bh_reject") ?? 0);
+    const em = sp.get("email");
+    if (rid > 0 && em) {
+      window.history.replaceState(null, "", window.location.pathname);
+      queueMicrotask(() => { setEmailReject({ requestId: rid, email: em }); setModal("bhReject"); });
+    }
+  }, []);
 
   const run = useCallback(async (fn: () => Promise<unknown>) => {
     setBusy(true); setError(null);
@@ -134,6 +153,16 @@ export default function SampleDetailPage() {
   // request states before it's been actioned downstream.
   const canEdit = req != null && caps.canApprove
     && (req.status === "DRAFT" || req.status === "SUBMITTED" || req.status === "BH_REJECTED");
+  // 086 — the requisition-stage business-head gate. Only the BH the request was raised
+  // FOR can clear it (admins too, mirroring the server); everyone else just sees that it
+  // is waiting. Requisitions raised before 086 carry no state and show nothing.
+  const bhPending = req?.bh_signoff_state === "PENDING";
+  const meId = Number(me?.user_id ?? 0) || 0;
+  const isBoundBh = req != null && meId > 0 && req.business_head_user_id === meId;
+  const canActBhSignoff = bhPending && (isBoundBh || caps.isAdmin);
+  // Most recent BH sign-off remark, for the rejected note.
+  const bhSignoffRemark =
+    (req?.approvals ?? []).filter((a) => a.approval_stage === "REQUESTOR_BH_SIGNOFF").at(-1)?.remarks ?? null;
   // Most recent HOLD remark (approvals are ordered by sequence_no asc).
   const holdReason = req?.status === "ON_HOLD"
     ? ((req.approvals ?? []).filter((a) => a.action === "HOLD").at(-1)?.remarks ?? null)
@@ -175,7 +204,7 @@ export default function SampleDetailPage() {
                     <div className="flex flex-wrap items-center gap-2.5">
                       <h1 className="text-[28px] leading-none font-semibold text-[var(--text-primary)] tabular-nums">{req.request_id ?? id}</h1>
                       {isNpdTrial
-                        ? <NpdStatusPill status={req.status} holdReason={holdReason} />
+                        ? <NpdStatusPill status={req.status} holdReason={holdReason} bhSignoffState={req.bh_signoff_state} />
                         : <StatusPill status={req.status} />}
                       <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-[var(--surface-divider)] text-[var(--text-secondary)]">{TYPE_LABEL[req.sample_type] ?? req.sample_type}</span>
                     </div>
@@ -287,8 +316,45 @@ export default function SampleDetailPage() {
               <ActionBar req={req} caps={caps} busy={busy} run={run} setModal={setModal} printGatePass={printGatePass} />
             )}
 
-            {/* NPD review of a BH-sent request — the NPD team's verdict. */}
-            {isNpdTrial && caps.canNpd && canNpd && (req.status === "SUBMITTED" || req.status === "ON_HOLD") && (
+            {/* 086 — business-head approval of the request, BEFORE NPD sees it. Shown to
+                everyone on the request (so the wait is visible), actionable only by the
+                bound BH / an admin. */}
+            {isNpdTrial && bhPending && (
+              <Card title="Business-head approval">
+                <p className="-mt-1 mb-3 text-[12px] text-[var(--text-muted)]">
+                  {canActBhSignoff
+                    ? "This request was raised on your behalf. Approve it to send it to the NPD team, or reject it with a reason."
+                    : `Waiting on ${req.requestor_team?.trim() || "the business head"} to approve this request. The NPD team is notified once they do.`}
+                </p>
+                {canActBhSignoff && (
+                  <div className="flex flex-wrap gap-2">
+                    <button disabled={busy} onClick={() => run(() => bhSignoff(req.id, "APPROVED"))}
+                      className="h-9 px-4 rounded-[2px] text-[13px] font-medium inline-flex items-center gap-1.5 bg-[var(--aws-orange)] text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-50">
+                      <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M5 13l4 4L19 7" /></svg>
+                      Approve
+                    </button>
+                    <button disabled={busy} onClick={() => setModal("bhReject")}
+                      className="h-9 px-4 rounded-[2px] text-[13px] font-medium inline-flex items-center gap-1.5 border border-[#f0c7be] bg-[#fdf3f1] text-[#b1361e] hover:bg-[#fbe7e2] disabled:opacity-50">
+                      <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
+                      Reject
+                    </button>
+                  </div>
+                )}
+              </Card>
+            )}
+
+            {/* The BH's rejection reason, once recorded. */}
+            {isNpdTrial && req.bh_signoff_state === "REJECTED" && (
+              <div className="rounded-md border border-[#f0c7be] bg-[#fdf3f1] px-3 py-2.5">
+                <div className="text-[12px] font-semibold text-[#b1361e] mb-0.5">Rejected by the business head</div>
+                <p className="text-[13px] text-[#b1361e]">{bhSignoffRemark || "No reason recorded."}</p>
+              </div>
+            )}
+
+            {/* NPD review of a BH-approved request — the NPD team's verdict. Hidden while
+                the BH gate is still pending: the request has not been handed over yet, and
+                the server refuses the action anyway (error awaiting_bh_signoff). */}
+            {isNpdTrial && caps.canNpd && canNpd && !bhPending && (req.status === "SUBMITTED" || req.status === "ON_HOLD") && (
               <Card title="NPD review">
                 <p className="-mt-1 mb-3 text-[12px] text-[var(--text-muted)]">Record the NPD team&apos;s decision on this request — a reason is required to hold.</p>
                 <div className="flex flex-wrap gap-2">
@@ -337,6 +403,14 @@ export default function SampleDetailPage() {
         <ActionModal mode={modal} busy={busy} onClose={() => setModal(null)}
           onSubmit={(data) => {
             if (modal === "reject") return run(() => approveRequisition(req.id, "REJECTED", data.remarks));
+            if (modal === "bhReject") {
+              const reason = data.reason ?? "";
+              return run(async () => {
+                if (emailReject) await bhSignoffRejectByEmail(emailReject.requestId, emailReject.email, reason);
+                else await bhSignoff(req.id, "REJECTED", reason);
+                setEmailReject(null);
+              });
+            }
             if (modal === "npdReject") return run(() => npdReview(req.id, "REJECT", data.reason));
             if (modal === "npdHold") return run(() => npdReview(req.id, "HOLD", data.reason));
             if (modal === "cancel") return run(() => cancelRequisition(req.id, data.reason ?? ""));
@@ -555,12 +629,12 @@ function ActionModal({ mode, busy, onClose, onSubmit }: {
   const set = (k: keyof ModalData, v: string) => setD((p) => ({ ...p, [k]: v }));
   const recipient = mode === "gatePass" || mode === "convertFull" || mode === "convertPartial";
   const title = mode === "reject" ? "Reject requisition" : mode === "cancel" ? "Cancel requisition"
-    : mode === "npdReject" ? "Reject request" : mode === "npdHold" ? "Hold request"
+    : mode === "bhReject" ? "Reject request" : mode === "npdReject" ? "Reject request" : mode === "npdHold" ? "Hold request"
     : mode === "gatePass" ? "Issue gate pass" : mode === "convertFull" ? "Convert to gate pass (full)" : "Convert to gate pass (partial)";
 
   const valid = mode === "reject" ? !!d.remarks?.trim()
     : mode === "cancel" ? !!d.reason?.trim()
-    : (mode === "npdReject" || mode === "npdHold") ? !!d.reason?.trim()
+    : (mode === "bhReject" || mode === "npdReject" || mode === "npdHold") ? !!d.reason?.trim()
     : mode === "convertPartial" ? Number(d.qty) > 0
     : true;
 
@@ -571,7 +645,7 @@ function ActionModal({ mode, busy, onClose, onSubmit }: {
         <div className="space-y-2">
           {mode === "reject" && <Textarea label="Remarks (required)" value={d.remarks ?? ""} onChange={(v) => set("remarks", v)} />}
           {mode === "cancel" && <Textarea label="Reason (required)" value={d.reason ?? ""} onChange={(v) => set("reason", v)} />}
-          {(mode === "npdReject" || mode === "npdHold") && <Textarea label="Reason (required)" value={d.reason ?? ""} onChange={(v) => set("reason", v)} />}
+          {(mode === "bhReject" || mode === "npdReject" || mode === "npdHold") && <Textarea label="Reason (required)" value={d.reason ?? ""} onChange={(v) => set("reason", v)} />}
           {mode === "convertPartial" && (
             <Input label="Quantity (≤ issued)" type="number" value={d.qty ?? ""} onChange={(v) => set("qty", v)} />
           )}

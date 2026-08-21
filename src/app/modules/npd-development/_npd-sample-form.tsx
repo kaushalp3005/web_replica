@@ -9,14 +9,14 @@
 // backend (NpdRequisitionCreate). Posts to the dedicated NPD endpoint, which
 // re-validates the NPD-mandatory fields server-side.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe, useHasPermission } from "@/lib/user";
 import {
   createNpdRequisition, submitRequisition, listBusinessHeads, listSalesPocs,
-  NPD_SAMPLE_TYPES, NPD_WAREHOUSES,
+  NPD_SAMPLE_TYPES, NPD_WAREHOUSES, DEFAULT_NPD_WAREHOUSE,
   type NpdSampleType, type PurposeTag, type BusinessHead, type SalesPoc,
 } from "@/lib/sample";
 import {
@@ -42,6 +42,9 @@ export function NpdSampleForm({ defaultType, heading }: {
   const me = useMe();
   const canCreateReq = useHasPermission("sample", "requisition", null, "create");
   const profileName = (me?.full_name ?? "").trim();
+  // "me" is always selectable as the sales POC, matching the server's default.
+  // MeResponse.user_id is a STRING on the wire; SalesPoc.user_id is numeric.
+  const meId = Number(me?.user_id ?? 0) || 0;
   // The business head is ALWAYS chosen from the list — for every role, not just
   // admin/sales. It used to fall back to a free-text box that pre-filled the signed-in
   // user's own name, which left requestor_user_id pointing at the creator: the promote
@@ -49,7 +52,9 @@ export function NpdSampleForm({ defaultType, heading }: {
   // to the business head who has to approve it.
 
   const [type, setType] = useState<NpdSampleType>(defaultType);
-  const [warehouse, setWarehouse] = useState<(typeof NPD_WAREHOUSES)[number] | "">("");
+  // W202 is where NPD samples are raised from in practice — pre-selected so the common
+  // case is one fewer click. Still a full dropdown; any other warehouse is one change away.
+  const [warehouse, setWarehouse] = useState<(typeof NPD_WAREHOUSES)[number] | "">(DEFAULT_NPD_WAREHOUSE);
   // Multiple target articles — each a product with its own pcs × weight → qty.
   const [targets, setTargets] = useState<TargetRow[]>([{ ...EMPTY_TARGET }]);
   const [purposeTag, setPurposeTag] = useState<PurposeTag | "">("");
@@ -87,6 +92,29 @@ export function NpdSampleForm({ defaultType, heading }: {
     return () => { cancelled = true; };
   }, []);
 
+  // A business head raising their own request: pre-select THEMSELVES as both the
+  // business head and the sales POC. That pairing is what tells the server no approval
+  // is needed (086) — a BH has already said yes by raising it — so defaulting the two
+  // fields together is what makes "no approval message" the outcome for this case.
+  //
+  // Membership of the business-heads list is the test, not a role string: it is the same
+  // set the server validates requestor_user_id against, so a value defaulted from it is
+  // always selectable and always accepted.
+  const selfDefaulted = useRef(false);
+  useEffect(() => {
+    if (selfDefaulted.current || !meId || reqOptions.length === 0) return;
+    const self = reqOptions.find((b) => b.user_id === meId);
+    if (!self) { selfDefaulted.current = true; return; }   // not a BH — leave the prompt
+    selfDefaulted.current = true;
+    // Deferred past the effect body (the house pattern here — see the mounted/load
+    // effects) so the defaults land as one follow-up render, not a cascade.
+    queueMicrotask(() => {
+      setReqUserId((cur) => (cur === "" ? self.user_id : cur));
+      setRequestorTeam((cur) => (cur === "" ? self.full_name : cur));
+      setSalesPocId((cur) => (cur === "" ? self.user_id : cur));
+    });
+  }, [reqOptions, meId]);
+
   // Sales POC options.
   useEffect(() => {
     let cancelled = false;
@@ -96,14 +124,16 @@ export function NpdSampleForm({ defaultType, heading }: {
 
   // Business heads only — never the signed-in user's own name unless they are one.
   const requestorChoices = reqOptions;
-  // "me" is always selectable as the sales POC, matching the server's default.
-  // MeResponse.user_id is a STRING on the wire; SalesPoc.user_id is numeric.
-  const meId = Number(me?.user_id ?? 0) || 0;
   const pocChoices: SalesPoc[] =
     meId && !pocOptions.some((p) => p.user_id === meId)
       ? [{ user_id: meId, full_name: `${profileName || "Me"} (me)`, email: me?.email ?? "" },
          ...pocOptions]
       : pocOptions;
+
+  // Mirrors the server's approval_service.bh_signoff_decision: the sales POC defaults to
+  // the signed-in user, so an empty POC selection still means "me".
+  const effectivePocId = typeof salesPocId === "number" && salesPocId > 0 ? salesPocId : meId;
+  const bhIsPoc = typeof reqUserId === "number" && reqUserId > 0 && reqUserId === effectivePocId;
 
   // Mandatory: ≥1 target (name + pcs>0 + weight>0), warehouse, company, customer.
   const canSave =
@@ -235,6 +265,20 @@ export function NpdSampleForm({ defaultType, heading }: {
                       <option key={pc.user_id} value={String(pc.user_id)}>{pc.full_name}</option>
                     ))}
                   </select>
+                </div>
+                {/* What submitting will actually do — the BH approval gate is invisible
+                    otherwise, and "why did/didn't my BH get a message?" is the question
+                    it exists to answer. */}
+                <div className="sm:col-span-2 -mt-1">
+                  <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">
+                    {requestorTeam.trim() === "" ? (
+                      "Choose a business head — they approve the request before it reaches the NPD team."
+                    ) : bhIsPoc ? (
+                      <>No approval message will be sent — the sales POC on this request <em>is</em> its business head, so it goes straight to the NPD team.</>
+                    ) : (
+                      <>On submit, <span className="font-medium text-[var(--text-secondary)]">{requestorTeam.trim()}</span> is asked to approve this request. It reaches the NPD team once they do.</>
+                    )}
+                  </p>
                 </div>
                 {/* description */}
                 <div className="sm:col-span-2">

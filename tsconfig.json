@@ -11,6 +11,10 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
+    // Standalone Node test scripts (`node src/lib/outpass.test.ts`) rely on Node's native
+    // type stripping, which requires the explicit .ts import extension. Safe here because
+    // this project is noEmit — tsc never has to rewrite the specifier.
+    "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
     "incremental": true,
     "plugins": [
