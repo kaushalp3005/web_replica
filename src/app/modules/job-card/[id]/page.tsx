@@ -37,7 +37,6 @@ import { lockBannerId, useLockState, userMayForceUnlock } from "../_useLockState
 import { ActionButton, LockableButton } from "../_ActionButton";
 import { AmendmentsTab } from "../_AmendmentsTab";
 import { RawMaterialTab, BoxScanPanel } from "./_RawMaterialTab";
-import { OutputTab } from "./_OutputTab";
 import { SfgProducedBoxes, type BatchOpt } from "./_SfgProducedBoxes";
 // W4-MED-3/M10 — single subscription via context (see _UserContext.tsx).
 import { UserProvider } from "../_UserContext";
@@ -304,14 +303,13 @@ type JobCardDetail = {
 // Materials + Shifts (which existed on the web prototype) intentionally don't
 // have Android counterparts; the equivalent info lives inside Accounting
 // (BOM articles, consumption) and the toolbar/header time strip respectively.
-type TabKey = "chain" | "rawmaterial" | "overview" | "accounting" | "output" | "quality" | "signoffs" | "remarks" | "sfgboxes" | "amendments";
+type TabKey = "chain" | "rawmaterial" | "overview" | "accounting" | "quality" | "signoffs" | "remarks" | "sfgboxes" | "amendments";
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "chain",      label: "Stage Chain" },
   { key: "rawmaterial", label: "Raw Material" },
   { key: "overview",   label: "Overview" },
   { key: "accounting", label: "Accounting" },
-  { key: "output",     label: "Output" },
   { key: "quality",    label: "Quality" },
   { key: "signoffs",   label: "Sign-offs" },
   { key: "remarks",    label: "Remarks" },
@@ -2465,7 +2463,6 @@ function TabPanel({
     case "rawmaterial": return <RawMaterialTab jcId={detail.job_card_id} />;
     case "overview":   return <OverviewTab detail={detail} chain={chain} onReload={onReload} />;
     case "accounting": return <AccountingTab detail={detail} onReload={onReload} onJumpToBoxes={onJumpToBoxes} />;
-    case "output":     return <OutputTab detail={detail} onReload={onReload} />;
     case "quality":    return <QualityTab detail={detail} onReload={onReload} />;
     case "signoffs":   return <SignOffsTab detail={detail} onReload={onReload} />;
     case "remarks":    return <RemarksTab detail={detail} onReload={onReload} />;
