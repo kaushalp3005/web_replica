@@ -36,6 +36,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { BrowserQRCodeReader } from "@zxing/browser";
 import { BarcodeFormat, DecodeHintType } from "@zxing/library";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
+import { rollupByArticle, type ArticleIssue } from "@/lib/scanRollup";
 import { friendlyApiError } from "@/lib/apiErrors";
 
 // BarcodeDetector is not in the TS DOM lib yet — declare the slice we use.
@@ -84,8 +85,6 @@ type BoxScan = {
 };
 type ScanTotals = { boxes: number; net_weight: number; gross_weight: number; count: number };
 type Toast = { kind: "ok" | "err"; text: string } | null;
-// RM issued for the JC, rolled up per article from the scanned net weights.
-type ArticleIssue = { article: string; net_weight: number; boxes: number };
 
 export function RawMaterialTab({
   jcId,
@@ -116,19 +115,9 @@ export function RawMaterialTab({
   const inFlightRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
 
-  // RM issued per article: sum the scanned net weights by article. Blank article
-  // groups under "—"; heaviest first. Drives the summary block below the scanner.
-  const issues = useMemo<ArticleIssue[]>(() => {
-    const m = new Map<string, ArticleIssue>();
-    for (const b of boxes) {
-      const key = (b.article ?? "").trim() || "—";
-      const cur = m.get(key) ?? { article: key, net_weight: 0, boxes: 0 };
-      cur.net_weight += Number(b.net_weight) || 0;
-      cur.boxes += 1;
-      m.set(key, cur);
-    }
-    return [...m.values()].sort((a, b) => b.net_weight - a.net_weight);
-  }, [boxes]);
+  // RM issued per article. Shared with the Accounting tab's scanned column via
+  // lib/scanRollup so the two views of this number cannot drift apart.
+  const issues = useMemo<ArticleIssue[]>(() => rollupByArticle(boxes), [boxes]);
 
   const flashToast = useCallback((t: { kind: "ok" | "err"; text: string }) => {
     setToast(t);

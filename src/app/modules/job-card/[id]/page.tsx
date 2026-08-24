@@ -37,6 +37,7 @@ import { lockBannerId, useLockState, userMayForceUnlock } from "../_useLockState
 import { ActionButton, LockableButton } from "../_ActionButton";
 import { AmendmentsTab } from "../_AmendmentsTab";
 import { RawMaterialTab, BoxScanPanel } from "./_RawMaterialTab";
+import { rollupByArticle, matchIssues, type ArticleIssue } from "@/lib/scanRollup";
 import { SfgProducedBoxes, type BatchOpt } from "./_SfgProducedBoxes";
 // W4-MED-3/M10 — single subscription via context (see _UserContext.tsx).
 import { UserProvider } from "../_UserContext";
@@ -3393,6 +3394,45 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     // this doesn't reintroduce the poll-cascade the id-only dep avoided.
   }, [detail.job_card_id, detail.status, refetchBatches]);
 
+  // ── Scanned RM, shown beside each BOM line ─────────────────────────────────
+  // Read-only. The Raw Material tab scans boxes; Accounting never saw those
+  // figures, so an operator retyped a quantity they had already scanned with no
+  // way to check it. This surfaces the scanned total next to the Qty input.
+  //
+  // Per JOB CARD, not per batch: jc_box_scan.batch_id is the batch that PRODUCED
+  // an SFG box upstream, and is null for PO boxes and manual entries, so scoping
+  // it to the selected accounting batch would be wrong and would blank every
+  // PO-sourced raw material. See lib/scanRollup for the full note.
+  //
+  // GET /box-scans is gated on production/job_cards/material_scan:scan, which an
+  // accounting-only user may not hold. A 403 is expected, not an error: the
+  // column just degrades to a dash.
+  const [scanIssues, setScanIssues] = useState<ArticleIssue[]>([]);
+  const [scansDenied, setScansDenied] = useState(false);
+  useEffect(() => {
+    const ctrl = new AbortController();
+    (async () => {
+      try {
+        const res = await apiFetch(
+          `/api/v1/production/job-cards-v2/${detail.job_card_id}/box-scans`,
+          { signal: ctrl.signal },
+        );
+        if (ctrl.signal.aborted) return;
+        if (res.status === 403) { setScansDenied(true); setScanIssues([]); return; }
+        if (!res.ok) return;
+        const j = (await res.json()) as { scans?: { article: string | null; net_weight: number | null }[] };
+        if (ctrl.signal.aborted) return;
+        setScansDenied(false);
+        setScanIssues(rollupByArticle(Array.isArray(j.scans) ? j.scans : []));
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return;
+        // Non-fatal by design — the scanned column is a reference figure, and
+        // losing it must never take the Accounting tab down with it.
+      }
+    })();
+    return () => ctrl.abort();
+  }, [detail.job_card_id]);
+
   // batch_ids that actually carry recorded data (output / consumption /
   // byproduct / balance rows). Used to bias the initial batch auto-select
   // toward a batch the operator worked, instead of an empty phantom-open
@@ -3693,6 +3733,17 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     () => visibleArticles.filter(isPmArticle),
     [visibleArticles],
   );
+
+  // Scanned totals keyed to the BOM lines this stage shows. Only RM lines can
+  // match: packaging is never box-scanned, so PM renders a dash regardless.
+  // Leftovers (typos, free-text entries, SKUs not on this BOM) come back in
+  // `unmatched` and are listed under the table — dropping them would make a
+  // mistyped article look like nothing was ever scanned.
+  const scanMatch = useMemo(
+    () => matchIssues(scanIssues, visibleRmArticles.map((a) => a.material_sku_name)),
+    [scanIssues, visibleRmArticles],
+  );
+
 
   // ── Initial state — R10 per-batch scoped.  Previously sourced from
   // section_5_output (JC-level), which carried Batch 1's saved FG /
@@ -4288,6 +4339,51 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     return (pl / fgKg) * 100;
   }, [processLoss, fgActualKg]);
 
+  // ── Accounting Summary rows, one per RM/PM ───────────────────────────────
+  // Off-grade excludes wastage and control_sample, matching the offgradeTotal
+  // scalar (see the rejection bucketing above); control_sample is a BYPRODUCT
+  // category, not a balance_type, so it comes off the rejection rows too.
+  // Balance Material is the `balance` map, which the save path writes as
+  // balance_type='returned' — one entry per BOM article.
+  // Rejection rows match on bom_line_id when both sides have one, else on the
+  // material name, because a line pulled in at this stage can lack a BOM id.
+  const materialSummaryRows = useMemo<MaterialSummaryRow[]>(() => {
+    const sum = (rows: RejectionRow[]) => rows.reduce((acc, r) => acc + num(r.qty), 0);
+    return visibleArticles.map((a) => {
+      // Inlined rather than calling articleKey(): that helper is re-created
+      // every render, which would make this memo's deps change every time and
+      // defeat the memo entirely. Same expression the consumption grid uses.
+      const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
+      const mine = rejections.filter((r) =>
+        r.bomLineId != null && a.bom_line_id != null
+          ? r.bomLineId === a.bom_line_id
+          : (r.materialName || "") === a.material_sku_name);
+      return {
+        key,
+        name: a.material_sku_name,
+        itemType: a.item_type,
+        uom: a.uom,
+        consumed: num(consumption[key] ?? ""),
+        balance: num(balance[key] ?? ""),
+        offgrade: sum(mine.filter((r) => r.category !== "control_sample"
+                                      && r.category !== "wastage")),
+        ctrlSample: sum(mine.filter((r) => r.category === "control_sample")),
+      };
+    });
+  }, [visibleArticles, consumption, balance, rejections]);
+
+  // Additive rows, listed under the RM/PM block. "_other" means the operator
+  // typed a name into custom_name instead of picking from the dropdown.
+  const additiveSummaryRows = useMemo<AdditiveSummaryRow[]>(
+    () => additives
+      .map((a, i) => ({
+        key: `add${i}`,
+        name: (a.sku_name === "_other" ? a.custom_name : a.sku_name) || "(unnamed additive)",
+        qty: num(a.qty),
+      }))
+      .filter((r) => r.qty > 0 || r.name !== "(unnamed additive)"),
+    [additives],
+  );
   // Accounting Summary computed totals ─────────────────────────────────────
   // C3-H3 — rewrites the live preview to byte-for-byte match the server
   // formulas in jc_accounting_v2.save_accounting:
@@ -5459,49 +5555,114 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
               : "No material from this BOM is consumed at this stage."}
           </EmptyHint>
         ) : (
-          <div className="space-y-2 mb-4">
-            {visibleArticles.map((a) => {
-              const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
-              return (
-                <div key={key} className="grid grid-cols-12 gap-2 items-center">
-                  <div className="col-span-7 lg:col-span-5 text-[13px] text-[var(--text-primary)] truncate" title={a.material_sku_name}>
-                    {a.material_sku_name} <span className={`text-[11px] ${a.item_type === "SFG" || a.item_type === "WIP" ? "text-[var(--text-success)] font-medium" : "text-[var(--text-muted)]"}`}>({a.item_type})</span>
-                    {addedArticleKeys.has(key) ? (
-                      <span
-                        className="ml-1.5 text-[10px] px-1 py-px rounded bg-[#eef6ff] border border-[#a7c9ec] text-[#0d5aa7] align-middle"
-                        title="Pulled into this stage from the BOM. Enter a quantity and save to keep it."
-                      >
-                        added at this stage
-                      </span>
-                    ) : null}
-                  </div>
-                  <input
-                    type="number" step="any" placeholder={`Qty (${a.uom})`}
-                    className={`${inputCls} col-span-3 lg:col-span-2${consRed(a.material_sku_name) ? " bg-[#fbeced]" : ""}`}
-                    value={consumption[key] ?? ""}
-                    onChange={(e) => { markSectionDirty("consumption"); setConsumption((c) => ({ ...c, [key]: e.target.value })); }}
-                    onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
-                    disabled={inputsDisabled}
-                    aria-disabled={inputsDisabled}
-                    aria-describedby={describedBy}
-                  />
-                  <span className="col-span-2 lg:col-span-1 text-[11px] text-[var(--text-muted)]">{a.uom}</span>
-                  {/* C5: per-material variance chip — wraps to its own line
-                      on mobile (col-span-12 forces a full new row) and
-                      inlines next to the uom on lg:+ where there's room. */}
-                  <div className="col-span-12 lg:col-span-4 mt-1 lg:mt-0">
-                    <VarianceChip
-                      materialName={a.material_sku_name}
-                      bomPrescribedQty={bomPrescribedByKey[key] ?? null}
-                      actualQty={num(consumption[key] ?? "")}
-                      uom={a.uom}
-                      hasSavedConsumption={!!hasSavedConsumptionByKey[key]}
-                      plannedKg={num(String(detail.planned_qty_kg ?? 0))}
-                    />
-                  </div>
-                </div>
-              );
-            })}
+          /* Tabular: the scanned figure only means something read against the
+             quantity beside it, and a div-grid cannot express that pairing to a
+             screen reader. Wrapped in overflow-x-auto — the Issued column makes
+             this too wide for a phone otherwise. */
+          <div className="mb-4 overflow-x-auto">
+            <table className="w-full text-[13px] border-collapse">
+              <caption className="sr-only">
+                Material consumption for this stage: scanned quantity issued, and the quantity consumed.
+              </caption>
+              <thead>
+                <tr className="text-left text-[11px] uppercase tracking-wide text-[var(--text-muted)] border-b border-[#e5e7eb]">
+                  <th scope="col" className="py-1.5 pr-3 font-medium">Material</th>
+                  <th scope="col" className="py-1.5 pr-3 font-medium whitespace-nowrap">Issued (scanned)</th>
+                  <th scope="col" className="py-1.5 pr-3 font-medium whitespace-nowrap">Qty consumed</th>
+                  <th scope="col" className="py-1.5 pr-3 font-medium">UoM</th>
+                  <th scope="col" className="py-1.5 font-medium">Variance</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleArticles.map((a) => {
+                  const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
+                  const isPm = isPmArticle(a);
+                  const issue = isPm ? undefined : scanMatch.matched.get(a.material_sku_name.trim());
+                  return (
+                    <tr key={key} className="border-b border-[#f1f1f1] align-top">
+                      <th scope="row" className="py-2 pr-3 font-normal text-left max-w-[260px]">
+                        <span className="block truncate text-[var(--text-primary)]" title={a.material_sku_name}>
+                          {a.material_sku_name}{" "}
+                          <span className={`text-[11px] ${a.item_type === "SFG" || a.item_type === "WIP" ? "text-[var(--text-success)] font-medium" : "text-[var(--text-muted)]"}`}>({a.item_type})</span>
+                          {addedArticleKeys.has(key) ? (
+                            <span
+                              className="ml-1.5 text-[10px] px-1 py-px rounded bg-[#eef6ff] border border-[#a7c9ec] text-[#0d5aa7] align-middle"
+                              title="Pulled into this stage from the BOM. Enter a quantity and save to keep it."
+                            >
+                              added at this stage
+                            </span>
+                          ) : null}
+                        </span>
+                      </th>
+                      <td className="py-2 pr-3 whitespace-nowrap text-[12px]">
+                        {issue ? (
+                          <span className="text-[var(--text-primary)]">
+                            {fmtKg(issue.net_weight)}
+                            <span className="text-[var(--text-muted)]"> · {issue.boxes} {issue.boxes === 1 ? "box" : "boxes"}</span>
+                          </span>
+                        ) : (
+                          <span
+                            className="text-[var(--text-muted)]"
+                            title={
+                              isPm
+                                ? "Packaging material is not box-scanned."
+                                : scansDenied
+                                  ? "You do not have production/job_cards/material_scan:scan, so scanned quantities cannot be shown."
+                                  : "No scanned box matched this material."
+                            }
+                          >
+                            —
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 pr-3">
+                        <input
+                          type="number" step="any" placeholder={`Qty (${a.uom})`}
+                          className={`${inputCls} w-[120px]${consRed(a.material_sku_name) ? " bg-[#fbeced]" : ""}`}
+                          value={consumption[key] ?? ""}
+                          onChange={(e) => { markSectionDirty("consumption"); setConsumption((c) => ({ ...c, [key]: e.target.value })); }}
+                          onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
+                          disabled={inputsDisabled}
+                          aria-disabled={inputsDisabled}
+                          aria-label={`Quantity consumed, ${a.material_sku_name}`}
+                          aria-describedby={describedBy}
+                        />
+                      </td>
+                      <td className="py-2 pr-3 text-[11px] text-[var(--text-muted)]">{a.uom}</td>
+                      <td className="py-2">
+                        <VarianceChip
+                          materialName={a.material_sku_name}
+                          bomPrescribedQty={bomPrescribedByKey[key] ?? null}
+                          actualQty={num(consumption[key] ?? "")}
+                          uom={a.uom}
+                          hasSavedConsumption={!!hasSavedConsumptionByKey[key]}
+                          plannedKg={num(String(detail.planned_qty_kg ?? 0))}
+                        />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+
+            {/* Scanned, but nothing on this BOM claims it. Listed rather than
+                dropped: a mistyped or free-text article would otherwise leave
+                its line reading "—", which looks identical to "never scanned". */}
+            {scanMatch.unmatched.length > 0 ? (
+              <div className="mt-2 pt-2 border-t border-dashed border-[#d9d9d9]">
+                <p className="text-[11px] text-[var(--aws-warning,#8a5e10)] mb-1">
+                  Scanned but not on this BOM — check the article name on the scan if a line above reads “—”.
+                </p>
+                <ul className="text-[12px] text-[var(--text-muted)] space-y-0.5">
+                  {scanMatch.unmatched.map((u) => (
+                    <li key={u.article}>
+                      <span className="text-[var(--text-primary)]">{u.article}</span>
+                      {" · "}{fmtKg(u.net_weight)}{" · "}{u.boxes} {u.boxes === 1 ? "box" : "boxes"}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
         )}
 
@@ -6001,6 +6162,8 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       {/* ── Accounting Summary ──────────────────────────────────────────── */}
       <AccountingSummaryCard
         summary={summary}
+        materialRows={materialSummaryRows}
+        additiveRows={additiveSummaryRows}
         perBatchSummaries={perBatchSummaries}
         totalSummary={totalSummary}
         selectedBatchId={selectedBatchId}
@@ -6093,6 +6256,39 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
 // Responsive: single column on mobile (< sm), two columns at sm:, three at lg:.
 // Status banner spans the full grid on every viewport.
 
+/** One RM/PM line of the Accounting Summary table.
+ *
+ *  Only these four measures exist per material; everything else on the summary
+ *  (FG output, process loss, EGA, the percentages, the balance verdict) is a
+ *  batch-level scalar and is rowspan'd across the rows rather than repeated,
+ *  which also avoids implying a PM line contributed to a mass loss it is
+ *  explicitly excluded from (see SummaryCardData.rmConsumedKg).
+ *
+ *  `uom` is the BOM article's own unit, so a pouch reads in pcs and a raw
+ *  material in kg. Balance Material only became unit-aware with migration 094 —
+ *  before that the column was qty_kg with no unit recorded. */
+type MaterialSummaryRow = {
+  key: string;
+  name: string;
+  itemType: string;
+  uom: string;
+  /** consumed / returned / off-grade / control-sample, in `uom` units. */
+  consumed: number;
+  balance: number;
+  offgrade: number;
+  ctrlSample: number;
+};
+
+/** An additive line in the Accounting Summary table.
+ *
+ *  Additives are neither RM nor PM — they are a separate list with no BOM
+ *  article — so they get their own rows beneath the material block rather than
+ *  being folded into one. They carry no unit in the form (AdditiveRow has only
+ *  `qty`, written to qty_kg), so they read in kg until the UI captures one;
+ *  migration 094 gives the column somewhere to put it. They are also excluded
+ *  from the conservation identity by design, hence the marker in the header. */
+type AdditiveSummaryRow = { key: string; name: string; qty: number };
+
 type SummaryCardData = {
   /** RM consumption mass (kg). Prefers canonical (rm_issued +
    *  carried_in) when the indent flow ran; falls back to sum of typed
@@ -6152,7 +6348,163 @@ function fmtBatchDate(d: string | null | undefined): string {
 // R10 — KV grid + percentages strip extracted from AccountingSummaryCard
 // so the TOTAL roll-up and each per-batch collapsible can share the same
 // layout. Pure presentational — `summary` is the only input.
-function SummaryGrid({ summary }: { summary: SummaryCardData }) {
+// Accounting Summary as a table: one row per RM/PM, with the batch-level
+// measures rowspan'd down the side.
+//
+// WHY ROWSPAN RATHER THAN REPEATING THE VALUE
+// Only four of these measures exist per material — consumed, returned
+// (balance), off-grade and control sample. FG output, process loss, EGA, the
+// additive total, the five percentages and the balance verdict are properties of
+// the BATCH. Repeating a batch figure on every material row would read as though
+// each material contributed that amount, which is wrong in general and
+// especially wrong for PM: packaging is explicitly excluded from the mass
+// balance (SummaryCardData.rmConsumedKg). A spanned cell says "this belongs to
+// the batch, not the row" without a word of explanation.
+//
+// Rows after the first legitimately contain FEWER <td>s — the spanned cells from
+// row 0 already occupy those grid slots. That is how rowspan works; it is not a
+// missing cell.
+function SummaryTable({ summary, rows, additives }:
+                      { summary: SummaryCardData; rows: MaterialSummaryRow[];
+                        additives: AdditiveSummaryRow[] }) {
+  // Batch-level cells span BOTH blocks — the RM/PM rows and the additive rows
+  // beneath them — because they describe the batch, not any one line.
+  const n = rows.length + additives.length;
+  const th = "py-1.5 px-2 font-medium text-left whitespace-nowrap";
+  const td = "py-1.5 px-2 whitespace-nowrap align-top";
+  const spanCell = "py-1.5 px-2 whitespace-nowrap align-top bg-[var(--aws-bg-tint,#fbfbfb)] border-l border-[#ededed]";
+  const qty = (v: number, uom: string) => (
+    <span>
+      {fmtNum(v)}
+      <span className="text-[10px] text-[var(--text-muted)] ml-1">{uom || "—"}</span>
+    </span>
+  );
+  const kg = (v: number) => (
+    <span>
+      {fmtNum(v)}<span className="text-[10px] text-[var(--text-muted)] ml-1">kg</span>
+    </span>
+  );
+  return (
+    <div className="mb-3 overflow-x-auto">
+      <table className="w-full text-[12px] border-collapse">
+        <caption className="sr-only">
+          Accounting summary. One row per raw and packaging material; batch-level
+          figures span all rows.
+        </caption>
+        <thead>
+          <tr className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] border-b border-[var(--aws-border)]">
+            <th scope="col" className={th}>Material</th>
+            <th scope="col" className={th}>RM Consumed</th>
+            <th scope="col" className={th}>FG Output</th>
+            <th scope="col" className={th}>Process Loss</th>
+            <th scope="col" className={th}>Extra Giveaway (EGA)</th>
+            <th scope="col" className={th}>Balance Material</th>
+            <th scope="col" className={th}>Off-grade Total</th>
+            <th scope="col" className={th}>Control Sample</th>
+            <th scope="col" className={th}>Additives</th>
+            <th scope="col" className={th}>Process Loss %</th>
+            <th scope="col" className={th}>EGA Loss %</th>
+            <th scope="col" className={th}>PL+EGA Loss %</th>
+            <th scope="col" className={th}>Off-grade %</th>
+            <th scope="col" className={th}>Total Loss %</th>
+            <th scope="col" className={th}>Is Balanced</th>
+            <th scope="col" className={th}>Balance Difference</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((m, i) => (
+            <tr key={m.key} className="border-b border-[#f2f2f2]">
+              <th scope="row" className="py-1.5 px-2 font-normal text-left max-w-[220px]">
+                <span className="block truncate text-[var(--text-primary)]" title={m.name}>
+                  {m.name}{" "}
+                  <span className={`text-[10px] ${m.itemType === "SFG" || m.itemType === "WIP" ? "text-[var(--text-success)] font-medium" : "text-[var(--text-muted)]"}`}>
+                    ({m.itemType})
+                  </span>
+                </span>
+              </th>
+              <td className={td}>{qty(m.consumed, m.uom)}</td>
+              {i === 0 ? <td className={spanCell} rowSpan={n}>{kg(summary.fgOutKg)}</td> : null}
+              {i === 0 ? <td className={spanCell} rowSpan={n}>{kg(summary.lossKg)}</td> : null}
+              {i === 0 ? <td className={spanCell} rowSpan={n}>{kg(summary.egaKg)}</td> : null}
+              <td className={td}>{qty(m.balance, m.uom)}</td>
+              <td className={td}>{qty(m.offgrade, m.uom)}</td>
+              <td className={td}>{qty(m.ctrlSample, m.uom)}</td>
+              {/* per-row now: each additive has its own row beneath */}
+              <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
+              {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.processLossPct, 1.5)}</td> : null}
+              {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.egaLossPct, 1.0)}</td> : null}
+              {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.invisibleLossPct, 2.5)}</td> : null}
+              {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.offgradePct, 1.0)}</td> : null}
+              {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.totalLossPct, 3.0)}</td> : null}
+              {i === 0 ? (
+                <td className={spanCell} rowSpan={n}>
+                  {summary.isBalanced == null ? (
+                    <span className="text-[var(--text-muted)]">—</span>
+                  ) : (
+                    <span className={summary.isBalanced ? "text-[#1d8102] font-semibold" : "text-[#b1361e] font-semibold"}>
+                      {summary.isBalanced ? "✓ Balanced" : "✗ Not balanced"}
+                    </span>
+                  )}
+                </td>
+              ) : null}
+              {i === 0 ? (
+                <td className={spanCell} rowSpan={n}>
+                  {summary.balanceDiff == null ? (
+                    <span className="text-[var(--text-muted)]">—</span>
+                  ) : (
+                    <span className={summary.isBalanced === false ? "text-[#b1361e] font-semibold" : ""}>
+                      {kg(summary.balanceDiff)}
+                      {summary.balanceDiffPct != null ? (
+                        <span className="text-[10px] text-[var(--text-muted)] ml-1">
+                          ({fmtNum(summary.balanceDiffPct)}%)
+                        </span>
+                      ) : null}
+                    </span>
+                  )}
+                </td>
+              ) : null}
+            </tr>
+          ))}
+          {additives.map((a) => (
+            <tr key={a.key} className="border-b border-[#f2f2f2] bg-[#fcfcfd]">
+              <th scope="row" className="py-1.5 px-2 font-normal text-left max-w-[220px]">
+                <span className="block truncate text-[var(--text-primary)]" title={a.name}>
+                  {a.name} <span className="text-[10px] text-[var(--text-muted)]">(Additive)</span>
+                </span>
+              </th>
+              {/* An additive is not consumed from the BOM, returned, rejected
+                  or sampled — those columns have no meaning on this row. */}
+              <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
+              <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
+              <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
+              <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
+              <td className={td} title="Data only — not part of the conservation identity.">
+                {kg(a.qty)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {additives.length > 0 ? (
+        <p className="mt-1 text-[10px] text-[var(--text-muted)]">
+          Additives are recorded for data only and sit outside the balance
+          check. The form captures no unit for them yet, so they read in kg.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function SummaryGrid({ summary, materialRows, additiveRows }:
+                     { summary: SummaryCardData; materialRows?: MaterialSummaryRow[];
+                       additiveRows?: AdditiveSummaryRow[] }) {
+  // Per-material table when the breakdown is available (the TOTAL roll-up);
+  // the KV layout below still serves each per-batch collapsible, whose
+  // per-material state does not exist in the form.
+  if (materialRows && materialRows.length > 0) {
+    return <SummaryTable summary={summary} rows={materialRows}
+                         additives={additiveRows ?? []} />;
+  }
   return (
     <>
       <dl className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-8 gap-x-3 sm:gap-x-4 gap-y-3 mb-3">
@@ -6204,6 +6556,8 @@ function SummaryGrid({ summary }: { summary: SummaryCardData }) {
 
 function AccountingSummaryCard({
   summary,
+  materialRows,
+  additiveRows,
   perBatchSummaries,
   totalSummary,
   selectedBatchId,
@@ -6214,6 +6568,11 @@ function AccountingSummaryCard({
    *  form edits). Retained for backwards-compat with the legacy single-
    *  summary header chip; the new layout reads from totalSummary instead. */
   summary: SummaryCardData;
+  /** One row per RM/PM for the summary table. Only the selected batch's
+   *  per-material breakdown exists in form state, so the other batches'
+   *  collapsibles fall back to the KV layout. */
+  materialRows?: MaterialSummaryRow[];
+  additiveRows?: AdditiveSummaryRow[];
   /** One entry per batch (selected batch's entry uses the live summary
    *  so unsaved edits surface in its collapsible). Drives the per-batch
    *  collapsible sections rendered below the TOTAL. */
@@ -6323,7 +6682,7 @@ function AccountingSummaryCard({
           {perBatchSummaries.length === 1 ? "batch" : "batches"}
         </div>
         {renderHeadlines(totalSummary, unbalanced)}
-        <SummaryGrid summary={totalSummary} />
+        <SummaryGrid summary={totalSummary} materialRows={materialRows} additiveRows={additiveRows} />
       </div>
 
       {/* ── Per-batch collapsible sections (R10).  Each batch's saved
