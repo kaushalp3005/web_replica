@@ -12,7 +12,6 @@
 // for line so the operator sees the same form on web as on mobile.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { BrandMark } from "@/components/BrandMark";
 import {
   consumptionStateFromDetail,
@@ -1394,10 +1393,8 @@ function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
   const [openingNotes, setOpeningNotes] = useState("");
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
-  const [closeModal, setCloseModal] = useState<BatchRow | null>(null);
 
   // EGA is a PM capability, so it uses the canonical PM predicate.
-  const pmStage = isPmStageJc(detail);
 
   // W3-MED-6 — AbortController per call so a remount or rapid JC switch
   // doesn't leave a stale request racing the current one.  The current
@@ -1606,425 +1603,7 @@ function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
         </div>
       ) : null}
 
-      {closeModal ? (() => {
-        // Compute the close-modal defaults + snapshot from JC detail.
-        // What the server actually stores on /batches/{id}/close is small —
-        // see the close_batch docstring in services/job_card_batch_v2.py.
-        // The modal pre-populates from the operator's last Output save:
-        //   - producedKg ← detail.section_5_output.fg_actual_kg
-        //   - rmConsumedKg ← Σ detail.consumption_lines[].actual_consumed_qty
-        //                     (only RM rows — PM doesn't convert into FG)
-        //   - extraGiveAway ← accounting.extra_give_away_qty, with a
-        //                     balance_materials fallback for JCs whose
-        //                     accounting summary hasn't been saved yet
-        //                     (PUT /accounting/summary is a separate
-        //                     endpoint; today the Save Output button
-        //                     doesn't auto-fire it, so accounting.* can
-        //                     legitimately be NULL even after a save).
-        const consLines = detail.consumption_lines ?? [];
-        const balMats   = detail.balance_materials ?? [];
-        const bps       = detail.byproducts ?? [];
-
-        // Input-side consumption sum. Only PM is excluded — packaging doesn't
-        // convert into FG mass; RM AND SFG/WIP opening inputs DO. (Slice 4: a
-        // Stage-2 / pack-of-existing-SFG card's only input is the SFG, so it must
-        // count here, matching the item_type !== 'PM' predicates elsewhere — else
-        // this client-side balance fallback reports the whole SFG input as a loss.)
-        const rmConsumedSum = consLines.reduce((acc, c) => {
-          const isInput = (c.input_kind ?? "").toUpperCase() !== "PM";
-          return acc + (isInput && c.actual_consumed_qty != null
-            ? Number(c.actual_consumed_qty) : 0);
-        }, 0);
-
-        // EGA hydration — accounting first, balance_materials fallback.
-        const egaFromAcct = detail.accounting?.extra_give_away_qty;
-        const egaFromBal  = balMats.find(b => b.balance_type === "extra_given");
-        const egaResolved =
-          egaFromAcct != null && Number(egaFromAcct) > 0
-            ? Number(egaFromAcct)
-            : (egaFromBal?.qty_kg != null && Number(egaFromBal.qty_kg) > 0
-                ? Number(egaFromBal.qty_kg)
-                : null);
-
-        // Snapshot fallback: compute Balance Diff + Is Balanced
-        // client-side when the accounting row hasn't been saved.
-        // Mirrors the AccountingTab preview formula so the operator
-        // sees the same number in both places.
-        const fgKg = detail.section_5_output?.fg_actual_kg != null
-          ? Number(detail.section_5_output.fg_actual_kg) : null;
-        const processLossKg = detail.section_5_output?.process_loss_kg != null
-          ? Number(detail.section_5_output.process_loss_kg) : 0;
-        const balMatTotal = balMats
-          .filter(b => b.balance_type === "returned")
-          .reduce((a, b) => a + (b.qty_kg != null ? Number(b.qty_kg) : 0), 0);
-        const offgradeTotal = bps
-          .filter(b => b.category && !["control_sample", "balance_material"].includes(b.category) && !b.category.startsWith("pm_") && b.category !== "wastage")
-          .reduce((a, b) => a + (b.qty_kg != null ? Number(b.qty_kg) : 0), 0);
-        const wastageKg = bps
-          .filter(b => b.category === "wastage")
-          .reduce((a, b) => a + (b.qty_kg != null ? Number(b.qty_kg) : 0), 0);
-        const ctrlSampleKg = bps
-          .filter(b => b.category === "control_sample")
-          .reduce((a, b) => a + (b.qty_kg != null ? Number(b.qty_kg) : 0), 0);
-
-        // Canonical input = RM issued (indents) + carried-in (chain SFG/WIP),
-        // falling back to non-PM consumption only when neither exists (archetype-C
-        // pack-of-existing-SFG). This matches the AccountingTab and avoids
-        // double-counting the chain SFG (carried_in) with the audit-only synthetic
-        // consumption row (Slice-5 review #4).
-        const rmIssuedKgSnap = (detail.rm_indents ?? []).reduce((a, r) => a + Number(r.issued_qty ?? 0), 0);
-        const carriedInSnap = Number(detail.carried_qty_kg ?? 0);
-        const canonicalInputSnap = rmIssuedKgSnap + carriedInSnap;
-        const totalInput = canonicalInputSnap > 0 ? canonicalInputSnap : rmConsumedSum;
-        const totalAccounted = (fgKg ?? 0) + processLossKg + balMatTotal
-                             + offgradeTotal + wastageKg + ctrlSampleKg
-                             + (egaResolved ?? 0);
-        const computedBalanceDiff = totalInput > 0
-          ? totalInput - totalAccounted
-          : null;
-        const tolerancePct = detail.accounting?.allowed_balance_tolerance_pct != null
-          ? Number(detail.accounting.allowed_balance_tolerance_pct) * 100
-          : 0.10;
-        const computedIsBalanced = computedBalanceDiff != null
-          ? Math.abs(computedBalanceDiff) < 0.05
-            || (totalInput > 0
-                && (Math.abs(computedBalanceDiff) / totalInput) * 100 <= tolerancePct)
-          : null;
-        const computedTotalLossPct = fgKg && fgKg > 0
-          ? ((processLossKg + wastageKg + (egaResolved ?? 0) + offgradeTotal) / fgKg) * 100
-          : null;
-
-        return (
-          <BatchCloseModal
-            batch={closeModal}
-            jcId={detail.job_card_id}
-            pmStage={pmStage}
-            defaults={{
-              producedKg: fgKg != null ? String(fgKg) : "",
-              rmConsumedKg: rmConsumedSum > 0 ? rmConsumedSum.toFixed(3) : "",
-              extraGiveAway: egaResolved != null ? String(egaResolved) : "",
-            }}
-            summarySnapshot={{
-              fgActualKg:   fgKg,
-              // Prefer server-saved values when present, else client-computed.
-              balanceDiff:  detail.accounting?.balance_diff_kg != null
-                ? Number(detail.accounting.balance_diff_kg) : computedBalanceDiff,
-              isBalanced:   detail.accounting?.is_balanced ?? computedIsBalanced,
-              tolerancePct,
-              totalLossPct: detail.accounting?.total_loss_pct != null
-                ? Number(detail.accounting.total_loss_pct) : computedTotalLossPct,
-            }}
-            onClose={() => setCloseModal(null)}
-            onDone={async () => {
-              setCloseModal(null);
-              await refresh();
-              onReload();
-            }}
-          />
-        );
-      })() : null}
     </div>
-  );
-}
-
-function BatchCloseModal({
-  batch, jcId, pmStage, defaults, summarySnapshot, onClose, onDone,
-}: {
-  batch: BatchRow;
-  jcId: number;
-  pmStage: boolean;
-  /** Pre-fill values pulled from the JC detail (last saved output +
-   *  consumption sum + persisted EGA). Empty strings show as blank
-   *  placeholders. The operator can still type over them. */
-  defaults: {
-    producedKg: string;
-    rmConsumedKg: string;
-    extraGiveAway: string;
-  };
-  /** Compact accounting snapshot rendered above the form so the
-   *  operator can re-check balance/tolerance before confirming the
-   *  close. nulls render as "—" — same convention as the main
-   *  AccountingSummaryCard. */
-  summarySnapshot: {
-    fgActualKg: number | null;
-    balanceDiff: number | null;
-    isBalanced: boolean | null;
-    tolerancePct: number;
-    totalLossPct: number | null;
-  };
-  onClose: () => void;
-  onDone: () => Promise<void> | void;
-}) {
-  const [producedKg, setProducedKg] = useState(defaults.producedKg);
-  const [rmConsumedKg, setRmConsumedKg] = useState(defaults.rmConsumedKg);
-  const [extraGiveAway, setExtraGiveAway] = useState(defaults.extraGiveAway);
-  // Stage 3 final: per-batch partial dispatch.  Defaults to the full
-  // produced qty (the legacy behaviour) so a default Close still ships
-  // everything downstream.  Operator can lower it to keep material at
-  // this stage; server clamps to [0, producedKg].
-  const [dispatchKg, setDispatchKg] = useState(defaults.producedKg);
-  // Mirror dispatch default to producedKg whenever the operator edits
-  // the produced field — unless they've already typed a custom dispatch.
-  const dispatchTouched = useRef(false);
-  useEffect(() => {
-    if (!dispatchTouched.current) {
-      setDispatchKg(producedKg);
-    }
-  }, [producedKg]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const isAdmin = useIsAdmin();
-  // Balance lock: an unbalanced batch can't be closed. Admins may override.
-  const unbalanced = summarySnapshot.isBalanced === false;
-  const [override, setOverride] = useState(false);
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    const produced = parseFloat(producedKg);
-    if (!Number.isFinite(produced) || produced < 0) {
-      setError("Produced qty (kg) is required.");
-      return;
-    }
-    // W3-MED-7 — guard zero-production close. A 0-kg close is legitimate
-    // (e.g. an aborted batch) but uncommon enough that we want the
-    // operator to acknowledge it before the row writes through. Without
-    // this the most common UX failure here was leaving the input blank,
-    // parseFloat'ing "" → NaN, falling through the validation above as
-    // "Produced qty is required" — but typing "0" by accident silently
-    // closed the batch with zero output.
-    if (produced === 0) {
-      if (!window.confirm("Close this batch with produced_qty_kg = 0? This will mark the batch as closed with no output recorded.")) {
-        return;
-      }
-    }
-    const body: Record<string, unknown> = { produced_qty_kg: produced };
-    // Balance lock: forward the live verdict + admin override. The server reads
-    // the authoritative per-batch accounting and blocks unbalanced closes.
-    if (summarySnapshot.isBalanced != null) body.is_balanced = summarySnapshot.isBalanced;
-    if (summarySnapshot.balanceDiff != null) body.balance_difference_qty = summarySnapshot.balanceDiff;
-    if (override) body.allow_unbalanced = true;
-    if (rmConsumedKg.trim() !== "") {
-      const v = parseFloat(rmConsumedKg);
-      if (Number.isFinite(v)) body.rm_consumed_kg = v;
-    }
-    if (pmStage && extraGiveAway.trim() !== "") {
-      const v = parseFloat(extraGiveAway);
-      if (Number.isFinite(v)) body.extra_give_away_qty = v;
-    }
-    // Dispatch qty — server defaults to full produced when omitted, so
-    // only send the field when the operator explicitly chose a lower
-    // (or zero) amount.  This keeps wire payloads minimal for the
-    // common full-dispatch case.
-    if (dispatchKg.trim() !== "") {
-      const v = parseFloat(dispatchKg);
-      if (Number.isFinite(v) && v >= 0 && v !== produced) {
-        body.dispatch_qty_kg = v;
-      }
-    }
-    setBusy(true);
-    try {
-      const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/batches/${batch.batch_id}/close`, {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        let msg = `HTTP ${res.status}`;
-        try {
-          const j = await res.json();
-          const d = j?.detail;
-          msg = (typeof d === "object" && d ? d.message : d) || j?.message || msg;
-        } catch { /* keep default */ }
-        throw new Error(typeof msg === "string" ? msg : `HTTP ${res.status}`);
-      }
-      await onDone();
-    } catch (e) {
-      setError(friendlyJobCardError(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // BatchCloseModal is rendered from inside BatchBand, which lives
-  // inside the AccountingTab's <form>.  Nesting <form> elements is
-  // invalid HTML (Next 16 emits a hydration error).  Portal the modal
-  // to document.body so the inner <form> is a sibling of the outer
-  // form rather than a descendant.  SSR-safe: only portal when window
-  // exists; on the server render nothing (the modal only opens after
-  // a client-side click anyway).
-  if (typeof document === "undefined") return null;
-  return createPortal(
-    <div
-      role="dialog"
-      aria-modal="true"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <form
-        onSubmit={submit}
-        className="bg-white border border-[var(--aws-border)] rounded-md shadow-lg w-full max-w-md p-5"
-      >
-        <h3 className="text-[14px] font-semibold text-[var(--text-primary)] mb-3">
-          Close Batch {batch.batch_number}
-        </h3>
-
-        {/* Re-check snapshot from the last saved accounting. Read-only.
-            Lets the operator confirm balance + loss before committing
-            the close — most-common "did I save everything?" check. */}
-        <div className="mb-3 border border-[var(--aws-border)] rounded-md bg-[var(--surface-subtle)] px-3 py-2">
-          <div className="text-[10px] uppercase tracking-wide font-bold text-[var(--text-muted)] mb-1.5">
-            Saved Accounting Snapshot
-          </div>
-          <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]">
-            <div>
-              <dt className="text-[var(--text-muted)]">FG Output</dt>
-              <dd className="font-mono">
-                {summarySnapshot.fgActualKg != null
-                  ? `${summarySnapshot.fgActualKg.toFixed(2)} kg`
-                  : <span className="italic text-[var(--text-muted)]">not saved</span>}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-[var(--text-muted)]">Balanced</dt>
-              <dd>
-                {summarySnapshot.isBalanced == null ? (
-                  <span className="italic text-[var(--text-muted)]">—</span>
-                ) : summarySnapshot.isBalanced ? (
-                  <span className="text-[var(--text-success)] font-semibold">Yes</span>
-                ) : (
-                  <span className="text-[var(--aws-error)] font-semibold">No</span>
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-[var(--text-muted)]">Balance Diff</dt>
-              <dd className={`font-mono ${summarySnapshot.isBalanced === false ? "text-[var(--aws-error)] font-semibold" : ""}`}>
-                {summarySnapshot.balanceDiff != null
-                  ? `${summarySnapshot.balanceDiff.toFixed(2)} kg`
-                  : "—"}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-[var(--text-muted)]">Tolerance</dt>
-              <dd className="font-mono">{summarySnapshot.tolerancePct.toFixed(2)}%</dd>
-            </div>
-            <div className="col-span-2">
-              <dt className="text-[var(--text-muted)]">Total Loss</dt>
-              <dd className="font-mono">
-                {summarySnapshot.totalLossPct != null
-                  ? `${summarySnapshot.totalLossPct.toFixed(2)}%`
-                  : "—"}
-              </dd>
-            </div>
-          </dl>
-          {unbalanced ? (
-            <div className="mt-2">
-              <p className="text-[10px] text-[var(--aws-error)] font-semibold">
-                Unbalanced — this batch is locked and can&apos;t be closed until the accounting nets out (within tolerance).
-              </p>
-              {isAdmin ? (
-                <label className="mt-1.5 flex items-center gap-1.5 text-[10px] text-[#8a5e10] cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={override}
-                    onChange={(e) => setOverride(e.target.checked)}
-                    className="accent-[var(--aws-orange)]"
-                  />
-                  Admin override — close despite the imbalance
-                </label>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="space-y-3">
-          <FormNumber
-            label="Produced qty (kg) *"
-            value={producedKg}
-            onChange={setProducedKg}
-            disabled={busy}
-            placeholder="0.00"
-          />
-          <FormNumber
-            label="RM consumed (kg)"
-            value={rmConsumedKg}
-            onChange={setRmConsumedKg}
-            disabled={busy}
-            placeholder="0.00"
-          />
-          {pmStage ? (
-            <FormNumber
-              label="Extra give-away qty"
-              value={extraGiveAway}
-              onChange={setExtraGiveAway}
-              disabled={busy}
-              placeholder="0.00"
-            />
-          ) : null}
-          {/* Stage 3 final: partial dispatch.  Defaults to producedKg
-              and follows it.  Operator can lower it to keep material
-              at this stage (e.g. dispatch 80 of 100 kg; remainder
-              available for a subsequent dispatch). */}
-          <div>
-            <FormNumber
-              label="Dispatch qty to next stage (kg)"
-              value={dispatchKg}
-              onChange={(v) => {
-                dispatchTouched.current = true;
-                setDispatchKg(v);
-              }}
-              disabled={busy}
-              placeholder="0.00"
-            />
-            {(() => {
-              const p = parseFloat(producedKg);
-              const d = parseFloat(dispatchKg);
-              if (!Number.isFinite(p) || !Number.isFinite(d)) return null;
-              const remainder = p - d;
-              if (remainder <= 0.001) {
-                return (
-                  <p className="mt-1 text-[10px] text-[var(--text-muted)] italic">
-                    Dispatching the full produced qty downstream.
-                  </p>
-                );
-              }
-              return (
-                <p className="mt-1 text-[10px] text-[#8a5e10]">
-                  {d.toFixed(2)} kg will ship downstream; {remainder.toFixed(2)} kg stays at this stage.
-                </p>
-              );
-            })()}
-          </div>
-        </div>
-        {error ? (
-          <p className="mt-3 text-[12px] text-[var(--aws-error)]">{error}</p>
-        ) : null}
-        <div className="mt-4 flex flex-col sm:flex-row sm:justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={busy}
-            className="h-8 px-3 rounded-[2px] text-[12px] font-semibold border border-[var(--aws-border-strong)] bg-white hover:bg-[var(--surface-subtle)] disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            disabled={busy || (unbalanced && !override)}
-            title={unbalanced && !override ? "Batch is unbalanced — resolve the accounting first" : undefined}
-            className={[
-              "h-8 px-3 rounded-[2px] text-[12px] font-bold border",
-              busy || (unbalanced && !override)
-                ? "bg-[#c98f92] border-[#c98f92] cursor-not-allowed text-[var(--text-primary)]"
-                : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
-            ].join(" ")}
-          >
-            {busy ? "Closing…" : override ? "Override & Close" : "Close Batch"}
-          </button>
-        </div>
-      </form>
-    </div>,
-    document.body,
   );
 }
 
@@ -3355,7 +2934,8 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   const [batches, setBatches] = useState<BatchRow[]>([]);
   const [batchesLoading, setBatchesLoading] = useState(false);
   // R10 — fetch helper extracted so user-initiated batch actions
-  // (doOpenBatch, BatchCloseModal save) can refetch deterministically
+  // (doOpenBatch, the output save's completion step) can refetch
+  // deterministically
   // without depending on the 60s auto-poll's re-render cascade. The
   // previous [detail] dependency caused every auto-poll to refetch
   // batches → new array reference → perBatchSummaries recompute →
@@ -3586,7 +3166,11 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     | "byproducts"
     | "balance"
     | "additives"
-    | "control_sample";
+    | "control_sample"
+    // Not a persisted section of its own — the dispatch qty rides along on the
+    // completion call. It is tracked so that changing ONLY it still counts as
+    // a change worth saving.
+    | "dispatch_qty";
   const dirtyMaskRef = useRef<Set<DirtySection>>(new Set());
   const markSectionDirty = useCallback((section: DirtySection) => {
     dirtyMaskRef.current.add(section);
@@ -3918,7 +3502,6 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   const [batchActionMsg, setBatchActionMsg] = useState<
     { kind: "ok" | "err"; msg: string } | null
   >(null);
-  const [closeBatchModal, setCloseBatchModal] = useState<BatchRow | null>(null);
   // 072: operator-typed batch name for the next Open Batch. Blank → server
   // keeps NULL and the batch shows as its 8-digit code.
   const [newBatchLabel, setNewBatchLabel] = useState("");
@@ -4045,6 +3628,27 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     return "";
   }, [selectedBatch, detail.accounting?.extra_give_away_qty, detail.balance_materials]);
   const [extraGiveawayQty, setExtraGiveawayQty] = useState(egaFromServer);
+  // Partial dispatch on completion. Deliberately NOT seeded from the server:
+  // it is a per-completion decision, not a stored attribute of the batch, and
+  // pre-filling last time's number is how an operator dispatches the wrong
+  // quantity without noticing. Blank = send everything (the legacy default).
+  const [dispatchQtyKg, setDispatchQtyKg] = useState("");
+  // Admin override for the balance gate. The server ignores it for non-admins,
+  // but without a control here the completion_blocked message told the operator
+  // to "ask an admin to override" while offering no way for the admin to do it
+  // -- the checkbox that used to carry this lived in the deleted close modal.
+  // Not sticky: it resets on every render of a fresh form, so an override is a
+  // deliberate act per completion rather than a mode someone leaves switched on.
+  const [allowUnbalanced, setAllowUnbalanced] = useState(false);
+  // Marks a dirty section like every other tracked input. Without this, a save
+  // where the dispatch qty is the ONLY thing the operator changed is rejected
+  // as "Nothing changed" and the typed value is silently discarded -- and it
+  // appears to work intermittently, because nudging any other field lets it
+  // through.
+  const onChangeDispatchQty = useCallback((v: string) => {
+    setDispatchQtyKg(v);
+    markSectionDirty("dispatch_qty");
+  }, [markSectionDirty]);
   useEffect(() => {
     if (formDirty.current) return;
     queueMicrotask(() => {
@@ -4211,7 +3815,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
 
   // R10 — RM-only consumption total from the operator's typed Output &
   // Accounting form. Mirrors the rmConsumptionSum derivation inside
-  // onSubmit + the BatchBand BatchCloseModal default; lifted here so the
+  // onSubmit + the batch summary card; lifted here so the
   // Batch Context panel's Close Batch modal can pre-fill RM consumed
   // instead of leaving it blank. PM articles excluded because they
   // don't convert into FG mass (same rule as the Accounting Summary).
@@ -4946,8 +4550,18 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       const hasAnyChange =
         dirty.has("output_qty")     || dirty.has("consumption")
         || dirty.has("byproducts")  || dirty.has("balance")
-        || dirty.has("additives")   || dirty.has("control_sample");
-      if (!hasAnyChange) {
+        || dirty.has("additives")   || dirty.has("control_sample")
+        || dirty.has("dispatch_qty");
+      // Completing the batch is now a reason to save in itself. Saving is the
+      // ONLY way to complete since the Close Batch button was removed, so
+      // refusing an unchanged save on a still-open batch would strand it with
+      // no path to completion at all — and that is reachable through ordinary
+      // use: whoever fills the form may lack overview/complete, or the first
+      // save's completion may have been blocked as unbalanced. Either way the
+      // dirty mask is cleared afterwards, so the supervisor who CAN complete
+      // arrives to a form with nothing dirty.
+      const canStillComplete = batchIsOpen && canCompleteBatch;
+      if (!hasAnyChange && !canStillComplete) {
         setFeedback({ kind: "err", msg: "Nothing changed — edit a field before saving." });
         return;
       }
@@ -5070,6 +4684,94 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
               : null)
             ?? (sumJson as NonNullable<JobCardDetail["accounting"]> | null);
           if (accFromSummary) setServerAccounting(accFromSummary);
+
+          // ── Complete the batch ────────────────────────────────────
+          // Saving the output is the last step, so this is where the
+          // batch is completed — the Close Batch button is gone.
+          //
+          // It runs HERE, after the accounting summary, and not in the
+          // /outputs call above, because the summary POST is what
+          // computes the AUTHORITATIVE is_balanced (the R9 conservation
+          // identity, server-side, against the BOM's own tolerance).
+          // Sending the client's guess with the first call would gate
+          // completion on a number the server had not yet agreed with.
+          //
+          // A second POST to the same endpoint carrying only the
+          // completion fields: `has_output_payload` is true (produced
+          // qty is required by close_batch) so the output row is
+          // re-upserted with identical values — cheap, and it keeps one
+          // endpoint responsible for the whole thing.
+          // `balance_difference_qty` -- NOT balance_diff_kg. That name exists
+          // in the codebase only as an amendment audit-payload key; the
+          // accounting row's own column, which this endpoint returns, is
+          // balance_difference_qty. Reading the wrong key is silent: it yields
+          // undefined, so every completion posted a null difference, the batch
+          // row kept NULL (close_batch COALESCEs it), and the operator was
+          // never told how far off an unbalanced batch actually was.
+          const accForClose = accFromSummary as
+            | { is_balanced?: boolean | null;
+                balance_difference_qty?: number | string | null }
+            | null;
+          if (batchIsOpen && canCompleteBatch && selectedBatchId != null
+              && num(fgActualKg) > 0) {
+            try {
+              const cRes = await apiFetch(
+                `/api/v1/production/job-cards-v2/${detail.job_card_id}/outputs`,
+                {
+                  method: "POST",
+                  body: JSON.stringify({
+                    batch_id: selectedBatchId,
+                    complete_batch: true,
+                    output_qty_kg: num(fgActualKg),
+                    output_qty_units: fgActualUnits.trim() === ""
+                      ? null : parseInt(fgActualUnits, 10),
+                    rm_consumed_kg: rmConsumedTypedKg > 0 ? rmConsumedTypedKg : 0,
+                    extra_give_away_qty: num(extraGiveawayQty) || 0,
+                    is_balanced: accForClose?.is_balanced ?? null,
+                    allow_unbalanced: allowUnbalanced,
+                    balance_difference_qty: accForClose?.balance_difference_qty != null
+                      ? Number(accForClose.balance_difference_qty) : null,
+                    // Omitted (null) means "dispatch the whole produced qty" —
+                    // close_batch's own default. Only send a number when the
+                    // operator actually typed one, so a blank field never
+                    // silently becomes a 0 kg dispatch that strands the next
+                    // stage waiting for material that never moves.
+                    dispatch_qty_kg: dispatchQtyKg.trim() === ""
+                      ? null : num(dispatchQtyKg),
+                  }),
+                },
+              );
+              const cJson = (await cRes.json().catch(() => null)) as
+                | { completed?: boolean;
+                    completion_blocked?: { message?: string } }
+                | null;
+              if (cRes.ok && cJson?.completed) {
+                setFeedback({ kind: "ok", msg: "Output saved and batch completed." });
+                await refetchBatches();
+              } else if (cRes.ok && cJson?.completion_blocked) {
+                // Saved but NOT completed — the batch is unbalanced. This
+                // is deliberately not an error: the operator's figures are
+                // safely stored, the batch simply stays open.
+                setFeedback({
+                  kind: "err",
+                  msg: cJson.completion_blocked.message
+                    || "Output saved, but the batch was not completed: its accounting is unbalanced.",
+                });
+              } else if (!cRes.ok) {
+                const m = (cJson as { message?: string } | null)?.message
+                  || `HTTP ${cRes.status}`;
+                setFeedback({
+                  kind: "err",
+                  msg: `Output saved, but completing the batch failed (${m}).`,
+                });
+              }
+            } catch (err) {
+              setFeedback({
+                kind: "err",
+                msg: `Output saved, but completing the batch threw: ${friendlyApiError(err)}`,
+              });
+            }
+          }
         } else {
           // Surface the failure instead of swallowing — without this,
           // /complete will still 400 with "no_accounting" and the
@@ -5127,7 +4829,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       // (fg_actual_kg, fg_actual_units, process_loss_kg, batchHasData
       // derivation, the "EDIT BATCH" submit label) reflects the values
       // we just saved. Mirrors doOpenBatch (~line 2902) and the
-      // BatchCloseModal save (~line 4791); the omission here let the
+      // the batch completion step; the omission here let the
       // selector stay stale and made subsequent edits look like fresh
       // saves on a batch that already had data.
       await refetchBatches();
@@ -5345,27 +5047,11 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                             >
                               {isLoaded ? "Loaded" : "Load"}
                             </button>
-                            {canManage ? (
-                              <button
-                                type="button"
-                                onClick={() => setCloseBatchModal(b)}
-                                // Gate to the LOADED batch: the close modal pre-fills its
-                                // produced/RM/EGA figures from THIS form's live state (scoped
-                                // to selectedBatchId). Closing a non-loaded batch would seed it
-                                // with the wrong batch's numbers → corrupt close. Load first.
-                                // !canCompleteBatch adds the overview/complete permission gate.
-                                disabled={busy || !isOpen || !isLoaded || !canCompleteBatch}
-                                title={
-                                  !isOpen ? `Batch is ${b.status}`
-                                  : !isLoaded ? "Load this batch first"
-                                  : lifecycleLocked ? "Start the job card first"
-                                  : "Close this batch"
-                                }
-                                className="h-7 px-2 text-[11px] font-semibold rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-orange)] disabled:opacity-50 disabled:cursor-not-allowed"
-                              >
-                                Close
-                              </button>
-                            ) : null}
+                            {/* The per-row "Close" button is gone with the rest
+                                of the Close Batch flow: a batch is completed by
+                                saving its output, which is the last step. Load
+                                the batch, fill the form, Save — the completion
+                                rides along in the same transaction. */}
                             {canManage ? (
                               <button
                                 type="button"
@@ -5962,6 +5648,54 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
             EGA only on packing stages.
           </p>
         )}
+
+        {/* Dispatch to the next stage.
+            This field is the decision the removed Close Batch modal used to
+            carry. Completing a batch auto-dispatches downstream, and if the
+            operator has no say the FULL produced qty always flows on — which
+            is the legacy default, not always the truth. Blank keeps that
+            default; a number sends only that much and leaves the remainder at
+            this stage for a later batch or an explicit dispatch.
+            Only shown when there IS a downstream JC to dispatch to. */}
+        {detail.next_job_card_id ? (
+          <>
+            <SubsectionLabel className="mt-4">Dispatch to next stage</SubsectionLabel>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <FormNumber
+                label="Qty (kg) — blank = all"
+                value={dispatchQtyKg}
+                onChange={onChangeDispatchQty}
+                disabled={inputsDisabled}
+              />
+            </div>
+            <p className="mt-1 text-[10px] text-[var(--text-muted)] italic">
+              Applied when the batch is completed on save. Leave blank to send
+              the whole produced quantity to the next stage.
+            </p>
+          </>
+        ) : null}
+
+        {/* Admin-only balance override. Rendered for admins regardless of the
+            current balance state so it is discoverable before the save that
+            gets blocked, rather than only after. */}
+        {isAdmin ? (
+          <label className="mt-3 flex items-start gap-2 text-[11px] text-[var(--text-secondary)]">
+            <input
+              type="checkbox"
+              className="accent-[var(--aws-orange)] w-4 h-4 mt-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
+              checked={allowUnbalanced}
+              onChange={(e) => setAllowUnbalanced(e.target.checked)}
+              disabled={inputsDisabled}
+            />
+            <span>
+              Complete even if the accounting is unbalanced
+              <span className="block text-[10px] text-[var(--text-muted)] italic">
+                Admin override. The batch closes and dispatches downstream with
+                a recorded balance difference.
+              </span>
+            </span>
+          </label>
+        ) : null}
       </Panel>
 
       {/* ── Balance Material ────────────────────────────────────────────── */}
@@ -6179,65 +5913,14 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
         // `submitting` internally too but passing the merged flag keeps
         // the aria-describedby story consistent with the inputs above.
         disabled={inputsDisabled}
-        // Close Batch sits beside the Save/Edit Batch submit so the
-        // operator's "save then close" flow lives in one row. Gating
-        // mirrors the original Batch Context panel button: visible when
-        // the JC is editable for this role, enabled only when a batch
-        // is open. Modal pre-fill + post-close refresh are unchanged
-        // — only the trigger's location moved.
-        extraActions={
-          (detail.status !== "completed" || isAdmin) && selectedBatch && canCompleteBatch ? (
-            <button
-              type="button"
-              onClick={() => setCloseBatchModal(selectedBatch)}
-              disabled={
-                batchActionBusy || submitting || lock.isLocked || lifecycleLocked ||
-                !batchIsOpen
-              }
-              title={lifecycleLocked ? "Start the job card first" : undefined}
-              className="h-9 px-4 text-[13px] font-bold tracking-wide rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[var(--text-primary)] hover:border-[var(--aws-orange)] disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Close Batch
-            </button>
-          ) : null
-        }
+        // The separate "Close Batch" button is GONE. Saving the output is
+        // now the last step and is what completes the batch — see the
+        // completion call at the end of the save handler, which posts
+        // complete_batch to the same /outputs endpoint once the
+        // accounting summary has established the authoritative
+        // is_balanced. One action, one transaction, no way to record a
+        // batch's output and then forget to close it.
       />
-      {/* Close Batch modal driven by the bottom-row Close Batch button.
-          Same component BatchBand uses inside AccountingSummaryCard;
-          rendered here so the close flow lives next to its trigger. */}
-      {closeBatchModal ? (
-        <BatchCloseModal
-          batch={closeBatchModal}
-          jcId={detail.job_card_id}
-          pmStage={pmBearingStage}
-          defaults={{
-            producedKg: fgActualKg,
-            // R10 — pre-fill from the operator's typed RM consumption
-            // (RM-only, PM excluded) so Close Batch doesn't surface an
-            // empty field when the data was already entered in the form
-            // above. Match the BatchBand-version default's behaviour.
-            rmConsumedKg: rmConsumedTypedKg > 0 ? rmConsumedTypedKg.toFixed(3) : "",
-            extraGiveAway: extraGiveawayQty,
-          }}
-          summarySnapshot={{
-            fgActualKg: num(fgActualKg) || null,
-            balanceDiff: null,
-            isBalanced: null,
-            tolerancePct: 0.10,
-            totalLossPct: null,
-          }}
-          onClose={() => setCloseBatchModal(null)}
-          onDone={async () => {
-            setCloseBatchModal(null);
-            // R10 — explicit batches refresh paired with onReload so
-            // the per-batch summary list picks up the newly-closed
-            // batch's snapshot fields immediately. Auto-poll no longer
-            // refreshes batches on its own (see refetchBatches above).
-            await refetchBatches();
-            onReload();
-          }}
-        />
-      ) : null}
     </form>
   );
 }

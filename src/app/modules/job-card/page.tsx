@@ -58,6 +58,23 @@ type JobCardRow = {
   // alone interleaves sibling chains into one ladder — group by plan_line_id.
   plan_line_id?: number | null;
   step_number?: number | null;
+  // Per-batch completion roll-up (list_job_cards). Saving output now COMPLETES
+  // a batch, so "how far along is this job card" is a question about its
+  // production batches, not only its own status column — a JC sits at
+  // in_progress with 3 of 4 batches already closed.
+  //
+  // NOTE the word "batch" is overloaded on this page: `batch_number` /
+  // `batchLabel` below mean the PLAN-LINE CHAIN (P{plan}-L{line}-S{step}).
+  // These counts are job_card_batch_v2 rows — the things that open and close.
+  // The UI calls them "production batches" to keep the two apart.
+  batch_summary?: {
+    total?: number | null;
+    closed?: number | null;
+    open?: number | null;
+    cancelled?: number | null;
+    produced_qty_kg?: number | string | null;
+    last_closed_at?: string | null;
+  } | null;
   process_name?: string | null;
   // Slice 3/7 seam codes. The v2 list endpoint surfaces the SFG#### codes a
   // step consumes (`input_code`) and produces (`output_code`) so the list can
@@ -156,6 +173,57 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
 // the rest of the file reads more naturally (`PAGE_SIZE` matches the
 // pagination-bar variable conventions).
 const PAGE_SIZE = JC_LIST_PAGE_SIZE;
+
+/**
+ * Production-batch completion, rolled up across one or more job cards.
+ *
+ * Saving output completes a batch, so a job card's own status column no longer
+ * tells the whole story: a JC reads `in_progress` while 3 of its 4 batches are
+ * already closed. This surfaces that on the list, where the decision "what
+ * still needs attention" actually gets made.
+ *
+ * Renders NOTHING when there are no batches at all. A job card that has not
+ * opened one yet is not "0% done" — there is simply nothing to report, and a
+ * grey 0/0 on every early-stage row would be noise on a busy floor display.
+ *
+ * `cancelled` batches are excluded from the denominator: they are withdrawn,
+ * not outstanding, so counting them would make a fully-worked chain read as
+ * permanently incomplete.
+ */
+function BatchProgress({ stages }: { stages: JobCardRow[] }) {
+  let closed = 0;
+  let live = 0;
+  for (const s of stages) {
+    const b = s.batch_summary;
+    if (!b) continue;
+    const c = Number(b.closed ?? 0) || 0;
+    const total = Number(b.total ?? 0) || 0;
+    const cancelled = Number(b.cancelled ?? 0) || 0;
+    closed += c;
+    live += Math.max(0, total - cancelled);
+  }
+  if (live === 0) return null;
+
+  const done = closed >= live;
+  const label = `${closed}/${live}`;
+  const title = done
+    ? `All ${live} production batch${live === 1 ? "" : "es"} completed`
+    : `${closed} of ${live} production batches completed`;
+
+  return (
+    <span
+      title={title}
+      className={[
+        "shrink-0 font-mono font-semibold rounded-sm border px-1 py-0.5 text-[9px]",
+        done
+          ? "bg-[#edfdf3] text-[#0f6b3f] border-[#a7e3c4]"
+          : "bg-[var(--surface-subtle)] text-[var(--text-secondary)] border-[var(--aws-border)]",
+      ].join(" ")}
+    >
+      {label}
+    </span>
+  );
+}
 
 // Status → AWS-console-leaning badge palette. Keeps the same status-pill
 // vocabulary as the original frontend (locked/red, in-progress/blue, etc.).
@@ -636,6 +704,17 @@ function JobCardListingPageBody() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-4">
+            {/* Gated on isAdmin to match the Summary page's own access rule —
+                offering a link that only lands on "Access restricted" is worse
+                than not offering it. */}
+            {isAdmin && (
+              <button
+                onClick={() => router.push("/modules/job-card/dashboard")}
+                className="px-3 py-1.5 text-[12px] border border-[var(--aws-border)] rounded hover:border-[var(--aws-navy)]"
+              >
+                View Summary
+              </button>
+            )}
             <ChipGroup
               label="Entity"
               value={entity}
@@ -1080,8 +1159,9 @@ function PlanMergedCard({ group, onReload }: { group: PlanGroup; onReload: () =>
           >
             {group.plan_id != null ? `Plan #${group.plan_id}` : "Chain"}
           </span>
-          <span className="text-[10px] font-semibold text-[var(--text-secondary)] shrink-0">
-            {group.stages.length} step{group.stages.length === 1 ? "" : "s"} · {fmtBatch(batchQty)}
+          <span className="text-[10px] font-semibold text-[var(--text-secondary)] shrink-0 flex items-center gap-1.5">
+            <span>{group.stages.length} step{group.stages.length === 1 ? "" : "s"} · {fmtBatch(batchQty)}</span>
+            <BatchProgress stages={group.stages} />
           </span>
         </div>
         <div className="text-[13px] font-semibold text-[var(--text-primary)] truncate" title={sku}>{sku}</div>
@@ -1158,8 +1238,9 @@ function PlanMergedCard({ group, onReload }: { group: PlanGroup; onReload: () =>
                     </span>
                   ) : null}
                 </div>
-                <div className="text-[10px] text-[var(--text-muted)] truncate">
-                  {jc.floor || "—"} · {fmtBatch(qty)}
+                <div className="text-[10px] text-[var(--text-muted)] truncate flex items-center gap-1.5">
+                  <span>{jc.floor || "—"} · {fmtBatch(qty)}</span>
+                  <BatchProgress stages={[jc]} />
                 </div>
               </div>
               <span

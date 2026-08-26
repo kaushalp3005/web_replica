@@ -129,6 +129,22 @@ function InventoryLedgerIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function BomIcon(props: SVGProps<SVGSVGElement>) {
+  // A parent node branching into components — the header/line relationship
+  // the module is built around.
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <rect x="9" y="3" width="6" height="4" rx="1" />
+      <rect x="3" y="17" width="5" height="4" rx="1" />
+      <rect x="10" y="17" width="4" height="4" rx="1" />
+      <rect x="16" y="17" width="5" height="4" rx="1" />
+      <path d="M12 7v4" />
+      <path d="M5.5 17v-3h13v3" />
+      <path d="M12 14v3" />
+    </svg>
+  );
+}
+
 export const MODULES: ModuleItem[] = [
   {
     title: "Purchase",
@@ -228,6 +244,23 @@ export const MODULES: ModuleItem[] = [
     Icon: InventoryLedgerIcon,
   },
   {
+    title: "BOM",
+    description:
+      "Browse every bill of materials in one aggregated table — RM / PM line counts, quantities and process-route timings per BOM, expandable to the full material list and ordered route.",
+    badge: "Master data",
+    stat: "Aggregate · Lines · Route",
+    route: "bom",
+    implemented: true,
+    // Admin-only for now, by request. This is enforced in BOTH places on
+    // purpose: 095 grants bom.view to admin and nobody else, so the API denies
+    // non-admins, and this flag keeps the tile off their /modules grid. Opening
+    // it up later is a role grant in the database plus dropping this flag —
+    // note that a SCOPED role also needs its ROLE_MODULE_SCOPE entry, because
+    // the scoped branch of the /modules filter bypasses adminOnly.
+    adminOnly: true,
+    Icon: BomIcon,
+  },
+  {
     title: "Admin",
     description:
       "Manage users, assign roles, edit factory / floor scope, and curate the permission catalog. Admin role required.",
@@ -247,7 +280,11 @@ export const MODULES: ModuleItem[] = [
 // see a tile that is otherwise adminOnly, e.g. Purchase). Admins are never
 // scoped. A user holding several scoped roles gets the union of their routes.
 export const ROLE_MODULE_SCOPE: Record<string, string[]> = {
-  purchase_manager: ["purchase"],
+  // purchase_manager also gets Production Indents: auth_schema grants it
+  // production.indents.{view,send,acknowledge,link_po} — the RM/PM shortage
+  // indents it converts into POs — so scoping it to "purchase" alone hid a
+  // surface it already holds write permissions on.
+  purchase_manager: ["purchase", "production/prod-indents"],
   // store_head = stores/Material-In clerk: receiving ONLY. Scoped to the
   // material-in sub-route, not the whole tile — the Purchase tile still shows
   // (a sub-route keeps its parent visible, see scopeAllowsRoute) but PO Upload
@@ -258,12 +295,20 @@ export const ROLE_MODULE_SCOPE: Record<string, string[]> = {
   store_head:    ["purchase/material-in"],
   // Scoped production roles. Keys are either a top-level module route
   // ("job-card") or a "<module>/<sub>" sub-route for finer gating WITHIN a
-  // landing page — SO Creation / Planning / Plan List all live under the one
-  // "production" tile, so they need sub-route keys. See scopeAllowsRoute.
+  // landing page — SO Creation / Planning / Plan List / Production Indents all
+  // live under the one "production" tile, so they need sub-route keys. See
+  // scopeAllowsRoute.
   so_creator:    ["production/so-creation"],
   // planner also gets SO Creation (Sales-Register upload lives there) so a
-  // planner can bring in demand before building a plan.
-  planner:       ["production/so-creation", "production/planning", "production/plan-list", "job-card"],
+  // planner can bring in demand before building a plan, plus Production Indents
+  // (auth_schema + 075 grant planner both production.indents.* and
+  // production.production_indents.*).
+  // No "bom" entry: the BOM module is admin-only for now. Listing it here
+  // would UNDO that — the scoped branch of the /modules filter matches on this
+  // list alone and never consults adminOnly, so a scope entry makes a tile
+  // visible to that role regardless of the flag. Re-add it here (and grant
+  // bom.view in the database) when planners are meant to have it.
+  planner:       ["production/so-creation", "production/planning", "production/plan-list", "production/prod-indents", "job-card"],
   floor_manager: ["job-card"],
   // QC roles see only the standalone QC module (inward inspection / NCR /
   // parameters). The scope overrides the QC tile's adminOnly flag (like

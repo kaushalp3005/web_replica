@@ -37,7 +37,7 @@ const SUB_MODULES: SubModule[] = [
   { group: "Execution",  title: "Floor Dashboard",    description: "Per-floor utilisation, output, and material status.",                                                                                                  route: "/modules/production/floor",       implemented: false, hidden: true },
   { group: "Execution",  title: "Store Dashboard",    description: "Warehouse-side allocation and dispatch summary.",                                                                                                      route: "/modules/production/store",       implemented: false, hidden: true },
   { group: "Inventory",  title: "Indents",            description: "Raise and track RM / PM indents to the warehouse.",                                                                                                    route: "/modules/production/indents",     implemented: false, hidden: true },
-  { group: "Inventory",  title: "Production Indents", description: "Per-plan indent generation and acknowledgement.",                                                                                                      route: "/modules/production/prod-indents",implemented: false, hidden: true },
+  { group: "Inventory",  title: "Production Indents", description: "Maker-checker FG/SFG production indents and RM/PM purchase indents.",                                                                                  route: "/modules/production/prod-indents",implemented: true },
   { group: "Monitoring", title: "QC Dashboard",       description: "Aggregate QC outcomes and pending sign-offs.",                                                                                                         route: "/modules/production/qc",          implemented: false, hidden: true },
   { group: "Monitoring", title: "Alerts",             description: "Open alerts requiring operator attention.",                                                                                                            route: "/modules/production/alerts",      implemented: false, hidden: true },
 ];
@@ -57,11 +57,19 @@ export default function ProductionLandingPage() {
   // pass both. "view" is enough to see a tile.
   const canSeeSo = useHasPermission("so", null, null, "view");
   const canSeePlans = useHasPermission("production", "plans", null, "view");
+  // Production Indents shows BOTH indent families on one screen (FG/SFG
+  // maker-checker + RM/PM purchase), and each family has its own permission.
+  // Hence OR, not AND: a purchase_manager holds only production.indents.* and
+  // a checker may hold only production.production_indents.* — either one has
+  // something to do on the page, and each tab self-gates from there.
+  const canSeeProdIndents = useHasPermission("production", "production_indents", null, "view");
+  const canSeePurchIndents = useHasPermission("production", "indents", null, "view");
   // Route → required permission for the tiles covered by the SO/Planning
   // permission map. Tiles not listed here keep their role-scope gate only.
   function tileAllowed(route: string): boolean {
     if (route === "/modules/production/so-creation") return canSeeSo;
     if (route === "/modules/production/planning" || route === "/modules/production/plan-list") return canSeePlans;
+    if (route === "/modules/production/prod-indents") return canSeeProdIndents || canSeePurchIndents;
     return true;
   }
 
