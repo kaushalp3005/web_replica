@@ -1609,15 +1609,18 @@ function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
 
 // ── Overflow ⋮ menu ──────────────────────────────────────────────────────
 //
-// Mirrors JobCardDetailActivity.showHeaderMenu — items appear conditionally:
-//   Edit header        ↦ when status NOT in {completed, closed, cancelled}
+// Mirrors JobCardDetailActivity.showHeaderMenu, minus two of its entries:
 //   Close JC           ↦ when status == completed
 //   Force unlock       ↦ when is_locked && is_admin
 //   Cancel JC          ↦ when status in {locked, unlocked, assigned}
-//   Manage Quality rows↦ always editable
-// Force unlock + Cancel collect a reason via window.prompt; Edit header /
-// Manage Quality rows open elaborate dialogs on Android (multi-field forms);
-// the web stubs surface an explanatory alert until those screens land.
+// Force unlock + Cancel collect a reason via window.prompt.
+//
+// Android's "Edit header" and "Manage Quality rows" are deliberately NOT
+// mirrored. Both open elaborate multi-field dialogs there; here they were
+// stubs whose only behaviour was an alert saying they do not work. A menu
+// entry that cannot do anything is worse than no entry — it reads as a
+// broken feature rather than an absent one. Quality rows are already
+// addable from the Quality tab. Restore them when the real dialogs land.
 function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: () => void }) {
   const [open, setOpen] = useState(false);
   // C1 (Wave 4) — switched from userStore.load() (one-shot, not reactive)
@@ -1631,7 +1634,6 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
   const canClose = useHasPermission("production", "job_cards", "overview", "close");
   const canForceUnlockPerm = useHasPermission("production", "job_cards", "force_unlock", "create");
 
-  const editable    = status !== "completed" && status !== "closed" && status !== "cancelled";
   // R10 — Cancel JC is admin-only on the server (router gate added with
   // migration 043). Mirror that here so non-admin operators never see the
   // menu item; eliminates the "Cancel" → 403 surprise. Status range
@@ -1647,11 +1649,6 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
   const showForceUnlock = !!detail.is_locked && userMayForceUnlock(me) && canForceUnlockPerm;
 
   const items: { label: string; enabled: boolean; onClick: () => void }[] = [];
-  items.push({
-    label: "Edit header",
-    enabled: editable,
-    onClick: () => window.alert("Edit header dialog is not implemented on web yet. Use the Android app to edit header fields."),
-  });
   if (closeable) {
     items.push({
       label: "Close JC",
@@ -1673,11 +1670,6 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
       onClick: () => cancelJc(),
     });
   }
-  items.push({
-    label: "Manage Quality rows",
-    enabled: editable,
-    onClick: () => window.alert("Manage Quality rows dialog is not implemented on web yet. Use the Quality tab to add rows, or the Android app to edit/delete existing ones."),
-  });
 
   async function callApi(method: "PUT" | "POST" | "DELETE", path: string, body: unknown, okMsg: string) {
     try {
@@ -1725,6 +1717,13 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
     if (open) document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [open]);
+
+  // With the two unconditional stubs gone every remaining entry is gated, so
+  // the menu can legitimately be empty (an unlocked in-progress JC viewed by a
+  // non-admin). Hide the trigger entirely in that case — a ⋮ that opens a blank
+  // panel reads as a bug. NOTE: this sits AFTER every hook above, so the hook
+  // order stays stable across renders.
+  if (items.length === 0) return null;
 
   return (
     <div className="relative" data-overflow-menu>
@@ -4696,11 +4695,18 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
           // Sending the client's guess with the first call would gate
           // completion on a number the server had not yet agreed with.
           //
-          // A second POST to the same endpoint carrying only the
-          // completion fields: `has_output_payload` is true (produced
-          // qty is required by close_batch) so the output row is
-          // re-upserted with identical values — cheap, and it keeps one
-          // endpoint responsible for the whole thing.
+          // A second POST to the same endpoint. `has_output_payload` is true
+          // (produced qty is required by close_batch) so record_output runs
+          // again and close_batch re-upserts the same job_card_output_v2 row.
+          //
+          // Every operator-visible scalar therefore has to be REPEATED here.
+          // This body once carried only the completion fields, on the belief
+          // that the row would be "re-upserted with identical values" — it was
+          // not: an omitted field arrived as null, and the server wrote 0 over
+          // what the first POST had just stored. process_loss_kg was the
+          // casualty, and the operator watched their Process Loss go blank on
+          // save. The server now COALESCEs a null rather than zeroing, but
+          // sending the value is what makes an EDIT to it stick on this pass.
           // `balance_difference_qty` -- NOT balance_diff_kg. That name exists
           // in the codebase only as an amendment audit-payload key; the
           // accounting row's own column, which this endpoint returns, is
@@ -4727,6 +4733,13 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                       ? null : parseInt(fgActualUnits, 10),
                     rm_consumed_kg: rmConsumedTypedKg > 0 ? rmConsumedTypedKg : 0,
                     extra_give_away_qty: num(extraGiveawayQty) || 0,
+                    // Repeated from the first POST — see the note above. Blank
+                    // stays null so the server keeps the stored value rather
+                    // than the form's emptiness overwriting a real figure.
+                    process_loss_kg: processLoss.trim() === ""
+                      ? null : num(processLoss),
+                    process_loss_remark: processLossRemark.trim() === ""
+                      ? null : processLossRemark.trim(),
                     is_balanced: accForClose?.is_balanced ?? null,
                     allow_unbalanced: allowUnbalanced,
                     balance_difference_qty: accForClose?.balance_difference_qty != null
