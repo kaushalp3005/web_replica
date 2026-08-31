@@ -4695,11 +4695,18 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
           // Sending the client's guess with the first call would gate
           // completion on a number the server had not yet agreed with.
           //
-          // A second POST to the same endpoint carrying only the
-          // completion fields: `has_output_payload` is true (produced
-          // qty is required by close_batch) so the output row is
-          // re-upserted with identical values — cheap, and it keeps one
-          // endpoint responsible for the whole thing.
+          // A second POST to the same endpoint. `has_output_payload` is true
+          // (produced qty is required by close_batch) so record_output runs
+          // again and close_batch re-upserts the same job_card_output_v2 row.
+          //
+          // Every operator-visible scalar therefore has to be REPEATED here.
+          // This body once carried only the completion fields, on the belief
+          // that the row would be "re-upserted with identical values" — it was
+          // not: an omitted field arrived as null, and the server wrote 0 over
+          // what the first POST had just stored. process_loss_kg was the
+          // casualty, and the operator watched their Process Loss go blank on
+          // save. The server now COALESCEs a null rather than zeroing, but
+          // sending the value is what makes an EDIT to it stick on this pass.
           // `balance_difference_qty` -- NOT balance_diff_kg. That name exists
           // in the codebase only as an amendment audit-payload key; the
           // accounting row's own column, which this endpoint returns, is
@@ -4726,6 +4733,13 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                       ? null : parseInt(fgActualUnits, 10),
                     rm_consumed_kg: rmConsumedTypedKg > 0 ? rmConsumedTypedKg : 0,
                     extra_give_away_qty: num(extraGiveawayQty) || 0,
+                    // Repeated from the first POST — see the note above. Blank
+                    // stays null so the server keeps the stored value rather
+                    // than the form's emptiness overwriting a real figure.
+                    process_loss_kg: processLoss.trim() === ""
+                      ? null : num(processLoss),
+                    process_loss_remark: processLossRemark.trim() === ""
+                      ? null : processLossRemark.trim(),
                     is_balanced: accForClose?.is_balanced ?? null,
                     allow_unbalanced: allowUnbalanced,
                     balance_difference_qty: accForClose?.balance_difference_qty != null
