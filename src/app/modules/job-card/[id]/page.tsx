@@ -1349,7 +1349,6 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
 type BatchRow = {
   batch_id: number;
   batch_number: number;
-  batch_label?: string | null;   // 072: operator-typed free-text name; null → "Batch N"
   batch_date: string | null;
   status: string;
   planned_qty_kg: number | string | null;
@@ -1382,8 +1381,16 @@ type BatchRow = {
 // else the batch's 8-digit code (batch_id). Non-packing batches open
 // nameless, so the code is their identifier; named packing batches keep
 // their label. One helper so every accounting spot agrees.
-function batchLabel(b: { batch_label?: string | null; batch_id: number }): string {
-  return b.batch_label?.trim() || String(b.batch_id);
+// A batch is identified by its 8-digit batch_id and nothing else.
+//
+// This used to fall back through an operator-typed batch_label, and the
+// fallback was not even consistent: this helper fell back to batch_id while
+// three other sites fell back to `Batch ${batch_number}`, so one batch showed
+// as "47382910" in one panel and "Batch 2" in another. batch_number is still
+// the internal ordering key (MAX(batch_number)+1 on open, ORDER BY in the
+// queries) -- it is just no longer something an operator sees.
+function batchLabel(b: { batch_id: number }): string {
+  return String(b.batch_id);
 }
 
 function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () => void }) {
@@ -1610,14 +1617,17 @@ function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
 // ── Overflow ⋮ menu ──────────────────────────────────────────────────────
 //
 // Mirrors JobCardDetailActivity.showHeaderMenu — items appear conditionally:
-//   Edit header        ↦ when status NOT in {completed, closed, cancelled}
 //   Close JC           ↦ when status == completed
 //   Force unlock       ↦ when is_locked && is_admin
 //   Cancel JC          ↦ when status in {locked, unlocked, assigned}
-//   Manage Quality rows↦ always editable
-// Force unlock + Cancel collect a reason via window.prompt; Edit header /
-// Manage Quality rows open elaborate dialogs on Android (multi-field forms);
-// the web stubs surface an explanatory alert until those screens land.
+// Force unlock + Cancel collect a reason via window.prompt.
+//
+// Android's Edit header / Manage Quality rows entries are deliberately NOT
+// mirrored here: both were web-only stubs that opened an alert telling the
+// operator to go use the Android app, so they read as broken menu items.
+// Header fields are edited on Android; Quality rows are added from the
+// Quality tab. All three conditions can be false at once, so the trigger
+// hides itself rather than opening an empty panel.
 function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: () => void }) {
   const [open, setOpen] = useState(false);
   // C1 (Wave 4) — switched from userStore.load() (one-shot, not reactive)
@@ -1631,7 +1641,6 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
   const canClose = useHasPermission("production", "job_cards", "overview", "close");
   const canForceUnlockPerm = useHasPermission("production", "job_cards", "force_unlock", "create");
 
-  const editable    = status !== "completed" && status !== "closed" && status !== "cancelled";
   // R10 — Cancel JC is admin-only on the server (router gate added with
   // migration 043). Mirror that here so non-admin operators never see the
   // menu item; eliminates the "Cancel" → 403 surprise. Status range
@@ -1647,11 +1656,6 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
   const showForceUnlock = !!detail.is_locked && userMayForceUnlock(me) && canForceUnlockPerm;
 
   const items: { label: string; enabled: boolean; onClick: () => void }[] = [];
-  items.push({
-    label: "Edit header",
-    enabled: editable,
-    onClick: () => window.alert("Edit header dialog is not implemented on web yet. Use the Android app to edit header fields."),
-  });
   if (closeable) {
     items.push({
       label: "Close JC",
@@ -1673,11 +1677,6 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
       onClick: () => cancelJc(),
     });
   }
-  items.push({
-    label: "Manage Quality rows",
-    enabled: editable,
-    onClick: () => window.alert("Manage Quality rows dialog is not implemented on web yet. Use the Quality tab to add rows, or the Android app to edit/delete existing ones."),
-  });
 
   async function callApi(method: "PUT" | "POST" | "DELETE", path: string, body: unknown, okMsg: string) {
     try {
@@ -1725,6 +1724,12 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
     if (open) document.addEventListener("mousedown", onDocClick);
     return () => document.removeEventListener("mousedown", onDocClick);
   }, [open]);
+
+  // Every remaining entry is conditional, so the menu can legitimately be
+  // empty (e.g. an unlocked in-progress JC for a non-admin). Hide the whole
+  // trigger in that case — a ⋮ that opens a blank panel reads as a bug.
+  // NOTE: this sits AFTER every hook above so the hook order stays stable.
+  if (items.length === 0) return null;
 
   return (
     <div className="relative" data-overflow-menu>
@@ -2208,7 +2213,7 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
             >
               {batches.map((b) => (
                 <option key={b.batch_id} value={b.batch_id}>
-                  {b.batch_label?.trim() || `Batch ${b.batch_number}`}
+                  {batchLabel(b)}
                 </option>
               ))}
             </select>
@@ -2234,7 +2239,7 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
                   const sel = b.batch_id === selectedBatchId;
                   return (
                     <tr key={b.batch_id} className={`border-b border-[var(--aws-border)] last:border-0 ${sel ? "bg-[#fff4e6]" : ""}`}>
-                      <td className="py-1.5 pr-3 text-[var(--text-primary)]">{b.batch_label?.trim() || `Batch ${b.batch_number}`}</td>
+                      <td className="py-1.5 pr-3 text-[var(--text-primary)]">{batchLabel(b)}</td>
                       <td className="py-1.5 pr-3 text-[var(--text-primary)] break-all">{fgName}</td>
                       <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-[var(--text-primary)]">{input > 0 ? `${input.toFixed(3)} kg` : "—"}</td>
                       <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-[var(--text-primary)]">
@@ -3504,33 +3509,25 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   >(null);
   // 072: operator-typed batch name for the next Open Batch. Blank → server
   // keeps NULL and the batch shows as its 8-digit code.
-  const [newBatchLabel, setNewBatchLabel] = useState("");
   // Packing batches must be named (labels drive QR / label traceability);
   // every other stage opens a nameless batch identified by its 8-digit code.
   const isPackingStage = isPackingStageJc(detail.stage);
 
   const doOpenBatch = useCallback(async () => {
-    const label = newBatchLabel.trim();
-    // Name is mandatory only for packing batches; other stages open nameless.
-    if (isPackingStage && !label) {
-      setBatchActionMsg({ kind: "err", msg: "Enter a batch name before opening a batch." });
-      return;
-    }
     // Confirm before creating — a new batch is not trivially undoable.
-    if (!window.confirm(label ? `Open a new batch named "${label}"?` : "Open a new batch?")) return;
+    if (!window.confirm("Open a new batch?")) return;
     setBatchActionMsg(null);
     setBatchActionBusy(true);
     try {
       const res = await apiFetch(
         `/api/v1/production/job-cards-v2/${detail.job_card_id}/batches/open`,
-        { method: "POST", body: JSON.stringify(label ? { batch_label: label } : {}) },
+        { method: "POST", body: JSON.stringify({}) },
       );
       if (!res.ok) {
         throw new Error(
           await readApiErrorMessage(res, `HTTP ${res.status}`),
         );
       }
-      setNewBatchLabel("");
       setBatchActionMsg({ kind: "ok", msg: "Batch opened." });
       // R10 — explicit refresh; the [detail.job_card_id]-only batches
       // effect won't pick up the new batch otherwise. Run both: the
@@ -3544,35 +3541,8 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     } finally {
       setBatchActionBusy(false);
     }
-  }, [detail.job_card_id, onReload, refetchBatches, newBatchLabel, isPackingStage]);
+  }, [detail.job_card_id, onReload, refetchBatches]);
 
-  // 072: rename a batch (so a batch — including legacy ones — can be given the
-  // free-text name shown in the batch table). Acts on the passed row.
-  const doRenameBatch = useCallback(async (batch: BatchRow) => {
-    const input = window.prompt("Batch name:", batch.batch_label ?? "");
-    if (input === null) return; // cancelled
-    const label = input.trim();
-    // Batch name is mandatory — a rename cannot blank it out.
-    if (!label) {
-      setBatchActionMsg({ kind: "err", msg: "Batch name cannot be empty." });
-      return;
-    }
-    setBatchActionMsg(null);
-    setBatchActionBusy(true);
-    try {
-      const res = await apiFetch(
-        `/api/v1/production/job-cards-v2/${detail.job_card_id}/batches/${batch.batch_id}/rename`,
-        { method: "POST", body: JSON.stringify({ batch_label: label }) },
-      );
-      if (!res.ok) throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
-      setBatchActionMsg({ kind: "ok", msg: "Batch renamed." });
-      await refetchBatches();
-    } catch (e) {
-      setBatchActionMsg({ kind: "err", msg: friendlyJobCardError(e) });
-    } finally {
-      setBatchActionBusy(false);
-    }
-  }, [detail.job_card_id, refetchBatches]);
 
   // Re-sync on detail reload. Skipped when the operator has unsaved
   // input (formDirty.current === true) so an auto-poll doesn't wipe the
@@ -4958,31 +4928,18 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
             />
           </dl>
         ) : null}
-        {/* Open a new batch — name is mandatory for packing stages only.
-            Hidden when the role lacks overview/start (batch-open). */}
+        {/* Open a new batch. No name: a batch is identified by its 8-digit
+            batch_id. Hidden when the role lacks overview/start (batch-open). */}
         {(detail.status !== "completed" || isAdmin) && canStartBatch ? (
           <div className="flex items-center gap-2 mb-3 flex-wrap">
             <label className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)] sm:w-[110px]">
               New batch
             </label>
-            {isPackingStage ? (
-              <input
-                type="text"
-                value={newBatchLabel}
-                onChange={(e) => setNewBatchLabel(e.target.value)}
-                disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked}
-                placeholder="Batch name (required)"
-                maxLength={120}
-                required
-                aria-label="Batch name for the new batch"
-                className={`${inputCls} h-7 w-[220px] text-[12px]`}
-              />
-            ) : null}
             <button
               type="button"
               onClick={() => void doOpenBatch()}
-              disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked || (isPackingStage && !newBatchLabel.trim())}
-              title={lifecycleLocked ? "Start the job card first" : (isPackingStage && !newBatchLabel.trim()) ? "Enter a batch name first" : undefined}
+              disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked}
+              title={lifecycleLocked ? "Start the job card first" : undefined}
               className="h-7 px-3 text-[11px] font-semibold rounded-[2px] border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {batchActionBusy ? "…" : "Open Batch"}
@@ -5016,8 +4973,9 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                   .map((b) => {
                     const isLoaded = b.batch_id === selectedBatchId;
                     const isOpen = b.status === "open";
-                    const canManage = detail.status !== "completed" || isAdmin;
-                    const busy = batchActionBusy || submitting || lock.isLocked || lifecycleLocked;
+                    // canManage / busy lived here for the Rename and Close
+                    // buttons, both since removed — the row's remaining actions
+                    // carry their own gating.
                     const numCell = (v: number | string | null | undefined) =>
                       v == null || v === "" ? "—" : fmtNum(Number(v));
                     const statusColor = isOpen
@@ -5052,17 +5010,9 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                                 saving its output, which is the last step. Load
                                 the batch, fill the form, Save — the completion
                                 rides along in the same transaction. */}
-                            {canManage ? (
-                              <button
-                                type="button"
-                                onClick={() => void doRenameBatch(b)}
-                                disabled={busy}
-                                title="Rename this batch"
-                                className="h-7 px-2 text-[11px] rounded-[2px] border border-transparent text-[var(--aws-link)] hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
-                              >
-                                Rename
-                              </button>
-                            ) : null}
+                            {/* Rename is gone with the batch name: a batch is
+                                identified by its 8-digit batch_id, which is not
+                                the operator's to change. */}
                             {isProducerStage ? (
                               <button
                                 type="button"

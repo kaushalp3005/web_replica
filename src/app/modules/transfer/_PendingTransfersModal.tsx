@@ -94,6 +94,12 @@ export function PendingTransfersModal({
   );
   const totalBoxes = records.reduce((s, r) => s + (r.total_boxes || 0), 0);
   const totalKg = records.reduce((s, r) => s + (r.total_kg || 0), 0);
+  // The backend groups pending_transfer_stock by the full site/company/storage-type
+  // tuple, so one transfer_out yields several rows (see the row key below). Counting
+  // rows and labelling them transfers read "312 transfers" when only 283 distinct
+  // transfer_out_ids were in transit. Boxes/kg stay row-based — the rows partition the
+  // boxes (transfer 477: 2 + 1 = 3) — only the transfer count needs de-duplicating.
+  const transferCount = new Set(records.map((r) => r.transfer_out_id)).size;
   const fromChips = data?.filter_options.from_sites ?? [];
   const toChips = data?.filter_options.to_sites ?? [];
 
@@ -122,7 +128,7 @@ export function PendingTransfersModal({
 
         {/* Totals */}
         <div className="px-4 pb-2 flex gap-4 text-[12px] text-[var(--text-secondary)]">
-          <span><b className="text-[var(--text-primary)]">{records.length}</b> transfers</span>
+          <span><b className="text-[var(--text-primary)]">{transferCount}</b> transfers</span>
           <span><b className="text-[var(--text-primary)]">{totalBoxes}</b> boxes</span>
           <span><b className="text-[var(--text-primary)]">{totalKg.toFixed(1)}</b> kg</span>
         </div>

@@ -153,6 +153,68 @@ export function buildOutpass(i: OutpassInput): OutpassDoc {
 
 const round3 = (v: number): number => Math.round(v * 1000) / 1000;
 
+// ── What the combined outpass will ISSUE ─────────────────────────────────────
+// "Dispatch all & print combined outpass" fires one 265 Goods Issue per article before
+// the document is printed. This is the rule that decides which articles are issued and
+// how much each still owes — the same class of invariant as buildOutpass above, and kept
+// beside it for the same reason: issuing a part that already left, or printing a challan
+// against a goods issue that never fired, is an inventory discrepancy.
+
+/** One article's outstanding balance, as the combined dispatch will issue it. */
+export interface CombinedDispatchPart {
+  articleId: number;
+  name: string;
+  /** The balance still to send, at the ledger's 3-dp precision. DISPLAY ONLY — the POST
+   *  deliberately omits qty so the server's SELECT … FOR UPDATE balance stays the
+   *  authority. A client figure sent as qty could lose a race with a concurrent part. */
+  qty: number;
+  uom: string;
+}
+
+export interface CombinedDispatchPlan {
+  /** Articles to POST a dispatch for, in card order. Empty ⇒ nothing left to issue,
+   *  which is what puts the button in its reprint-only state. */
+  parts: CombinedDispatchPart[];
+  /** One subtotal per distinct unit — never one number across labels (see sumByUom). */
+  totals: OutpassTotal[];
+  totalLabel: string;
+}
+
+/** An article carrying its per-article dispatch balances (083). */
+export interface CombinedDispatchArticle extends OutpassArticle {
+  dispatched_total?: number | string | null;
+  remaining_qty?: number | string | null;
+}
+
+export function planCombinedDispatch(articles: CombinedDispatchArticle[],
+                                     cardUom = "kg"): CombinedDispatchPlan {
+  const parts: CombinedDispatchPart[] = [];
+  for (const a of articles) {
+    // The legacy synthesized article has no id, and /dispatch rejects a per-article card
+    // without one — planning a part for it would only produce a 422.
+    if (a.article_id == null) continue;
+    // No finalized output ⇒ no FG batch ⇒ nothing this article can issue.
+    if (n(a.output_qty) <= 0) continue;
+    // remaining_qty is what the detail GET computes; fall back to the subtraction for a
+    // payload served before 083 attached the per-article balances.
+    const remaining = round3(a.remaining_qty != null
+      ? n(a.remaining_qty)
+      : n(a.output_qty) - n(a.dispatched_total));
+    // Rounded first, then compared to zero — exactly how the server bounds the part
+    // (round(qty, 3) then reject <= 0), so the dialog can't offer a quantity it will
+    // refuse. Also drops a negative balance left by an over-issued legacy mirror.
+    if (remaining <= 0) continue;
+    parts.push({
+      articleId: a.article_id,
+      name: a.name ?? "—",
+      qty: remaining,
+      uom: a.output_uom || cardUom || "kg",
+    });
+  }
+  const totals = sumByUom(parts);
+  return { parts, totals, totalLabel: formatTotals(totals) };
+}
+
 /** Group quantities by unit label, preserving the order the units first appear in. */
 export function sumByUom(rows: { qty: number | string; uom?: string | null }[],
                          fallbackUom = "kg"): OutpassTotal[] {

@@ -55,7 +55,15 @@ export default function DCPage() {
     return <div className="min-h-screen flex items-center justify-center text-[13px] text-rose-600">Error: {error || "Transfer not found"}</div>;
   }
 
-  const totalQty = transfer.lines.reduce((s, l) => s + num(l.quantity), 0);
+  // The challan body drops phantom rows (blank / "N/A" description) before it consolidates,
+  // so summing EVERY line put the TOTAL row's Qty over a different row set than the column it
+  // sits under — transfer 1100 printed 1+550+2+6+8 = 567 and totalled 568 (line 59230, blank
+  // description, qty 1). Total exactly the rows that get printed.
+  const totalQty = transfer.lines.reduce((s, l) => {
+    const desc = (l.item_description || "").trim();
+    if (!desc || desc.toUpperCase() === "N/A") return s;
+    return s + num(l.quantity);
+  }, 0);
 
   return (
     <DeliveryChallan
@@ -68,8 +76,14 @@ export default function DCPage() {
       approvalAuthority={transfer.approved_by || "N/A"}
       reasonDescription={transfer.remark || transfer.reason_code || "N/A"}
       items={transfer.lines}
+      // The real box rows — "No. of Boxes" is counted from these via transfer_line_id,
+      // not from lines.length (an accepted request is one line per article covering many
+      // boxes; a manually-keyed line has none).
+      boxes={transfer.boxes}
+      // Lines that shipped without a scanned carton park one "In Transit" unit each.
+      // Without these the Boxes column printed "—" for a vehicle carrying ten units.
+      parkedUnits={transfer.parked_units ?? []}
       totalQtyRequired={totalQty}
-      boxesProvided={transfer.boxes.length}
       isPartial={(transfer.status || "").toLowerCase() === "partial"}
     />
   );

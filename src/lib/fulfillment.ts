@@ -8,6 +8,34 @@
 
 import { apiFetch } from "./auth";
 
+// ── Error propagation ────────────────────────────────────────────────────
+//
+// Throw an Error carrying the RAW response body, which is exactly what
+// friendlyApiError() expects to parse.
+//
+// This matters because the server has TWO error shapes and only one of them
+// has a `detail` key:
+//
+//   1. app/core/middleware/request_context.py wraps every HTTPException into
+//      a TOP-LEVEL envelope — {error, message, request_id, details}
+//   2. FastAPI's own HTTPException(detail=...) — {detail: "..." | {...}}
+//
+// Reading `j.detail` alone therefore misses shape 1 entirely, and since the
+// middleware is registered app-wide that is the shape production actually
+// returns. Every failure then collapsed to the literal "HTTP 400", hiding
+// messages friendlyApiError already had good copy for — "no active BOM for
+// <sku>", "would over-allocate fulfillment …". Passing the body through
+// intact keeps the error CODE, not just some text, so the catalog can map it.
+async function throwApiError(res: Response, fallback: string): Promise<never> {
+  let body = "";
+  try {
+    body = (await res.text()).trim();
+  } catch {
+    /* body already consumed or not readable — fall back to the status */
+  }
+  throw new Error(body || `${fallback} HTTP ${res.status}`);
+}
+
 // ── Listing types ────────────────────────────────────────────────────────
 
 export interface FulfillmentRow {
@@ -73,7 +101,7 @@ export async function listFulfillments(
 ): Promise<FulfillmentListResponse> {
   const p = buildListParams(q);
   const res = await apiFetch(`/api/v1/production/fulfillment-v2?${p}`, { signal });
-  if (!res.ok) throw new Error(`Fulfillment HTTP ${res.status}`);
+  if (!res.ok) await throwApiError(res, "Fulfillment");
   return (await res.json()) as FulfillmentListResponse;
 }
 
@@ -88,7 +116,7 @@ export async function fetchFulfillmentFilterOptions(
     `/api/v1/production/fulfillment-v2/filter-options?${p}`,
     { signal },
   );
-  if (!res.ok) throw new Error(`Filter options HTTP ${res.status}`);
+  if (!res.ok) await throwApiError(res, "Filter options");
   return (await res.json()) as FulfillmentFilterOptions;
 }
 
@@ -105,14 +133,7 @@ export async function syncFulfillmentNow(
     method: "POST",
     body: JSON.stringify({ entity: entity || null }),
   });
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
-  }
+  if (!res.ok) await throwApiError(res, "Sync");
   return (await res.json()) as FulfillmentSyncResponse;
 }
 
@@ -204,7 +225,7 @@ export async function fetchFulfillmentDetail(
   signal?: AbortSignal,
 ): Promise<FulfillmentDetail> {
   const res = await apiFetch(`/api/v1/production/fulfillment-v2/${id}/detail`, { signal });
-  if (!res.ok) throw new Error(`Detail HTTP ${res.status}`);
+  if (!res.ok) await throwApiError(res, "Detail");
   return (await res.json()) as FulfillmentDetail;
 }
 
@@ -223,14 +244,7 @@ export async function reviseFulfillment(
     method: "PUT",
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
-  }
+  if (!res.ok) await throwApiError(res, "Revise deadline");
   return await res.json();
 }
 
@@ -287,14 +301,7 @@ export async function createPlan(body: CreatePlanBody): Promise<CreatePlanRespon
     method: "POST",
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
-  }
+  if (!res.ok) await throwApiError(res, "Create plan");
   return (await res.json()) as CreatePlanResponse;
 }
 
@@ -320,18 +327,7 @@ export async function createBomMaster(body: CreateBomBody): Promise<CreateBomRes
     method: "POST",
     body: JSON.stringify(body),
   });
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: unknown };
-      // The endpoint returns {detail: {error, message}} or {detail: "..."}.
-      if (typeof j.detail === "string") detail = j.detail;
-      else if (j.detail && typeof j.detail === "object" && "message" in j.detail) {
-        detail = String((j.detail as { message?: unknown }).message ?? detail);
-      }
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
-  }
+  if (!res.ok) await throwApiError(res, "Create BOM");
   return (await res.json()) as CreateBomResponse;
 }
 
@@ -358,14 +354,7 @@ export async function fetchFulfillmentsBySoLines(
     method: "POST",
     body: JSON.stringify({ so_line_ids: soLineIds, entity: entity || null }),
   });
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch { /* non-JSON */ }
-    throw new Error(detail);
-  }
+  if (!res.ok) await throwApiError(res, "Resolve SO lines");
   return (await res.json()) as FulfillmentBySoLinesResponse;
 }
 
@@ -396,7 +385,7 @@ export async function fetchBomOverride(
   signal?: AbortSignal,
 ): Promise<{ overrides?: BomOverrideEntry[]; [k: string]: unknown }> {
   const res = await apiFetch(`/api/v1/production/fulfillment-v2/${id}/bom-override`, { signal });
-  if (!res.ok) throw new Error(`BOM override HTTP ${res.status}`);
+  if (!res.ok) await throwApiError(res, "BOM override");
   return (await res.json()) as { overrides?: BomOverrideEntry[] };
 }
 
@@ -408,7 +397,7 @@ export async function saveBomOverride(
     method: "PUT",
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`BOM override HTTP ${res.status}`);
+  if (!res.ok) await throwApiError(res, "BOM override");
   return await res.json();
 }
 
@@ -428,7 +417,7 @@ export async function fetchFloorStock(
   signal?: AbortSignal,
 ): Promise<{ entries?: FloorStockEntry[]; [k: string]: unknown }> {
   const res = await apiFetch(`/api/v1/production/fulfillment-v2/${id}/floor-stock`, { signal });
-  if (!res.ok) throw new Error(`Floor stock HTTP ${res.status}`);
+  if (!res.ok) await throwApiError(res, "Floor stock");
   return (await res.json()) as { entries?: FloorStockEntry[] };
 }
 
@@ -440,7 +429,7 @@ export async function saveFloorStock(
     method: "PUT",
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`Floor stock HTTP ${res.status}`);
+  if (!res.ok) await throwApiError(res, "Floor stock");
   return await res.json();
 }
 
@@ -455,7 +444,7 @@ export async function carryforwardFulfillment(body: CarryforwardBody): Promise<u
     method: "POST",
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`Carryforward HTTP ${res.status}`);
+  if (!res.ok) await throwApiError(res, "Carryforward");
   return await res.json();
 }
 

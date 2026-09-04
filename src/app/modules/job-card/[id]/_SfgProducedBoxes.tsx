@@ -21,7 +21,7 @@ import { printSfgBoxLabels } from "./_sfgBoxLabelPrint";
 const DISPLAY = 10; // boxes shown per page in a group
 
 export type BatchOpt = {
-  batch_id: number; batch_label?: string | null; batch_number: number; status: string;
+  batch_id: number; batch_number: number; status: string;
   // Accounting weights (from GET /batches → job_card_batch_v2). The cap a batch's
   // box net must not exceed is the first of these that is set and > 0.
   produced_qty_kg?: number | string | null;
@@ -32,8 +32,12 @@ export type BatchOpt = {
   fg_actual_kg?: number | string | null;
   fg_actual_units?: number | string | null;
 };
+// A batch is identified by its 8-digit batch_id — same rule as the job-card
+// page's batchLabel(). This used to fall back to `Batch ${batch_number}` while
+// that helper fell back to batch_id, so one batch read differently depending on
+// which panel you were looking at.
 function batchOptLabel(b: BatchOpt): string {
-  return b.batch_label?.trim() || `Batch ${b.batch_number}`;
+  return String(b.batch_id);
 }
 // The accounting kg a batch's boxes must not exceed (produced → input → planned,
 // first > 0); null when the batch has no accounting weight yet (no cap).

@@ -134,6 +134,12 @@ export default function SampleQueuePage() {
           <p className="text-[12px] text-[var(--text-secondary)] mt-0.5">{rows.length} shown</p>
         </div>
         <div className="flex-1" />
+        {/* No isAdmin guard needed — this whole page already returns the
+            restricted view for non-admins, which is the Summary's rule too. */}
+        <button
+          onClick={() => router.push("/modules/sample/dashboard")}
+          className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:bg-[var(--surface-subtle)]"
+        >View Summary</button>
         <button
           onClick={() => router.push("/modules/sample/rm-issue-forms")}
           className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:bg-[var(--surface-subtle)]"

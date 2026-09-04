@@ -8,7 +8,7 @@
 // own recorded quantities and units — never a rounded total, never a part that isn't on
 // this card, never two documents covering the same movement.
 
-import { buildOutpass, sumByUom, formatTotals, parseDispatchIds, type OutpassInput } from "./outpass.ts";
+import { buildOutpass, planCombinedDispatch, sumByUom, formatTotals, parseDispatchIds, type OutpassInput } from "./outpass.ts";
 
 let failures = 0;
 function check(name: string, got: unknown, want: unknown) {
@@ -145,6 +145,95 @@ check("sumByUom falls back for a missing label",
 check("sumByUom rounds each subtotal",
   sumByUom([{ qty: 0.08, uom: "kg" }, { qty: 0.4, uom: "kg" }]), [{ uom: "kg", qty: 0.48 }]);
 check("formatTotals on nothing", formatTotals([]), "—");
+
+// ── planCombinedDispatch: what "Dispatch all & print" will actually issue ───
+// This is the rule behind the combined outpass button. Getting it wrong means either
+// issuing stock twice (a part already out counted again) or a challan printed against
+// goods issues that were never fired. The quantities it reports are for the CONFIRM
+// DIALOG only — the POST omits qty so the server's locked balance stays authoritative —
+// but they must still match what the server will issue, or the dialog lies.
+{
+  const arts = [
+    { article_id: 11, name: "Date Powder", output_qty: 0.2, output_uom: "kg", remaining_qty: 0.2 },
+    { article_id: 12, name: "Date Syrup", output_qty: 0.4, output_uom: "kg", remaining_qty: 0.4 },
+  ];
+  const p = planCombinedDispatch(arts, "kg");
+  check("plan — nothing out yet: every article at its full output", p.parts, [
+    { articleId: 11, name: "Date Powder", qty: 0.2, uom: "kg" },
+    { articleId: 12, name: "Date Syrup", qty: 0.4, uom: "kg" },
+  ]);
+  check("plan — totalled per unit", p.totals, [{ uom: "kg", qty: 0.6 }]);
+  check("plan — printable total", p.totalLabel, "0.6 kg");
+}
+{
+  const arts = [
+    { article_id: 11, name: "Date Powder", output_qty: 0.2, output_uom: "kg", remaining_qty: 0.07 },
+    { article_id: 12, name: "Date Syrup", output_qty: 0.4, output_uom: "kg", remaining_qty: 0.4 },
+  ];
+  const p = planCombinedDispatch(arts, "kg");
+  check("plan — partly out: only the gap is issued", p.parts.map((x) => x.qty), [0.07, 0.4]);
+}
+{
+  const arts = [
+    { article_id: 11, name: "Date Powder", output_qty: 0.2, output_uom: "kg", remaining_qty: 0 },
+    { article_id: 12, name: "Date Syrup", output_qty: 0.4, output_uom: "kg", remaining_qty: 0.4 },
+  ];
+  const p = planCombinedDispatch(arts, "kg");
+  check("plan — a fully-dispatched article contributes no part", p.parts.map((x) => x.articleId), [12]);
+}
+{
+  // The screenshot's card: everything already out under its own per-part outpasses.
+  // An empty plan is what flips the button to "Reprint combined outpass".
+  const arts = [{ article_id: 11, name: "test", output_qty: 10, output_uom: "kg", remaining_qty: 0 }];
+  const p = planCombinedDispatch(arts, "kg");
+  check("plan — all out: nothing to issue", p.parts, []);
+  check("plan — all out: empty total label", p.totalLabel, "—");
+}
+{
+  // Never derive a part from a balance the server would reject.
+  const arts = [
+    { article_id: 11, name: "No output", output_qty: 0, output_uom: "kg", remaining_qty: 0 },
+    { article_id: 12, name: "Unset output", output_qty: null, output_uom: "kg", remaining_qty: null },
+    { article_id: null, name: "Legacy synthesized", output_qty: 5, output_uom: "kg", remaining_qty: 5 },
+  ];
+  check("plan — an article with no finalized output is excluded", planCombinedDispatch(arts, "kg").parts, []);
+}
+{
+  // remaining_qty is absent on a card served before 083 attached the per-article
+  // balances — derive it rather than treating the whole output as still available.
+  const arts = [{ article_id: 11, name: "Date Powder", output_qty: 0.2, output_uom: "kg", dispatched_total: 0.13 }];
+  const p = planCombinedDispatch(arts, "kg");
+  check("plan — remaining derived from output − dispatched when absent", p.parts.map((x) => x.qty), [0.07]);
+}
+{
+  const arts = [{ article_id: 11, name: "Date Powder", output_qty: 0.2, output_uom: null }];
+  const p = planCombinedDispatch(arts, "g");
+  check("plan — no per-article balance at all: the whole output is still to send", p.parts.map((x) => x.qty), [0.2]);
+  check("plan — falls back to the card unit", p.parts.map((x) => x.uom), ["g"]);
+}
+{
+  // Binary floating point: 0.6 − 0.4 is 0.19999999999999998. A dialog that shows that
+  // figure — or a part built from it — is not reconcilable against the goods issue.
+  const arts = [{ article_id: 11, name: "Date Powder", output_qty: 0.6, dispatched_total: 0.4, output_uom: "kg" }];
+  check("plan — the gap is rounded to the ledger's 3 dp", planCombinedDispatch(arts, "kg").parts[0].qty, 0.2);
+}
+{
+  const arts = [
+    { article_id: 11, name: "Dust", output_qty: 1, output_uom: "kg", remaining_qty: 0.0000001 },
+    { article_id: 12, name: "Over-issued", output_qty: 1, output_uom: "kg", remaining_qty: -0.5 },
+  ];
+  const p = planCombinedDispatch(arts, "kg");
+  check("plan — a balance below the ledger's precision is nothing to send", p.parts, []);
+}
+{
+  const arts = [
+    { article_id: 11, name: "Date Powder", output_qty: 0.05, output_uom: "kg", remaining_qty: 0.05 },
+    { article_id: 12, name: "Date Syrup", output_qty: 500, output_uom: "g", remaining_qty: 500 },
+  ];
+  const p = planCombinedDispatch(arts, "kg");
+  check("plan — each part keeps its own unit", p.parts.map((x) => x.uom), ["kg", "g"]);
+  check("plan — mixed units are never summed across labels", p.totalLabel, "0.05 kg + 500 g");
+}
 
 console.log(failures === 0 ? "\nAll outpass checks passed." : `\n${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);

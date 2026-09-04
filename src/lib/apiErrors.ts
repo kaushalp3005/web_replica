@@ -32,14 +32,19 @@ export type ApiErrorDetail = {
 export function friendlyApiError(raw: unknown): string {
   let rawText = "";
   let detail: ApiErrorDetail | null = null;
+  // True once we know rawText is a JSON document. Echoing raw JSON at an
+  // operator is the one thing this function promises never to do, so if we
+  // parsed a body and still found nothing usable we must not fall back to it.
+  let rawWasJson = false;
   if (raw instanceof Error) {
     rawText = raw.message;
     try {
       const parsed = JSON.parse(rawText);
       if (parsed && typeof parsed === "object") {
+        rawWasJson = true;
         // Two backend wrappers in play:
         //   1. request_context middleware → {error,message,details:{...}}
-        //   2. raw FastAPI HTTPException → {detail:{...}}
+        //   2. raw FastAPI HTTPException → {detail:{...}} or {detail:"..."}
         // Merge so a structured `details`/`detail` block can override
         // top-level fields without losing the top-level message.
         const p = parsed as Record<string, unknown>;
@@ -47,6 +52,11 @@ export function friendlyApiError(raw: unknown): string {
         const merged: Record<string, unknown> = { ...p };
         if (inner && typeof inner === "object" && !Array.isArray(inner)) {
           Object.assign(merged, inner);
+        } else if (typeof p.detail === "string" && p.detail.trim()) {
+          // HTTPException(detail="some sentence") — the sentence IS the
+          // message. Without this the body has no `error`/`message` key, so
+          // the whole envelope used to leak to the operator as raw JSON.
+          merged.message = p.detail;
         }
         if ("error" in merged || "message" in merged) {
           detail = merged as ApiErrorDetail;
@@ -61,6 +71,9 @@ export function friendlyApiError(raw: unknown): string {
     rawText = String(raw);
   }
   if (!detail) {
+    // A JSON body we could not read anything out of ({} , or a shape we don't
+    // know) must NOT be echoed — "{}" tells an operator less than nothing.
+    if (rawWasJson) return "The server rejected the request but didn't say why.";
     return rawText || "Unknown error";
   }
   const code = detail.error || "";

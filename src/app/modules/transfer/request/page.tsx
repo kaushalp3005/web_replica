@@ -13,13 +13,12 @@ import { useRequireAuth } from "@/lib/user";
 import { TransferChrome } from "../_chrome";
 import {
   TransferApi,
-  type WarehouseSite,
   type CategorialSearchItem,
   type ArticleCreateInput,
 } from "@/lib/transfer";
+import { FROM_WAREHOUSES, TO_WAREHOUSES } from "@/lib/warehouses";
 
 const UOM_OPTIONS = ["BOX", "CARTON", "KG", "PCS"];   // DB chk_uom-valid set
-const WAREHOUSE_FALLBACK = ["W202", "A185", "A68", "A101", "F53"];
 
 function todayDMY(): string {
   const d = new Date();
@@ -44,7 +43,11 @@ const NEW_ARTICLE: Article = { ...EMPTY_ARTICLE, quantity: "1", packSize: "1", n
 interface Row { uid: number; data: Article }
 
 function calcNetWeight(a: Article): string {
-  const q = parseFloat(a.quantity) || 0;
+  // Whole boxes/bags only. interunit_transfer_request_lines.qty is an INTEGER column and
+  // request_service._i() truncates via int(float(v)), so multiplying by the fractional value
+  // the input accepts persisted a weight for a quantity the record never held: 2.5 x 10 kg
+  // stored as qty 2 / net_weight 25.000, overstating that line by 5 kg on the details page.
+  const q = Math.trunc(parseFloat(a.quantity) || 0);
   const ps = parseFloat(a.packSize) || 0;
   const ups = parseFloat(a.unitPackSize) || 0;
   if (a.materialType.toUpperCase() === "FG") return (ups * ps * q).toFixed(3);
@@ -67,7 +70,12 @@ function patchArticle(prev: Article, patch: Partial<Article>): Article {
   }
   if ("subCategory" in patch && !("itemDescription" in patch)) next.itemDescription = "";
   if ("quantity" in patch || "packSize" in patch || "unitPackSize" in patch || "materialType" in patch || "itemDescription" in patch) {
-    next.netWeight = calcNetWeight(next);
+    // Only overwrite when the inputs actually derive a weight. Recomputing unconditionally
+    // replaced a hand-entered weighbridge figure with 0.000 the moment the operator touched
+    // Quantity with Case Pack left blank — the shape 4 live request lines already carry
+    // (request 98 line 156: qty 0, pack_size 0.000, net_weight 500.000).
+    const derived = calcNetWeight(next);
+    if (parseFloat(derived) > 0) next.netWeight = derived;
   }
   return next;
 }
@@ -98,6 +106,10 @@ function validate(
     if (!a.itemCategory) e.push(`Article ${n}: category required`);
     if (!a.subCategory) e.push(`Article ${n}: sub category required`);
     if (!a.itemDescription) e.push(`Article ${n}: item description required`);
+    // A line claiming weight for no boxes — or boxes with no weight — is not a dispatchable
+    // request: it lands on the details page as "Quantity 0" inside a Total Net Weight tile.
+    if ((parseFloat(a.quantity) || 0) <= 0) e.push(`Article ${n}: quantity must be greater than 0`);
+    if ((parseFloat(a.netWeight) || 0) <= 0) e.push(`Article ${n}: net weight must be greater than 0`);
     if (a.materialType.toUpperCase() === "FG" && (parseFloat(a.unitPackSize) || 0) <= 0) e.push(`Article ${n}: unit pack size required for FG`);
   });
   return e;
@@ -115,20 +127,22 @@ export default function NewTransferRequestPage() {
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set([0]));
   const nextUid = useRef(1);
 
-  const [warehouses, setWarehouses] = useState<string[]>([]);
+  // Hardcoded (see lib/warehouses.ts) — this form was the only caller of
+  // GET /dropdowns/warehouse-sites, and it already fell back to a literal list
+  // whenever that call failed. The canonical module-wide lists, not the plants-only
+  // subset this form used to hold: cold stores are real endpoints (request 115 is
+  // A101 -> Rishi, a route the five-plant list could not express).
+  const fromWarehouses = FROM_WAREHOUSES;
+  const toWarehouses = TO_WAREHOUSES;
   const [materialTypes, setMaterialTypes] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [banner, setBanner] = useState<{ type: "error" | "success"; text: string } | null>(null);
 
-  // load warehouses + material types on mount
+  // load material types on mount (warehouses are a constant now)
   useEffect(() => {
     if (!allowed) return;
     let off = false;
     (async () => {
-      try {
-        const sites = await TransferApi.getWarehouseSites();
-        if (!off) setWarehouses(sites.length ? sites.map((s: WarehouseSite) => s.site_code) : WAREHOUSE_FALLBACK);
-      } catch { if (!off) setWarehouses(WAREHOUSE_FALLBACK); }
       try {
         const d = await TransferApi.categorialDropdown({});
         if (!off) setMaterialTypes(d.options.material_types);
@@ -221,14 +235,14 @@ export default function NewTransferRequestPage() {
               <select value={form.from_warehouse} onChange={(e) => setForm({ ...form, from_warehouse: e.target.value })}
                 className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-white">
                 <option value="">Select warehouse…</option>
-                {warehouses.map((w) => <option key={w} value={w}>{w}</option>)}
+                {fromWarehouses.map((w) => <option key={w} value={w}>{w}</option>)}
               </select>
             </Field>
             <Field label="To (Supplying)" required>
               <select value={form.to_warehouse} onChange={(e) => setForm({ ...form, to_warehouse: e.target.value })}
                 className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-white">
                 <option value="">Select warehouse…</option>
-                {warehouses.filter((w) => w !== form.from_warehouse).map((w) => <option key={w} value={w}>{w}</option>)}
+                {toWarehouses.filter((w) => w !== form.from_warehouse).map((w) => <option key={w} value={w}>{w}</option>)}
               </select>
             </Field>
             <div className="sm:col-span-2">
@@ -391,7 +405,9 @@ function ArticleSection({ index, data, open, materialTypes, canRemove, onToggle,
                 className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" />
             </Field>
             <Field label="Quantity (Box/Bags)">
-              <input type="number" step="any" min="0" value={data.quantity} placeholder="0" onWheel={(e) => e.currentTarget.blur()}
+              {/* step="1": the stored column is an integer, so a fraction here would persist
+                  a net weight computed from a quantity the record cannot hold. */}
+              <input type="number" step="1" min="0" value={data.quantity} placeholder="0" onWheel={(e) => e.currentTarget.blur()}
                 onChange={(e) => onPatch({ quantity: e.target.value })}
                 className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" />
             </Field>

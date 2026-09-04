@@ -31,13 +31,32 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-interface IssueShape { actual_qty?: unknown; actual_total_weight?: unknown; remarks?: unknown; }
+// The keys a stored issue actually carries. Over all 291 issue rows: remarks 291,
+// case_pack 288, net_weight 288, total_weight 288 — while actual_qty / actual_total_weight
+// appear 3 times each. Reading only the latter pair meant the guards below never fired:
+// transfer-in 475 has 123 issued boxes whose recorded 15 kg net / 16 kg gross rendered as
+// an EMPTY red panel. The legacy pair is kept as an alias for those 3 old rows.
+interface IssueShape {
+  net_weight?: unknown; total_weight?: unknown; gross_weight?: unknown; case_pack?: unknown;
+  actual_qty?: unknown; actual_total_weight?: unknown; remarks?: unknown;
+}
 function parseIssue(issue: TransferInBox["issue"]): IssueShape | null {
   if (!issue) return null;
   if (typeof issue === "string") {
     try { return JSON.parse(issue) as IssueShape; } catch { return null; }
   }
   return issue as IssueShape;
+}
+
+// One issue figure as text, or null when nothing was recorded. Parsed first so a
+// stored '51.9' and a stored 51.9 render identically.
+function issueText(...vals: unknown[]): string | null {
+  for (const v of vals) {
+    if (v == null || String(v).trim() === "") continue;
+    const n = typeof v === "number" ? v : parseFloat(String(v));
+    return Number.isFinite(n) ? String(n) : String(v);
+  }
+  return null;
 }
 
 function InfoCard({ label, children }: { label: string; children: React.ReactNode }) {
@@ -104,7 +123,18 @@ export default function TransferInViewPage() {
   const matchedBoxes = boxes.filter((b) => b.is_matched).length;
   const issuedBoxes = boxes.filter((b) => b.issue).length;
   const totalNet = boxes.reduce((s, b) => s + num(b.net_weight), 0);
-  const totalGross = boxes.reduce((s, b) => s + num(b.gross_weight), 0);
+  // Aggregate ONLY the rows that carry a gross. num() maps null to 0, so a box whose
+  // gross was never recorded contributed a hard 0 to the tile while its own row printed
+  // "-" (that cell tests != null) — the display and the aggregate counting different
+  // populations. Transfer-in 794 has 1141 boxes with a NULL gross: the tiles read
+  // "Net 11410.00 kg" beside "Gross 0.00 kg", less than the net, which is impossible.
+  const grossBoxes = boxes.filter((b) => b.gross_weight != null);
+  const totalGross = grossBoxes.reduce((s, b) => s + num(b.gross_weight), 0);
+  const grossLabel = grossBoxes.length === 0
+    ? "Gross Weight"
+    : grossBoxes.length < totalBoxes
+      ? `Gross Weight (${grossBoxes.length} of ${totalBoxes} boxes)`
+      : "Gross Weight";
 
   return (
     <TransferChrome title="Transfer-In View">
@@ -152,7 +182,7 @@ export default function TransferInViewPage() {
             <Tile label="Matched" value={matchedBoxes} />
             <Tile label="Issues" value={issuedBoxes} />
             <Tile label="Net Weight" value={`${totalNet.toFixed(2)} kg`} />
-            <Tile label="Gross Weight" value={`${totalGross.toFixed(2)} kg`} />
+            <Tile label={grossLabel} value={grossBoxes.length === 0 ? "Not recorded" : `${totalGross.toFixed(2)} kg`} />
           </div>
 
           {/* Received items */}
@@ -216,13 +246,24 @@ export default function TransferInViewPage() {
                             <span>Net: {b.net_weight != null ? `${b.net_weight} kg` : "-"}</span>
                             <span>Gross: {b.gross_weight != null ? `${b.gross_weight} kg` : "-"}</span>
                           </div>
-                          {hasIssue && issue && (
-                            <div className="mt-1.5 text-[11px] text-rose-700 border-t border-rose-200 pt-1">
-                              {issue.actual_qty != null && <div>Actual Qty: {String(issue.actual_qty)}</div>}
-                              {issue.actual_total_weight != null && <div>Actual Wt: {String(issue.actual_total_weight)}</div>}
-                              {issue.remarks != null && <div>Remarks: {String(issue.remarks)}</div>}
-                            </div>
-                          )}
+                          {hasIssue && issue && (() => {
+                            const pack = issueText(issue.case_pack, issue.actual_qty);
+                            const net = issueText(issue.net_weight);
+                            const gross = issueText(issue.total_weight, issue.gross_weight, issue.actual_total_weight);
+                            const remarks = issue.remarks == null || String(issue.remarks).trim() === ""
+                              ? null : String(issue.remarks);
+                            // Nothing resolved — emit no panel rather than an empty red
+                            // block (transfer-in 912 rendered one for all 3 of its boxes).
+                            if (pack == null && net == null && gross == null && remarks == null) return null;
+                            return (
+                              <div className="mt-1.5 text-[11px] text-rose-700 border-t border-rose-200 pt-1">
+                                {pack != null && <div>Case Pack: {pack}</div>}
+                                {net != null && <div>Actual Net Wt: {net} kg</div>}
+                                {gross != null && <div>Actual Gross Wt: {gross} kg</div>}
+                                {remarks != null && <div>Remarks: {remarks}</div>}
+                              </div>
+                            );
+                          })()}
                         </div>
                       );
                     })}

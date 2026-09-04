@@ -11,8 +11,17 @@ import { createPortal } from "react-dom";
 export interface HoverLine {
   name: string;
   qty?: number | string | null;
+  /** What `qty` counts — filled by the producer from what it actually counted: "boxes"
+   *  only for a count of box rows, otherwise the record's own uom. The unit used to be
+   *  hardcoded "boxes" here, so CARTON/BAG/BUNDLES line quantities printed as boxes and
+   *  transfer 1839 read "219 boxes" for a dispatch that has no box rows at all. */
+  qtyUnit?: string | null;
   weightKg?: number | string | null;
-  count?: number | string | null;
+  /** The line-recorded unit quantity, present only when it differs from the box count in
+   *  `qty`. It was called `count` and rendered rose — the alarm colour of a PM piece
+   *  count — so a routine dispatch read "Count: 231" in red beside "78 boxes". Both
+   *  numbers are simply true; neither is an exception. */
+  lineQty?: number | string | null;
   lot?: string | null;
   lotFrom?: string | null;
   lotTo?: string | null;
@@ -26,6 +35,14 @@ export interface MetaChip {
 export interface HoverData {
   lines: HoverLine[];
   meta?: MetaChip[];
+}
+
+// A unit is only a unit if it reads like one: the SKU master's `uom` holds pack WEIGHTS,
+// so a blank or purely numeric unit ("1.000") degrades to a neutral "Qty:" — never to an
+// assumed "boxes".
+function qtyLabel(ln: HoverLine): string {
+  const u = (ln.qtyUnit || "").trim();
+  return u && !/^\d+(\.\d+)?$/.test(u) ? `${ln.qty} ${u}` : `Qty: ${ln.qty}`;
 }
 
 const TONE_CLASS: Record<string, string> = {
@@ -124,9 +141,9 @@ export function ChallanHoverCard({
                 <li key={i} className="border-t border-[var(--aws-border)]/40 pt-1.5 first:border-t-0 first:pt-0">
                   <div className="font-medium text-[var(--text-primary)]">{ln.name}</div>
                   <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-[var(--text-secondary)]">
-                    {ln.qty != null && <span>{ln.qty} boxes</span>}
+                    {ln.qty != null && <span>{qtyLabel(ln)}</span>}
                     {ln.weightKg != null && <span>Wt: {ln.weightKg} kg</span>}
-                    {ln.count != null && <span className="text-rose-600">Count: {ln.count}</span>}
+                    {ln.lineQty != null && <span>Line qty: {ln.lineQty}</span>}
                     {ln.lot && <span className="text-indigo-600 font-mono">Lot: {ln.lot}</span>}
                     {(ln.lotFrom || ln.lotTo) && <span>{ln.lotFrom || "?"} → {ln.lotTo || "?"}</span>}
                     {ln.sourceUnit && <span className="text-violet-600">From: {ln.sourceUnit}</span>}

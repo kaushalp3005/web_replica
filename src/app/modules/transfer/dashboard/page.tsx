@@ -54,7 +54,14 @@ const STATUS_TONE: Record<string, string> = {
 const statusTone = (s: string) => STATUS_TONE[(s || "").toLowerCase()] || "bg-slate-100 text-slate-600";
 
 const fmtN = (n: number) => new Intl.NumberFormat("en-IN", { maximumFractionDigits: 1 }).format(n || 0);
-// compact weight: kg under 1000, else tonnes
+// Weights arrive at exactly 2 dp (dashboard_service ROUNDs to 2 before serialising), so every
+// weight that sits in a COLUMN prints at 2 dp in kg. Capping at 1 dp made the printed rows
+// disagree with the printed total (246 of 1061 transfers failed a row-sum check), and
+// switching unit per value put "375.7 t" next to "150 kg" in one column, where neither the
+// rows nor the total can be added by eye.
+const fmt2 = (n: number) => new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n || 0);
+const fmtKg = (kg: number) => `${fmt2(kg)} kg`;
+// compact weight: kg under 1000, else tonnes. Headline KPI figures only — never a column.
 function fmtWt(kg: number): string {
   if (kg >= 1000) return `${fmtN(kg / 1000)} t`;
   return `${fmtN(kg)} kg`;
@@ -217,6 +224,20 @@ export default function TransferDashboardPage() {
   const kpis = useMemo(() => computeKpis(filtered), [filtered]);
   const groups = useMemo(() => buildGroups(filtered, groupBy, sortBy), [filtered, groupBy, sortBy]);
 
+  // The table footer totals exactly the rows printed above it. kpis.total_transfers and
+  // kpis.pending_count are DISTINCT transfer ids, and on a line-level dimension (Category,
+  // Material) one transfer legitimately lands in several groups — grouped by Category the TRs
+  // column sums to 1,361 while the KPI reads 1,061, so the footer was not totalling its own
+  // column. The distinct figures stay where they belong, on the KPI cards.
+  const groupTotals = useMemo(() => groups.reduce(
+    (a, g) => ({
+      tx: a.tx + g.tx_count,
+      weight: a.weight + (g.net_weight || g.total_weight),
+      pending: a.pending + g.pending_count,
+    }),
+    { tx: 0, weight: 0, pending: 0 },
+  ), [groups]);
+
   const isSearching = searchQuery.trim().length > 0;
   const isOpen = useCallback((k: string) => isSearching || expanded.has(k), [isSearching, expanded]);
   const toggle = useCallback((k: string) => setExpanded((p) => {
@@ -234,7 +255,7 @@ export default function TransferDashboardPage() {
       `Transfer Summary (${WINDOW_LABELS[windowKey]})`,
       `${kpis.total_transfers} transfers · ${fmtWt(kpis.total_weight)} · ${kpis.pending_count} pending · ${kpis.issue_transfers} with issues`,
       "",
-      ...groups.map((g) => `${g.label}: ${g.tx_count} TRs · ${fmtWt(g.net_weight || g.total_weight)}`),
+      ...groups.map((g) => `${g.label}: ${g.tx_count} TRs · ${fmtKg(g.net_weight || g.total_weight)}`),
     ];
     try { await navigator.clipboard.writeText(lines.join("\n")); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch { /* blocked */ }
   }, [windowKey, kpis, groups]);
@@ -242,10 +263,19 @@ export default function TransferDashboardPage() {
   const handleExport = useCallback(() => {
     const head = ["Challan", "Date", "From", "To", "Item", "Category", "Material", "Qty", "Net Weight", "Total Weight", "Boxes", "Status", "Received"];
     const esc = (v: unknown) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
-    const rows = filtered.map((r) => [
-      r.challan_no, r.transfer_date, r.from_warehouse, r.to_warehouse, r.item_description,
-      r.item_category, r.material_type, r.qty, r.net_weight, r.total_weight, r.box_count, r.status, r.received_status,
-    ].map(esc).join(","));
+    // box_count is a per-TRANSFER attribute. Repeating it on every line of that transfer made
+    // the Boxes column sum to the sum of squares of the line counts — 23,713,363 against
+    // 67,312 real boxes on the all-time export. Emit it once, on the transfer's first row.
+    const boxesWritten = new Set<number>();
+    const rows = filtered.map((r) => {
+      const firstOfTransfer = !boxesWritten.has(r.transfer_id);
+      if (firstOfTransfer) boxesWritten.add(r.transfer_id);
+      return [
+        r.challan_no, r.transfer_date, r.from_warehouse, r.to_warehouse, r.item_description,
+        r.item_category, r.material_type, r.qty, r.net_weight, r.total_weight,
+        firstOfTransfer ? r.box_count : "", r.status, r.received_status,
+      ].map(esc).join(",");
+    });
     const blob = new Blob([[head.join(","), ...rows].join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -397,9 +427,9 @@ export default function TransferDashboardPage() {
               <tfoot>
                 <tr className="bg-[var(--background)] font-semibold text-[var(--text-primary)] border-t border-[var(--aws-border)]">
                   <td className="px-3 py-2">Total</td>
-                  <td className="px-2 py-2 text-right">{fmtN(kpis.total_transfers)}</td>
-                  <td className="px-3 py-2 text-right">{fmtWt(kpis.total_weight)}</td>
-                  <td className="px-2 py-2 text-right">{kpis.pending_count || ""}</td>
+                  <td className="px-2 py-2 text-right">{fmtN(groupTotals.tx)}</td>
+                  <td className="px-3 py-2 text-right">{fmtKg(groupTotals.weight)}</td>
+                  <td className="px-2 py-2 text-right">{groupTotals.pending || ""}</td>
                 </tr>
               </tfoot>
             )}
@@ -407,8 +437,11 @@ export default function TransferDashboardPage() {
         </div>
       )}
 
+      {/* `filtered`, not `records`: the leaf row that opens this popup is built from the
+          filtered set, so feeding the popup the whole transfer showed 555 lines / 5,681 kg
+          behind a row that read 12 items / 136.1 kg, with nothing saying the scope changed. */}
       {selected != null && (
-        <DetailPopup records={records.filter((r) => r.transfer_id === selected)} onClose={() => setSelected(null)} />
+        <DetailPopup records={filtered.filter((r) => r.transfer_id === selected)} onClose={() => setSelected(null)} />
       )}
     </TransferChrome>
   );
@@ -469,7 +502,7 @@ function GroupRows({ group, groupBy, open, onToggle, onSelect }: {
           {group.pending_count > 0 && <span className="ml-2 px-1.5 py-0.5 rounded-full text-[10px] bg-amber-50 text-amber-700">{group.pending_count} pending</span>}
         </td>
         <td className="px-2 py-2 text-right text-[var(--text-secondary)]">{group.tx_count}</td>
-        <td className="px-3 py-2 text-right font-medium">{fmtWt(group.net_weight || group.total_weight)}</td>
+        <td className="px-3 py-2 text-right font-medium">{fmtKg(group.net_weight || group.total_weight)}</td>
         <td className="px-2 py-2 text-right text-[var(--text-secondary)]">{group.pending_count || ""}</td>
       </tr>
       {open && group.transfers.map((t) => (
@@ -484,7 +517,7 @@ function GroupRows({ group, groupBy, open, onToggle, onSelect }: {
               <span className="text-[var(--text-secondary)]">{t.transfer_date}</span>
               {groupBy !== "route" && <span className="text-[var(--text-secondary)]">{getDisplayWarehouseName(t.from_warehouse)} → {getDisplayWarehouseName(t.to_warehouse)}</span>}
               <span className="text-[var(--text-secondary)]">{t.line_count} item{t.line_count > 1 ? "s" : ""}</span>
-              <span className="text-[var(--text-secondary)] ml-auto">{fmtWt(t.net_weight || t.total_weight)}</span>
+              <span className="text-[var(--text-secondary)] ml-auto">{fmtKg(t.net_weight || t.total_weight)}</span>
             </div>
           </td>
         </tr>
@@ -544,16 +577,16 @@ function DetailPopup({ records, onClose }: { records: TransferRecord[]; onClose:
                     <td>{[r.item_category, r.sub_category].filter(Boolean).join(" / ") || "—"}</td>
                     <td>{r.lot_number || "—"}</td>
                     <td className="text-right">{fmtN(r.qty)}</td>
-                    <td className="text-right">{fmtN(r.net_weight)}</td>
-                    <td className="text-right pr-3">{fmtN(r.total_weight)}</td>
+                    <td className="text-right">{fmt2(r.net_weight)}</td>
+                    <td className="text-right pr-3">{fmt2(r.total_weight)}</td>
                   </tr>
                 ))}
               </tbody>
               <tfoot>
                 <tr className="bg-[var(--background)] font-medium border-t border-[var(--aws-border)]">
                   <td colSpan={4} className="px-3 py-1.5 text-right">Total</td>
-                  <td className="text-right">{fmtN(totalNet)}</td>
-                  <td className="text-right pr-3">{fmtN(totalGross)}</td>
+                  <td className="text-right">{fmt2(totalNet)}</td>
+                  <td className="text-right pr-3">{fmt2(totalGross)}</td>
                 </tr>
               </tfoot>
             </table>

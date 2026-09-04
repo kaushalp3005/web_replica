@@ -7,29 +7,43 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { TransferApi, type CategorialSearchItem } from "@/lib/transfer";
+import { COLD_UNITS } from "@/lib/warehouses";
 
 export const UOM_OPTIONS = ["KG", "PCS", "BOX", "BAG", "CARTON"];
-export const FROM_WAREHOUSES = ["W202", "A185", "A101", "A68", "F53", "Cold Storage"];
-export const TO_WAREHOUSES = ["W202", "A185", "A101", "A68", "F53", "Rishi", "Savla D-39", "Savla D-514", "Supreme"];
+// Re-exported from the canonical list so the two transfer forms keep importing
+// them from here, but there is only one definition (see lib/warehouses.ts).
+export { FROM_WAREHOUSES, TO_WAREHOUSES } from "@/lib/warehouses";
 export const REASONS = ["Stock Requirement", "Material Movement", "Production Need", "Customer Order", "Inventory Balancing", "Other"];
 export const VEHICLES = ["MH43BP6885", "MH43BX1881", "MH46BM5987 (Contract Vehicle)"];
 export const DRIVERS = ["Tukaram (+919930056340)", "Sachin (8692885298)", "Gopal (+919975887148)"];
-export const COLD_STORAGE_WAREHOUSES = new Set(["Cold Storage", "Rishi", "Savla D-39", "Savla D-514", "Supreme"]);
+/** "Is this warehouse a cold store?" — derived, not restated, so adding a cold
+ *  unit to lib/warehouses.ts can't leave this predicate behind. "Cold Storage"
+ *  is the generic source bucket and belongs here too. */
+export const COLD_STORAGE_WAREHOUSES = new Set<string>([...COLD_UNITS, "Cold Storage"]);
 
 export function todayDMY(): string {
   const d = new Date();
   return `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`;
 }
+/** `TRANS<YYYYMMDDHHMMSS>` — seconds, matching the server's fallback generator.
+ *  challan_no is UNIQUE in the DB, and at minute resolution two operators dispatching
+ *  in the same minute submitted the same number. The backend now answers that with a
+ *  409 naming the clash instead of a unique-violation 500, but seconds shrink the
+ *  window 60x so they rarely meet it. */
 export function genTransferNo(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, "0");
-  return `TRANS${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}`;
+  return `TRANS${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
 export interface Article {
   uid: number;
   materialType: string; itemCategory: string; subCategory: string; itemDescription: string;
   unitPackSize: string; uom: string; packSize: string; quantity: string; netWeight: string; lotNumber: string;
+  // Both are stored on interunit_transfers_lines and both were hardcoded null in the
+  // payloads: vakkal is the cold-storage carton mark the receiving unit matches against
+  // (and the delivery challan prints), batchNumber survived only on scanned box rows.
+  vakkal: string; batchNumber: string;
   // Cold-source identifiers (directtransferform cold mode); absent/empty for warehouse rows.
   csCompany?: string; csInwardNo?: string; csMaxBoxes?: number;
   entryMode?: "regular" | "cold-storage";
@@ -37,12 +51,15 @@ export interface Article {
 export const EMPTY_ARTICLE: Omit<Article, "uid"> = {
   materialType: "", itemCategory: "", subCategory: "", itemDescription: "",
   unitPackSize: "", uom: "", packSize: "1", quantity: "1", netWeight: "0", lotNumber: "",
+  vakkal: "", batchNumber: "",
   csCompany: "", csInwardNo: "", csMaxBoxes: 0, entryMode: "regular",
 };
 
 export interface ScannedBox {
   id: number; boxNumber: number; boxId: string; transactionNo: string; article: string;
   lotNumber: string; batchNumber: string; netWeight: string; grossWeight: string;
+  // directtransferform builds one LINE per box, so the line's vakkal has to travel here.
+  vakkal: string;
 }
 
 export function calcNetWeight(a: Pick<Article, "materialType" | "quantity" | "packSize" | "unitPackSize">): string {

@@ -67,7 +67,11 @@ const DIM_FN: Record<GroupDim, (r: TransferRecord) => string> = {
 
 export type SortBy = "weight" | "count" | "name";
 
-const PENDING = new Set(["dispatch", "pending"]);
+// The in-transit set, matching pending_service.py:161 (`h.status IN ('Dispatch','Partial')`).
+// 'pending' is not a status this table ever holds (Received 778 / Dispatch 274 / Partial 9),
+// while 'Partial' — a short-shipped dispatch, the most in-transit state there is — was being
+// dropped from every pending figure on the page.
+const PENDING = new Set(["dispatch", "partial"]);
 
 // ── Rollups ──────────────────────────────────────────────────────────────────
 export interface TransferLeaf {
@@ -188,19 +192,22 @@ export function computeKpis(records: TransferRecord[]): Kpis {
   const pending = new Set<number>();
   const notReceived = new Set<number>();
   const issueTransfers = new Set<number>();
-  const txIssueCount = new Map<number, number>();
+  const txIssueItems = new Map<number, string>();
   let net = 0, gross = 0;
   for (const r of records) {
     net += r.net_weight || 0;
     gross += r.total_weight || 0;
     if (!txBox.has(r.transfer_id)) txBox.set(r.transfer_id, r.box_count || 0);
-    const st = (r.status || "").toLowerCase();
-    if (st === "dispatch" || st === "pending") pending.add(r.transfer_id);
+    if (PENDING.has((r.status || "").toLowerCase())) pending.add(r.transfer_id);
     if (r.received_status !== "Received") notReceived.add(r.transfer_id);
-    if (r.has_issue) { issueTransfers.add(r.transfer_id); txIssueCount.set(r.transfer_id, r.issue_count || 0); }
+    if (r.has_issue) { issueTransfers.add(r.transfer_id); txIssueItems.set(r.transfer_id, r.issue_items || ""); }
   }
   let boxes = 0; for (const b of txBox.values()) boxes += b;
-  let issueItems = 0; for (const n of txIssueCount.values()) issueItems += n;
+  // issue_count is one row per issue BOX (dashboard_service.py:183), so summing it under a
+  // sub-line that reads "items" reported transfer 1837's 20 boxes of ONE article as
+  // "20 items". Count the distinct articles the transfer names instead (291 -> 55).
+  let issueItems = 0;
+  for (const s of txIssueItems.values()) issueItems += s.split(", ").filter((a) => a.trim()).length;
   const totalNet = round2(net);
   const totalGross = round2(gross);
   return {

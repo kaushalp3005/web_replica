@@ -10,7 +10,7 @@ import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useMe, useHasPermission } from "@/lib/user";
 import { sampleCaps, roleNamesOf, isAdminMe } from "@/lib/sample-roles";
-import { sumByUom, formatTotals } from "@/lib/outpass";
+import { sumByUom, formatTotals, planCombinedDispatch } from "@/lib/outpass";
 import type { MeResponse } from "@/lib/auth";
 import {
   getDevJobCard, replaceDevLines, startDevJobCard, closeDevJobCard, cancelDevJobCard,
@@ -101,6 +101,12 @@ export default function DevJobCardDetailPage() {
   const [dispQty, setDispQty] = useState("");
   const [dispRecipient, setDispRecipient] = useState("");
 
+  // Combined outpass (086): "Dispatch all & print" issues EVERY article's remaining
+  // balance before printing, so the confirm dialog is a real gate on N goods issues —
+  // not a courtesy. `combinedRecipient` is the one driver/receiver stamped on all of them.
+  const [combinedOpen, setCombinedOpen] = useState(false);
+  const [combinedRecipient, setCombinedRecipient] = useState("");
+
   const load = useCallback(async () => {
     try {
       const data = await getDevJobCard(id);
@@ -184,6 +190,13 @@ export default function DevJobCardDetailPage() {
   // Per-article cards (082) carry the recipe on each article, not the card base recipe.
   // article_id != null distinguishes a real article row from the legacy header synthesis.
   const hasArticles = (jc?.articles ?? []).some((a) => a.article_id != null);
+  // What "Dispatch all & print combined outpass" would issue right now (see lib/outpass).
+  // An EMPTY plan is the whole reprint rule: nothing is left to send, so the button can
+  // only reprint. Derived from the ledger, not a stored printed-flag — a card already
+  // taken to 100% through per-part dispatches lands in the reprint state with no backfill.
+  const combinedPlan = useMemo(
+    () => planCombinedDispatch(jc?.articles ?? [], jc?.uom ?? "kg"),
+    [jc?.articles, jc?.uom]);
 
   // Live accounting math for the close form (material balance + auto yield).
   const qOut = Number(outQty) || 0;
@@ -293,9 +306,73 @@ export default function DevJobCardDetailPage() {
     window.open(`/modules/npd-development/job-cards/${id}/gate-pass?dispatch=${dispatchIds.join(",")}`,
       "_blank", "noopener");
   }
-  // One combined outpass listing EVERY article (each its own line) — merge=1.
-  function openMergedOutpass() {
-    window.open(`/modules/npd-development/job-cards/${id}/gate-pass?merge=1`, "_blank", "noopener");
+  // One combined outpass listing EVERY article (each its own line) — merge=1. Returns the
+  // handle so a caller that opens it AFTER awaiting (see dispatchAllAndPrint) can tell a
+  // blocked popup from a printed document.
+  //
+  // Deliberately NOT `window.open(…, "noopener")` like the two helpers above: the spec's
+  // window-open steps return null unconditionally when that feature is set, so the handle
+  // could never mean "blocked" — every successful print would report itself as refused.
+  // The opener is severed by hand instead, which is the same guarantee here: the target is
+  // this app's own same-origin print route.
+  function openMergedOutpass(): Window | null {
+    const w = window.open(`/modules/npd-development/job-cards/${id}/gate-pass?merge=1`, "_blank");
+    if (w) w.opener = null;
+    return w;
+  }
+  // "Dispatch all & print combined outpass" (086) — issue every article's remaining
+  // balance, THEN print. Two rules hold this together:
+  //
+  //  * qty is deliberately omitted. The server takes SELECT … FOR UPDATE on the card and
+  //    resolves the balance under that lock; sending the figure the dialog displayed would
+  //    race a part dispatched from another tab and could over-issue.
+  //  * one at a time, not Promise.all. Every POST contends for that same row lock, so
+  //    concurrency buys nothing — and it would make a mid-way failure impossible to report
+  //    (which articles actually went out?).
+  //
+  // A failure part-way through is NOT rolled back: the articles already issued have real
+  // 265 goods issues behind them. Name them, name the one that failed, and stop — the
+  // reload leaves the card showing exactly what left. The print window opens only after
+  // every issue lands, so the challan can never claim a movement that failed.
+  async function dispatchAllAndPrint() {
+    const plan = combinedPlan;
+    if (plan.parts.length === 0) return;
+    const recipient = combinedRecipient.trim();
+    setBusy(true); setError(null);
+    const sent: string[] = [];
+    try {
+      for (const p of plan.parts) {
+        try {
+          await dispatchDevJobCard(id, {
+            article_id: p.articleId, uom: p.uom,
+            ...(recipient ? { recipient } : {}),
+          });
+          sent.push(p.name);
+        } catch (e) {
+          const why = e instanceof Error ? e.message : "dispatch failed";
+          setError(sent.length > 0
+            ? `Dispatched ${sent.join(", ")} — then failed on ${p.name}: ${why}. Nothing was printed; the parts already issued are on the card.`
+            : `Failed to dispatch ${p.name}: ${why}. Nothing was issued or printed.`);
+          return;   // finally still reloads, so the card reflects whatever did go out
+        }
+      }
+      setCombinedRecipient("");   // cleared only on success — a retry keeps the typed driver
+      // The click's transient activation is long gone by now (N goods issues have been
+      // awaited), so the browser may refuse this popup. A blocked window must not read as
+      // a failed dispatch — the stock DID go out. Say so, and point at the reprint button
+      // the card is now showing, since every article is at 100%.
+      if (openMergedOutpass() === null) {
+        setError("All articles dispatched — but your browser blocked the print window. Use “Reprint combined outpass” to print it.");
+      }
+    } finally {
+      // Closed on EVERY path, success or not: this dialog is a z-50 overlay sitting on top
+      // of the error banner, so leaving it up on a partial failure would hide the one
+      // message naming which articles went out. Reloading re-derives the plan, so the
+      // button behind it already shows the reduced remainder (or flips to reprint).
+      setCombinedOpen(false);
+      await load();
+      setBusy(false);
+    }
   }
   // Edit the card's customer & dispatch header (DRAFT/IN_DEVELOPMENT) → PATCH + reload.
   // Returns success so the editor stays open (typed input intact) on a failed save.
@@ -791,14 +868,29 @@ export default function DevJobCardDetailPage() {
                 finalized output from its own FG batch, each part its own outpass. */}
             {jc.status === "CLOSED" && caps.canOutpass && canGatePass && hasArticles && (
               <>
-                {/* One combined outpass for the whole card — every article on its own line. */}
+                {/* One combined outpass for the whole card — every article on its own line.
+                    Two states, both read off the ledger (combinedPlan):
+                      something still to send → "Dispatch all & print" (primary; it MOVES
+                        stock, so it goes through a confirm dialog first)
+                      nothing left            → "Reprint combined outpass" (pure print)
+                    So once every article is 100% out, reprint is the only option left. */}
                 {(jc.articles ?? []).some((a) => a.article_id != null && Number(a.output_qty) > 0) && (
                   <div className="flex justify-end">
-                    <button onClick={openMergedOutpass}
-                      className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:bg-[var(--surface-subtle)] inline-flex items-center gap-1.5">
-                      <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
-                      Combined outpass — all articles
-                    </button>
+                    {combinedPlan.parts.length > 0 ? (
+                      <button disabled={busy} onClick={() => setCombinedOpen(true)}
+                        title={`Issue every article's remaining balance (${combinedPlan.totalLabel}), then print one combined outpass`}
+                        className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)] inline-flex items-center gap-1.5">
+                        <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
+                        Dispatch all &amp; print combined outpass
+                      </button>
+                    ) : (
+                      <button onClick={openMergedOutpass}
+                        title="Every article is fully dispatched — reprint the combined outpass"
+                        className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:bg-[var(--surface-subtle)] inline-flex items-center gap-1.5">
+                        {PRINTER_ICON}
+                        Reprint combined outpass
+                      </button>
+                    )}
                   </div>
                 )}
                 {(jc.articles ?? []).filter((a) => a.article_id != null).map((a) => (
@@ -811,6 +903,62 @@ export default function DevJobCardDetailPage() {
           </div>
         )}
       </main>
+
+      {/* Dispatch-all confirmation. This is the gate on the one action here that fires
+          MULTIPLE irreversible goods issues at once, so it shows every line it is about
+          to issue rather than a bare "are you sure". */}
+      {combinedOpen && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-3"
+          onClick={() => { if (!busy) setCombinedOpen(false); }}>
+          <div className="bg-white rounded-md w-full max-w-md p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-[15px] font-semibold text-[var(--text-primary)] mb-1">Dispatch all articles &amp; print?</h3>
+            <p className="text-[13px] text-[var(--text-secondary)] mb-3">
+              Each article below is issued out of R&amp;D in one part — a goods issue per article.
+              This cannot be undone. The combined outpass prints once every part has gone out.
+            </p>
+            <div className="rounded-md border border-[var(--aws-border)] overflow-hidden mb-3">
+              <table className="w-full border-collapse text-[13px]">
+                <thead>
+                  <tr className="bg-[var(--surface-subtle)]">
+                    <th className={`${DHEAD} text-left`}>Article</th>
+                    <th className={`${DHEAD} text-right w-32`}>To be issued</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {combinedPlan.parts.map((p) => (
+                    <tr key={p.articleId}>
+                      <td className={`${DCELL} py-2`}>{p.name}</td>
+                      <td className={`${DCELL} py-2 text-right tabular-nums whitespace-nowrap`}>
+                        {Number(p.qty).toLocaleString("en-IN")} <span className="text-[11px] text-[var(--text-muted)]">{p.uom}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="bg-[var(--surface-subtle)]">
+                    <td className={`${DCELL} py-2 text-right text-[12px] text-[var(--text-muted)]`}>Total</td>
+                    <td className={`${DCELL} py-2 text-right font-semibold tabular-nums whitespace-nowrap`}>{combinedPlan.totalLabel}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+            <label className="block text-[11px] text-[var(--text-secondary)]">Recipient / driver (optional)
+              <input className="form-input mt-0.5" value={combinedRecipient} placeholder="Name…"
+                onChange={(e) => setCombinedRecipient(e.target.value)} />
+            </label>
+            <p className="mt-1 text-[11px] text-[var(--text-muted)]">Stamped on every part issued here and on the outpass.</p>
+            <div className="flex gap-2 mt-4">
+              <button disabled={busy} onClick={() => setCombinedOpen(false)}
+                className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] disabled:opacity-50 hover:bg-[var(--surface-subtle)]">Cancel</button>
+              <div className="flex-1" />
+              <button disabled={busy} onClick={dispatchAllAndPrint}
+                className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">
+                {busy ? "Dispatching…" : `Dispatch ${combinedPlan.parts.length} article${combinedPlan.parts.length === 1 ? "" : "s"} & print`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Promote-gate reject — reason dialog (email-link or portal). Reject needs a
           reason; email-link rejects authenticate via the carried email on submit. */}

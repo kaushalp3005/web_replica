@@ -30,11 +30,12 @@ import {
   type TransferLineCreateInput,
   type LookupBox,
 } from "@/lib/transfer";
+import { friendlyApiError } from "@/lib/apiErrors";
 
 // Company is only a hint — the lookup endpoints search both cfpl + cdpl.
 const COMPANY = "cfpl";
 
-interface LoadedItem { itemDescription: string; quantity: number; scannedCount: number }
+interface LoadedItem { itemDescription: string; quantity: number }
 
 export default function Page() {
   return (
@@ -117,21 +118,32 @@ function TransferOutForm() {
           reason: "",  // operator must re-pick
           reasonDescription: req.reason_description || "",
         }));
-        const l0 = req.lines[0];
-        if (l0) {
-          setArticles([{
-            uid: 0,
-            materialType: norm(l0.material_type), itemCategory: norm(l0.item_category),
-            subCategory: norm(l0.sub_category), itemDescription: norm(l0.item_description),
-            unitPackSize: l0.unit_pack_size || "", uom: norm(l0.uom),
-            packSize: l0.pack_size || "1", quantity: l0.quantity || "1",
-            netWeight: l0.net_weight || "0", lotNumber: l0.lot_number || "",
-          }]);
+        // EVERY request line becomes an editable article. Loading only lines[0] meant the
+        // submit payload — which is built from this array — carried one line, so accepting
+        // a 5-line request dispatched one item and silently dropped four. The read-only
+        // "Items from Request" panel below still lists them all, which is exactly what made
+        // the loss invisible: the screen showed five, the payload had one.
+        if (req.lines.length) {
+          nextUid.current = req.lines.length;
+          setArticles(req.lines.map((l, i) => ({
+            uid: i,
+            materialType: norm(l.material_type), itemCategory: norm(l.item_category),
+            subCategory: norm(l.sub_category), itemDescription: norm(l.item_description),
+            unitPackSize: l.unit_pack_size || "", uom: norm(l.uom),
+            packSize: l.pack_size || "1", quantity: l.quantity || "1",
+            netWeight: l.net_weight || "0", lotNumber: l.lot_number || "",
+            vakkal: "", batchNumber: "",
+          })));
+          // Only the first stays open; the rest collapse so a long request is still workable.
+          setExpanded(new Set([0]));
         }
         setLoadedItems(req.lines.map((l) => ({
-          itemDescription: l.item_description, quantity: parseFloat(l.quantity) || 0, scannedCount: 0,
+          itemDescription: l.item_description, quantity: parseFloat(l.quantity) || 0,
         })));
-        setBanner({ type: "success", text: `Request ${req.request_no} loaded & auto-filled.` });
+        setBanner({
+          type: "success",
+          text: `Request ${req.request_no} loaded — ${req.lines.length} item(s) auto-filled.`,
+        });
       } catch (e) {
         if (!off) setBanner({ type: "error", text: e instanceof Error ? e.message : "Failed to load request." });
       }
@@ -152,14 +164,6 @@ function TransferOutForm() {
   const toggle = (uid: number) => setExpanded((s) => { const n = new Set(s); if (n.has(uid)) n.delete(uid); else n.add(uid); return n; });
 
   // ── Box ingestion ──
-  const bumpScanned = useCallback((article: string, by = 1) => {
-    setLoadedItems((items) => {
-      const key = article.trim().toUpperCase();
-      return items.map((it) => it.itemDescription.trim().toUpperCase() === key
-        ? { ...it, scannedCount: it.scannedCount + by } : it);
-    });
-  }, []);
-
   const appendBox = useCallback((b: LookupBox, fallbackTno: string) => {
     const boxId = (b.box_id || "").trim();
     const tno = (b.transaction_no || fallbackTno || "").trim();
@@ -177,14 +181,14 @@ function TransferOutForm() {
       id,
       boxNumber: typeof b.box_number === "number" ? b.box_number : id,
       boxId, transactionNo: tno, article,
+      vakkal: "",   // no source box table carries a vakkal; it is keyed on the article
       lotNumber: b.lot_number || "", batchNumber: b.batch_number || "",
       netWeight: net,
       grossWeight: b.gross_weight != null ? String(b.gross_weight) : "0",
     }]);
-    bumpScanned(article);
     setBanner(null);
     setScanInfo({ status: "added", box_id: boxId, article, lot: b.lot_number || "", net, tno });
-  }, [bumpScanned]);
+  }, []);
 
   const handleManualBoxFetch = async () => {
     const num = parseInt(manualBox.boxNumber, 10);
@@ -208,13 +212,16 @@ function TransferOutForm() {
       try { parsed = JSON.parse(text); } catch { /* not JSON */ }
       if (parsed && parsed.tx && parsed.bi) {
         const tx = String(parsed.tx), bi = String(parsed.bi);
-        const res = tx.startsWith("BE-")
-          ? await TransferApi.bulkEntryBoxLookup(COMPANY, bi, tx)
-          : await TransferApi.boxLookupById(COMPANY, bi, tx);
+        // One call for every QR format. box-lookup-by-id already unions boxes_v2,
+        // bulk_entry_boxes AND rtv_boxes and resolves on the (box_id, transaction_no)
+        // pair, so BE- needed no branch of its own — bulk-entry-box-lookup is the same
+        // search with the other two sources switched off. Routing on the prefix only
+        // added a way for the two paths to drift.
+        const res = await TransferApi.boxLookupById(COMPANY, bi, tx);
         appendBox(res.box, tx);
         return true;
       }
-      { const msg = "Unrecognised QR format (expected a BE-/TR- box code).";
+      { const msg = "Unrecognised QR format (expected a TR-, BE- or CR- box code).";
         setBanner({ type: "error", text: msg }); setScanInfo({ status: "err", value: text, error: msg }); }
       return false;
     } catch (e) {
@@ -236,13 +243,12 @@ function TransferOutForm() {
     for (let i = 0; i < qty; i++) {
       const id = boxCounter.current++;  // ids computed outside the updater (StrictMode-safe)
       add.push({
-        id, boxNumber: id, boxId: "",
+        id, boxNumber: id, boxId: "", vakkal: "",
         transactionNo: "DIRECT", article: a.itemDescription, lotNumber: a.lotNumber,
         batchNumber: "", netWeight: perBox.toFixed(3), grossWeight: perBox.toFixed(3),
       });
     }
     setScannedBoxes((boxes) => [...boxes, ...add]);
-    bumpScanned(a.itemDescription, qty);
     setBanner({ type: "success", text: `Added ${qty} ${a.itemDescription} entr${qty === 1 ? "y" : "ies"} to the list.` });
   };
 
@@ -256,10 +262,32 @@ function TransferOutForm() {
   const clearAllBoxes = () => { scannedKeysRef.current.clear(); setScannedBoxes([]); boxCounter.current = 1; };
 
   // ── Derived totals ──
+  // scannedBoxes holds TWO populations: real boxes (scan/fetch) and DIRECT rows that
+  // addArticleToList synthesises from an article's own typed net. Only the non-DIRECT rows
+  // persist as interunit_transfer_boxes (buildPayload filters on the same predicate), so
+  // anything that says "scanned" counts only those. Counting both made the card read
+  // "Scanned boxes (67)" and Δ 0.000 kg in emerald — a "matches" verdict measured against the
+  // very articles the DIRECT rows were derived from, with no box scanned and none sent.
+  // net/gross stay over every listed row: they total the rows the table actually prints.
   const totals = useMemo(() => {
     const net = scannedBoxes.reduce((s, b) => s + (parseFloat(b.netWeight) || 0), 0);
     const gross = scannedBoxes.reduce((s, b) => s + (parseFloat(b.grossWeight) || 0), 0);
-    return { count: scannedBoxes.length, net, gross };
+    const scanned = scannedBoxes.filter((b) => b.transactionNo !== "DIRECT");
+    const scannedNet = scanned.reduce((s, b) => s + (parseFloat(b.netWeight) || 0), 0);
+    return { net, gross, scannedNet, scannedCount: scanned.length, manualCount: scannedBoxes.length - scanned.length };
+  }, [scannedBoxes]);
+  // Per-item counts are DERIVED from the list, never accumulated alongside it: the old
+  // increment-only counter was never decremented by removeBox and was left untouched by
+  // clearAllBoxes, so Pending read as satisfied (emerald) while the removed boxes were still
+  // outstanding — and it contradicted the Partial status the backend computes from the
+  // payload the form actually sends.
+  const scannedByItem = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const b of scannedBoxes) {
+      const k = b.article.trim().toUpperCase();
+      m.set(k, (m.get(k) || 0) + 1);
+    }
+    return m;
   }, [scannedBoxes]);
   const requestedNet = useMemo(
     () => articles.reduce((s, a) => s + (parseFloat(a.netWeight) || 0), 0), [articles]);
@@ -285,22 +313,58 @@ function TransferOutForm() {
       if (!a.itemCategory) e.push(`Article ${n}: category required`);
       if (!a.subCategory) e.push(`Article ${n}: sub category required`);
       if (!a.itemDescription) e.push(`Article ${n}: item description required`);
+      // A blank quantity used to skip this check entirely, and the two sides then disagreed:
+      // calcNetWeight read it as 0 and displayed Net Weight 0.000, while buildPayload read it
+      // as 1 — the backend then recomputed net from pack_size × 1 and stored a weight the form
+      // never showed. It is a required physical count (park_lines parks one row per unit).
       const q = parseFloat(a.quantity);
-      if (a.quantity && (!Number.isInteger(q) || q < 1)) e.push(`Article ${n}: quantity must be a whole number ≥ 1`);
+      if (!Number.isInteger(q) || q < 1) e.push(`Article ${n}: quantity must be a whole number ≥ 1`);
+      // Legacy made the vakkal mark mandatory whenever cold storage is on either leg —
+      // it is what the receiving unit matches physical cartons against.
+      if (isColdInvolved && !a.vakkal.trim()) e.push(`Article ${n}: vakkal is required for cold transfers`);
     });
     return e;
   };
 
   const buildPayload = () => {
-    const lines: TransferLineCreateInput[] = articles.map((a) => ({
-      material_type: a.materialType, item_category: a.itemCategory, sub_category: a.subCategory,
-      item_description: a.itemDescription,
-      // qty is a box/bag count — send a positive integer string (backend does int(qty)).
-      quantity: String(Math.max(1, Math.floor(parseFloat(a.quantity) || 1))), uom: a.uom || "",
-      pack_size: a.packSize || "0", unit_pack_size: a.unitPackSize || null,
-      net_weight: a.netWeight || "0", total_weight: a.netWeight || "0",
-      batch_number: null, lot_number: a.lotNumber || null, vakkal: null,
-    }));
+    // Gross per article, summed over the boxes that will actually persist (same non-DIRECT
+    // predicate as `boxes` below — a DIRECT row carries the article's own net copied into
+    // grossWeight, so counting it would report net as gross all over again). A description
+    // shared by two articles is left out: a box cannot be attributed to one of them, and
+    // splitting it would put the same physical gross on both lines.
+    const ambiguous = new Set<string>();
+    const seenDesc = new Set<string>();
+    for (const a of articles) {
+      const k = a.itemDescription.trim().toUpperCase();
+      if (seenDesc.has(k)) ambiguous.add(k); else seenDesc.add(k);
+    }
+    const grossByArticle = new Map<string, number>();
+    for (const b of scannedBoxes) {
+      if (b.transactionNo === "DIRECT") continue;
+      const k = b.article.trim().toUpperCase();
+      grossByArticle.set(k, (grossByArticle.get(k) || 0) + (parseFloat(b.grossWeight) || 0));
+    }
+    const lines: TransferLineCreateInput[] = articles.map((a) => {
+      const net = parseFloat(a.netWeight) || 0;
+      const key = a.itemDescription.trim().toUpperCase();
+      // total_weight is unambiguously the GROSS everywhere it is read back (the dashboard's
+      // gross KPI, transferBuildSummary, transferIn's per-box gross, park_lines' per-unit
+      // gross). It was sent as a copy of net_weight, so every dispatch this form created
+      // recorded zero tare. Use the scanned boxes' gross instead, falling back to net when the
+      // line ships with no scanned box or only part of it was scanned — gross is never
+      // below net, and net is the honest floor when no gross was captured.
+      const gross = ambiguous.has(key) ? 0 : (grossByArticle.get(key) || 0);
+      return {
+        material_type: a.materialType, item_category: a.itemCategory, sub_category: a.subCategory,
+        item_description: a.itemDescription,
+        // qty is a box/bag count — send a positive integer string (backend does int(qty));
+        // validate() has already rejected a blank or fractional quantity.
+        quantity: String(Math.max(1, Math.floor(parseFloat(a.quantity) || 1))), uom: a.uom || "",
+        pack_size: a.packSize || "0", unit_pack_size: a.unitPackSize || null,
+        net_weight: a.netWeight || "0", total_weight: (gross > net ? gross : net).toFixed(3),
+        batch_number: a.batchNumber || null, lot_number: a.lotNumber || null, vakkal: a.vakkal || null,
+      };
+    });
     // DIRECT (manually-keyed) entries have no physical box_id — they ship as lines only,
     // never as interunit_transfer_boxes rows (the backend parks their stock via park_lines).
     // Persisting them as boxes surfaced empty box_ids as "N/A" in the view. (Legacy parity.)
@@ -351,9 +415,12 @@ function TransferOutForm() {
       }
       // Deliberately leave submitting=true on success: the page navigates away (or the
       // cold popup takes over), so the Submit button stays disabled and a second click
-      // can't POST the same challan_no twice (no backend idempotency → duplicate dispatch).
+      // can't POST the same challan_no twice. (The backend now rejects a repeat with a
+      // 409 rather than a unique-violation 500, but the disabled button is still the
+      // first line of defence.)
     } catch (err) {
-      setBanner({ type: "error", text: err instanceof Error ? err.message : "Failed to create transfer." });
+      // friendlyApiError, not err.message — see directtransferform.
+      setBanner({ type: "error", text: friendlyApiError(err) });
       setSubmitting(false);
     }
   };
@@ -473,7 +540,7 @@ function TransferOutForm() {
         </div>
         {articles.map((a, idx) => (
           <ArticleSection key={a.uid} index={idx} data={a} open={expanded.has(a.uid)} materialTypes={materialTypes}
-            canRemove={articles.length > 1} onToggle={() => toggle(a.uid)} onRemove={() => removeArticle(a.uid)}
+            canRemove={articles.length > 1} isCold={isColdInvolved} onToggle={() => toggle(a.uid)} onRemove={() => removeArticle(a.uid)}
             onPatch={(p) => patchArt(a.uid, p)} onAddToList={() => addArticleToList(a)} />
         ))}
 
@@ -485,20 +552,24 @@ function TransferOutForm() {
                 <thead><tr className="text-left text-[var(--text-secondary)] border-b border-[var(--aws-border)]">
                   <th className="py-1.5 pr-3">Item</th><th className="py-1.5 pr-3 text-right">Ordered</th>
                   <th className="py-1.5 pr-3 text-right">Scanned</th><th className="py-1.5 text-right">Pending</th></tr></thead>
-                <tbody>{loadedItems.map((it, i) => (
+                <tbody>{loadedItems.map((it, i) => {
+                  const scanned = scannedByItem.get(it.itemDescription.trim().toUpperCase()) || 0;
+                  const pending = Math.max(it.quantity - scanned, 0);
+                  return (
                   <tr key={i} className="border-b border-[var(--aws-border)]/40">
                     <td className="py-1.5 pr-3 text-[var(--text-primary)]">{it.itemDescription}</td>
                     <td className="py-1.5 pr-3 text-right">{it.quantity}</td>
-                    <td className="py-1.5 pr-3 text-right">{it.scannedCount}</td>
-                    <td className={`py-1.5 text-right ${Math.max(it.quantity - it.scannedCount, 0) > 0 ? "text-amber-600" : "text-emerald-600"}`}>{Math.max(it.quantity - it.scannedCount, 0)}</td>
-                  </tr>))}</tbody>
+                    <td className="py-1.5 pr-3 text-right">{scanned}</td>
+                    <td className={`py-1.5 text-right ${pending > 0 ? "text-amber-600" : "text-emerald-600"}`}>{pending}</td>
+                  </tr>);
+                })}</tbody>
               </table>
             </div>
           </Card>
         )}
 
         {/* Scanned boxes */}
-        <Card title={`Scanned boxes (${totals.count})`} action={scannedBoxes.length ? <button type="button" onClick={clearAllBoxes} className="text-[12px] text-rose-600 hover:underline">Clear All</button> : undefined}>
+        <Card title={`Scanned boxes (${totals.scannedCount})${totals.manualCount ? ` + ${totals.manualCount} manual` : ""}`} action={scannedBoxes.length ? <button type="button" onClick={clearAllBoxes} className="text-[12px] text-rose-600 hover:underline">Clear All</button> : undefined}>
           {scannedBoxes.length === 0 ? (
             <p className="text-[12px] text-[var(--text-secondary)] py-2">No boxes yet — scan, fetch, or use “Add to list” on an article.</p>
           ) : (
@@ -537,8 +608,13 @@ function TransferOutForm() {
           <Card title="Weight comparison">
             <div className="flex flex-wrap gap-6 text-[13px]">
               <div><span className="text-[var(--text-secondary)]">Requested net: </span><span className="font-medium">{requestedNet.toFixed(3)} kg</span></div>
-              <div><span className="text-[var(--text-secondary)]">Actual (scanned) net: </span><span className="font-medium">{totals.net.toFixed(3)} kg</span></div>
-              <div><span className="text-[var(--text-secondary)]">Δ: </span><span className={`font-medium ${Math.abs(requestedNet - totals.net) > 0.001 ? "text-amber-600" : "text-emerald-600"}`}>{(totals.net - requestedNet).toFixed(3)} kg</span></div>
+              {/* scannedNet, not the whole list: DIRECT rows are derived FROM these same
+                  articles' net weights, so comparing against them made Δ read 0.000 kg
+                  "matches" without a single box having been scanned. */}
+              <div><span className="text-[var(--text-secondary)]">Actual (scanned) net: </span><span className="font-medium">{totals.scannedCount ? `${totals.scannedNet.toFixed(3)} kg` : "not scanned yet"}</span></div>
+              <div><span className="text-[var(--text-secondary)]">Δ: </span>{totals.scannedCount
+                ? <span className={`font-medium ${Math.abs(requestedNet - totals.scannedNet) > 0.001 ? "text-amber-600" : "text-emerald-600"}`}>{(totals.scannedNet - requestedNet).toFixed(3)} kg</span>
+                : <span className="font-medium text-[var(--text-secondary)]">— no boxes scanned</span>}</div>
             </div>
           </Card>
         )}
@@ -576,8 +652,10 @@ function TransferOutForm() {
 }
 
 // ── Article section (cascading dropdowns + quick search + add-to-list) ─────────
-function ArticleSection({ index, data, open, materialTypes, canRemove, onToggle, onRemove, onPatch, onAddToList }: {
+function ArticleSection({ index, data, open, materialTypes, canRemove, isCold, onToggle, onRemove, onPatch, onAddToList }: {
   index: number; data: Article; open: boolean; materialTypes: string[]; canRemove: boolean;
+  // Cold on either leg — vakkal is expected on the line when cold is involved.
+  isCold: boolean;
   onToggle: () => void; onRemove: () => void; onPatch: (p: Partial<Article>) => void; onAddToList: () => void;
 }) {
   const [opt, setOpt] = useState<{ categories: string[]; subs: string[]; descriptions: string[]; uoms: (number | null)[] }>(
@@ -636,6 +714,9 @@ function ArticleSection({ index, data, open, materialTypes, canRemove, onToggle,
             <Field label="Quantity (Box/Bags)"><input type="number" step="any" min="0" value={data.quantity} onWheel={(e) => e.currentTarget.blur()} onChange={(e) => onPatch({ quantity: e.target.value })} className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" /></Field>
             <Field label="Net Weight (Kg)"><input type="number" step="any" min="0" value={data.netWeight} onWheel={(e) => e.currentTarget.blur()} onChange={(e) => onPatch({ netWeight: e.target.value })} className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" /></Field>
             <Field label="Lot Number (optional)"><input value={data.lotNumber} onChange={(e) => onPatch({ lotNumber: e.target.value })} className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" /></Field>
+            <Field label="Batch Number (optional)"><input value={data.batchNumber} onChange={(e) => onPatch({ batchNumber: e.target.value })} className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" /></Field>
+            {/* Cold destinations carry a vakkal mark; the challan prints it and the receiving unit matches cartons against it. */}
+            <Field label={isCold ? "Vakkal *" : "Vakkal (optional)"}><input value={data.vakkal} onChange={(e) => onPatch({ vakkal: e.target.value })} className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" /></Field>
           </div>
           <div className="mt-3 flex justify-end">
             <button type="button" onClick={onAddToList} className="px-3 py-1.5 text-[12px] rounded-md border border-[var(--aws-navy)] text-[var(--aws-navy)] hover:bg-[var(--aws-navy)] hover:text-white">Add to list ({addQty} {addQty === 1 ? "box" : "boxes"})</button>

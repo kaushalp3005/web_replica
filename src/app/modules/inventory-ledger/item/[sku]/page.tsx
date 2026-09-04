@@ -15,7 +15,8 @@ import {
   fmtQty, StatCard, UomBadge, type ExportSpec, type TabDef,
 } from "../../_ui";
 import {
-  findLeaf, buildVouchers, buildMonthly, buildLots, buildAgeing, buildGodown, buildFifo,
+  findLeafParts, aggregateLeaves, godownsOf, buildVouchers, buildMonthly, buildLots,
+  buildAgeing, buildGodown, buildFifo,
   type ItemVouchers, type GodownRow,
 } from "../../_item";
 import type { LeafItem, MonthlyRow, Lot, AgeingRow, FifoFlag, Direction, VoucherRow } from "@/lib/ledger";
@@ -325,7 +326,10 @@ function ItemHubInner() {
   const search = useSearchParams();
   const initialTab = search.get("tab") ?? "vouchers";
   const [tab, setTab] = useState(initialTab);
-  const leaf = useMemo(() => findLeaf(params.sku, leaves), [params.sku, leaves]);
+  // A SKU can arrive as several leaves (one per godown). `leaf` is their sum, so
+  // the hub's totals match the Stock Summary; `parts` keeps the godown split.
+  const parts = useMemo(() => findLeafParts(params.sku, leaves), [params.sku, leaves]);
+  const leaf = useMemo(() => aggregateLeaves(parts), [parts]);
 
   if (!isAdmin) {
     return (
@@ -357,8 +361,9 @@ function ItemHubInner() {
   const monthly = buildMonthly(leaf);
   const lots = buildLots(leaf);
   const ageing = buildAgeing(lots, leaf.uom_class, leaf.label);
-  const godown = buildGodown(leaf);
+  const godown = buildGodown(leaf, parts);
   const fifo = buildFifo(leaf, lots);
+  const godowns = godownsOf(parts);
   const typeLabel = leaf.item_type.toUpperCase();
 
   return (
@@ -369,7 +374,7 @@ function ItemHubInner() {
           <div className="flex gap-[5px] flex-wrap">
             <Pill tone={leaf.item_type === "fg" ? "in" : leaf.item_type === "pm" ? "nos" : "xfer"}>{typeLabel}</Pill>
             <UomBadge uom={leaf.uom_class} />
-            <Pill tone="mut">{leaf.godown}</Pill>
+            {godowns.map((g) => <Pill key={g} tone="mut">{g}</Pill>)}
             <Pill tone="mut">{leaf.group} · {leaf.subgroup}</Pill>
             <Pill tone="mut">FEFO→FIFO</Pill>
           </div>

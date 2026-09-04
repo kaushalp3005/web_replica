@@ -129,6 +129,33 @@ function InventoryLedgerIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function StoresIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M3 10h18M3 15h18" />
+      <path d="M9 4v6M15 10v5M11 15v5" />
+    </svg>
+  );
+}
+
+function StockTakeIcon(props: SVGProps<SVGSVGElement>) {
+  // Counted cartons — a stack plus a tick and tally lines. Deliberately unlike
+  // the three tiles it sits near: Job Card's clipboard, Inventory Ledger's
+  // ruled book and Stores' shelf grid.
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <rect x="3" y="4" width="8" height="7" rx="1" />
+      <path d="M6 4v3" />
+      <rect x="3" y="14" width="8" height="7" rx="1" />
+      <path d="M6 14v3" />
+      <path d="M14 8.5l2 2 4.5-4.5" />
+      <path d="M14 15h7" />
+      <path d="M14 18.5h4.5" />
+    </svg>
+  );
+}
+
 function BomIcon(props: SVGProps<SVGSVGElement>) {
   // A parent node branching into components — the header/line relationship
   // the module is built around.
@@ -242,6 +269,37 @@ export const MODULES: ModuleItem[] = [
     implemented: true,
     adminOnly: true,
     Icon: InventoryLedgerIcon,
+  },
+  {
+    title: "Stores",
+    description:
+      "Stores department workspace — contents to be defined.",
+    badge: "Inventory",
+    stat: "Stores operations",
+    route: "stores",
+    implemented: true,
+    // Admin-only for now: `store_head` is scoped by ROLE_MODULE_SCOPE to
+    // purchase/material-in, so it would NOT see this tile even with an
+    // allowedRoles entry. Widen access here + in the scope map together
+    // once the intended Stores audience is settled.
+    adminOnly: true,
+    Icon: StoresIcon,
+  },
+  {
+    title: "Stock Take",
+    description:
+      "Physical stock count workspace — contents to be defined.",
+    badge: "Inventory",
+    stat: "Stock take operations",
+    route: "stock-take",
+    implemented: true,
+    // Admin-only for now, matching Stores. The counting itself lives in the
+    // separate Stock Take app today; this tile only reserves the console slot.
+    // Widening access is this flag PLUS a ROLE_MODULE_SCOPE entry for any
+    // scoped role — the scoped branch of the /modules filter never consults
+    // adminOnly, so a scope entry alone would expose the tile.
+    adminOnly: true,
+    Icon: StockTakeIcon,
   },
   {
     title: "BOM",

@@ -13,7 +13,7 @@ import { LedgerChrome } from "./_chrome";
 import { ItemSearch, slugifySku } from "./_ItemSearch";
 import { StockSummary } from "./_StockSummary";
 import { CompanyBatches, CompanyAgeing, CompanyFifo, CompanyReconcile, RegistersView } from "./_CompanyViews";
-import { LedgerGate, LedgerSourceToggle } from "./_LedgerData";
+import { LedgerGate, LedgerSourceToggle, LedgerEntityToggle } from "./_LedgerData";
 import { SectionTabs, type TabDef } from "./_ui";
 import type { ItemSearchResult } from "@/lib/ledger";
 
@@ -37,7 +37,8 @@ export default function InventoryLedgerPage() {
   useRequireAuth(router.replace);
   const isAdmin = useIsAdmin();
   const [tab, setTab] = useState("summary");
-  const [entity, setEntity] = useState<"CFPL" | "CDPL" | "Both">("CFPL");
+  // Entity scope lives in LedgerDataProvider (see LedgerEntityToggle) so it
+  // actually filters the leaf set and survives navigation into the drill pages.
   const [searchOpen, setSearchOpen] = useState(false);
   const [pickTarget, setPickTarget] = useState<"vouchers" | "monthly">("vouchers");
 
@@ -81,18 +82,7 @@ export default function InventoryLedgerPage() {
           ⌕ Find item
         </button>
         <LedgerSourceToggle />
-        <div className="inline-flex bg-white border border-[var(--aws-border)] rounded-[8px] p-[2px] gap-[2px]">
-          {(["CFPL", "CDPL", "Both"] as const).map((e) => (
-            <button
-              key={e}
-              onClick={() => setEntity(e)}
-              aria-pressed={entity === e}
-              className={`font-mono text-[11px] px-[11px] py-[4px] rounded-[6px] ${
-                entity === e ? "bg-[var(--aws-navy)] text-white font-semibold" : "text-[var(--text-secondary)]"
-              }`}
-            >{e}</button>
-          ))}
-        </div>
+        <LedgerEntityToggle />
       </div>
 
       <SectionTabs tabs={TABS} active={tab} onSelect={selectTab} />

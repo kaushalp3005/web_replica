@@ -73,6 +73,7 @@ function leaf(
     production_qty: m.production_qty ?? 0, returns_qty: m.returns_qty ?? 0,
     consumption_qty: m.consumption_qty ?? 0, outward_qty: m.outward_qty ?? 0,
     transfer_out_qty: m.transfer_out_qty ?? 0,
+    entity: "cfpl",
   };
 }
 

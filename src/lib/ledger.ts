@@ -84,6 +84,10 @@ export interface LeafItem extends MovementCols {
   uom_class: UomClass;
   godown: string;
   value_indicative: number;
+  // Which company the row came from. The header's CFPL/CDPL/Both selector
+  // filters on this — see LedgerDataProvider, which applies the filter once for
+  // the whole module (filterLeaves in _tree.ts handles the `entity` predicate).
+  entity: Entity;
 }
 
 export interface UomSubtotal extends MovementCols {
@@ -257,8 +261,8 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
 export const LedgerApi = {
   // The flat leaf dataset the module derives every view from. Fixtures are the
   // fallback (see _LedgerData); in live mode this feeds the whole module.
-  leaves(signal?: AbortSignal) {
-    return getJson<{ data: LeafItem[] }>(`/leaves`, signal);
+  leaves(entity: Entity | "both" = "both", signal?: AbortSignal) {
+    return getJson<{ data: LeafItem[] }>(`/leaves${qs({ entity })}`, signal);
   },
   searchItems(f: LedgerFilter & PageQuery) {
     return getJson<ListEnvelope<ItemSearchResult>>(`/items/search${qs({ ...f })}`);

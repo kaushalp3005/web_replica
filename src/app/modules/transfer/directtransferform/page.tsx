@@ -24,8 +24,49 @@ import {
   type TransferBoxCreateInput, type TransferLineCreateInput,
 } from "@/lib/transfer";
 import { ColdStorageApi, type ColdStockRecord } from "@/lib/coldStorage";
+import { friendlyApiError } from "@/lib/apiErrors";
 
 const COMPANY = "cfpl"; // hint only — lookups search both cfpl + cdpl
+
+// create_service matches a box to its line on (article, lot), so the per-line data a
+// ScannedBox cannot carry is keyed on that same pair — keyed any other way it would come
+// back attached to the wrong line.
+const lineKey = (article: string, lot: string) => `${(article || "").trim().toUpperCase()}||${(lot || "").trim()}`;
+
+/** The article classification behind a box. It used to be hardcoded ("RM", blank
+ *  category/uom, pack_size 0) on every payload line, which discarded what the form had
+ *  already collected AND flipped the backend's net-weight recompute branch
+ *  (FG = unit_pack*pack*qty, anything else = pack*qty — a 2x divergence). */
+interface LineMeta {
+  materialType: string; itemCategory: string; subCategory: string;
+  uom: string; packSize: string; unitPackSize: string | null;
+}
+
+/** A UOM is a unit, not a number: the SKU master's `uom` column holds pack WEIGHTS
+ *  ("0.000", "1.000"), and testing only for empty let those through as units. */
+const uomText = (v?: string | null): string => {
+  const s = (v || "").trim();
+  return s && !/^\d+(\.\d+)?$/.test(s) ? s : "";
+};
+
+const num = (v: unknown): number => {
+  const n = parseFloat(String(v ?? ""));
+  return Number.isFinite(n) ? n : 0;
+};
+
+/** Split a line total into `parts` per-box shares that add back up EXACTLY: the first
+ *  parts-1 carry the rounded share and the last carries the remainder. Rounding each
+ *  share on its own made the persisted line total a sum of rounded values (284 live
+ *  lines are off that way, one of them by 0.6% of the line). */
+function splitWeight(total: number, parts: number): string[] {
+  if (parts <= 0) return [];
+  const share = Math.round((total / parts) * 1000) / 1000;
+  const out: string[] = [];
+  let acc = 0;
+  for (let i = 0; i < parts - 1; i++) { out.push(share.toFixed(3)); acc += share; }
+  out.push((Math.round((total - acc) * 1000) / 1000).toFixed(3));
+  return out;
+}
 
 export default function Page() {
   return (
@@ -55,6 +96,9 @@ function DirectTransferForm() {
   const nextUid = useRef(1);
   const boxCounter = useRef(1);
   const scannedKeysRef = useRef<Set<string>>(new Set());
+  // What each (article, lot) really is — filled by the scanner, the cold pick, the article
+  // form and the edit prefill; read back by buildPayload.
+  const lineMetaRef = useRef<Map<string, LineMeta>>(new Map());
   // Preserve a request-originated transfer's FK link across an edit (create stays null).
   const existingRequestId = useRef<number | null>(null);
 
@@ -116,31 +160,95 @@ function DirectTransferForm() {
           setArticles([{
             uid: 0, materialType: norm(l0.material_type), itemCategory: norm(l0.item_category),
             subCategory: norm(l0.sub_category), itemDescription: norm(l0.item_description),
-            unitPackSize: l0.unit_pack_size || "", uom: norm(l0.uom), packSize: l0.pack_size || "1",
+            vakkal: l0.vakkal || "", batchNumber: l0.batch_number || "",
+            unitPackSize: l0.unit_pack_size || "", uom: uomText(l0.uom), packSize: l0.pack_size || "1",
             quantity: l0.quantity || "1", netWeight: l0.net_weight || "0", lotNumber: l0.lot_number || "",
             entryMode: "regular",
           }]);
         }
-        // Prefer real box rows; else rebuild from lines as DIRECT (line-only) entries.
-        if (t.boxes.length) {
-          setScannedBoxes(t.boxes.map((b, i) => {
-            const tno = b.transaction_no || "";
-            if (b.box_id && tno && tno !== "DIRECT") scannedKeysRef.current.add(`${b.box_id}|${tno}`);
-            return {
-              id: i + 1, boxNumber: b.box_number ?? i + 1, boxId: b.box_id || "", transactionNo: tno,
-              article: b.article || "", lotNumber: b.lot_number || "", batchNumber: b.batch_number || "",
-              netWeight: String(b.net_weight ?? "0"), grossWeight: String(b.gross_weight ?? "0"),
-            };
-          }));
-          boxCounter.current = t.boxes.length + 1;
-        } else {
-          setScannedBoxes(t.lines.map((l, i) => ({
-            id: i + 1, boxNumber: i + 1, boxId: "", transactionNo: "DIRECT", article: l.item_description,
-            lotNumber: l.lot_number || "", batchNumber: "", netWeight: String(l.net_weight ?? "0"),
-            grossWeight: String(l.total_weight ?? l.net_weight ?? "0"),
-          })));
-          boxCounter.current = t.lines.length + 1;
+        // Rebuild ONE row per ordered unit: a line's own box rows first, then DIRECT rows
+        // for the units that never got a box row. Rebuilding from t.boxes alone dropped
+        // every box-less unit, and buildPayload writes the rebuilt set straight back —
+        // editing transfer 1902 rewrote 83 units / 478.740 kg as 4 units / 57.200 kg,
+        // erasing the difference from the in-transit ledger and from what a GRN can
+        // receive. The `else` branch lost the same way: one box per LINE ignored its qty.
+        type BoxRow = (typeof t.boxes)[number];
+        type LineRow = (typeof t.lines)[number];
+        const qtyOf = (q?: string | null) => Math.max(0, Math.floor(num(q)));
+        const lineIds = new Set(t.lines.map((l) => l.id));
+        const byLine = new Map<number, BoxRow[]>();
+        const loose: BoxRow[] = [];
+        for (const b of t.boxes) {
+          const lid = b.transfer_line_id;
+          if (lid != null && lineIds.has(lid)) { const a = byLine.get(lid); if (a) a.push(b); else byLine.set(lid, [b]); }
+          else loose.push(b);
         }
+        // Cap each line at its ordered qty: create_service attributes EVERY box of an
+        // article to whichever line was inserted first, so taking a line's bucket whole
+        // would re-issue those boxes on top of the other lines' quantities.
+        const claimed = new Map<number, BoxRow[]>();
+        for (const l of t.lines) {
+          const mine = byLine.get(l.id) || [];
+          claimed.set(l.id, mine.slice(0, qtyOf(l.quantity)));
+          loose.push(...mine.slice(qtyOf(l.quantity)));
+        }
+        // Re-home the loose boxes onto lines that are still short — (article, lot) first,
+        // then article alone, the same fallback order create_service matches them with.
+        for (const matchLot of [true, false]) {
+          for (const l of t.lines) {
+            const mine = claimed.get(l.id) as BoxRow[];
+            let need = qtyOf(l.quantity) - mine.length;
+            for (let i = loose.length - 1; i >= 0 && need > 0; i--) {
+              const b = loose[i];
+              if ((b.article || "").trim().toUpperCase() !== (l.item_description || "").trim().toUpperCase()) continue;
+              if (matchLot && (b.lot_number || "").trim() !== (l.lot_number || "").trim()) continue;
+              mine.push(b); loose.splice(i, 1); need--;
+            }
+          }
+        }
+        const rows: ScannedBox[] = [];
+        const pushBox = (b: BoxRow, l?: LineRow) => {
+          const tno = b.transaction_no || "";
+          if (b.box_id && tno && tno !== "DIRECT") scannedKeysRef.current.add(`${b.box_id}|${tno}`);
+          rows.push({
+            id: rows.length + 1, boxNumber: b.box_number ?? rows.length + 1, boxId: b.box_id || "", transactionNo: tno,
+            // vakkal lives on the LINE — no box table carries one. Hardcoding "" here wrote
+            // null back over every mark (transfer 1887 lost 'CHUTTA' / 'SMALL' / 'NO-2').
+            vakkal: l?.vakkal || "", article: b.article || l?.item_description || "",
+            lotNumber: b.lot_number || l?.lot_number || "", batchNumber: b.batch_number || l?.batch_number || "",
+            netWeight: String(b.net_weight ?? "0"), grossWeight: String(b.gross_weight ?? "0"),
+          });
+        };
+        for (const l of t.lines) {
+          // First line of an (article, lot) wins, mirroring create_service's setdefault —
+          // that is the line the backend attributes this article+lot's boxes to.
+          const mk = lineKey(l.item_description, l.lot_number || "");
+          if (!lineMetaRef.current.has(mk)) lineMetaRef.current.set(mk, {
+            materialType: norm(l.material_type), itemCategory: norm(l.item_category), subCategory: norm(l.sub_category),
+            uom: uomText(l.uom), packSize: l.pack_size || "0", unitPackSize: l.unit_pack_size || null,
+          });
+          const mine = claimed.get(l.id) || [];
+          let boxNet = 0, boxGross = 0;
+          for (const b of mine) { boxNet += num(b.net_weight); boxGross += num(b.gross_weight); pushBox(b, l); }
+          let rem = qtyOf(l.quantity) - mine.length;
+          if (!mine.length && rem < 1) rem = 1;   // a qty-less, box-less line still shipped something
+          if (rem <= 0) continue;
+          const netLeft = Math.max(0, num(l.net_weight) - boxNet);
+          // total_weight 0 means "never recorded", and a gross below net trips validate() —
+          // which would leave the transfer uneditable.
+          const grossLeft = Math.max(netLeft, (num(l.total_weight) || num(l.net_weight)) - boxGross);
+          const nets = splitWeight(netLeft, rem), grosses = splitWeight(grossLeft, rem);
+          for (let i = 0; i < rem; i++) {
+            rows.push({
+              id: rows.length + 1, boxNumber: rows.length + 1, boxId: "", transactionNo: "DIRECT",
+              article: l.item_description, vakkal: l.vakkal || "", lotNumber: l.lot_number || "",
+              batchNumber: l.batch_number || "", netWeight: nets[i], grossWeight: grosses[i],
+            });
+          }
+        }
+        for (const b of loose) pushBox(b);   // a box no line could claim is still a physical box
+        setScannedBoxes(rows);
+        boxCounter.current = rows.length + 1;
       } catch (e) {
         if (!off) setBanner({ type: "error", text: e instanceof Error ? e.message : "Failed to load transfer." });
       } finally {
@@ -188,9 +296,17 @@ function DirectTransferForm() {
     if (key) scannedKeysRef.current.add(key);
     const article = b.item_description || b.article_description || "";
     const net = b.net_weight != null ? String(b.net_weight) : "0";
+    // Keep what the lookup says this box IS, so its line ships the real material type /
+    // category / uom instead of an assumed "RM".
+    const mk = lineKey(article, b.lot_number || "");
+    if (!lineMetaRef.current.has(mk)) lineMetaRef.current.set(mk, {
+      materialType: b.material_type || "", itemCategory: b.item_category || "", subCategory: b.sub_category || "",
+      uom: uomText(b.uom), packSize: "0", unitPackSize: null,
+    });
     const id = boxCounter.current++;
     setScannedBoxes((boxes) => [...boxes, {
       id, boxNumber: typeof b.box_number === "number" ? b.box_number : id, boxId, transactionNo: tno, article,
+      vakkal: "",   // no source box table carries a vakkal; it is keyed on the article
       lotNumber: b.lot_number || "", batchNumber: b.batch_number || "",
       netWeight: net,
       grossWeight: b.gross_weight != null ? String(b.gross_weight) : "0",
@@ -222,12 +338,15 @@ function DirectTransferForm() {
       try { parsed = JSON.parse(text); } catch { /* not JSON */ }
       if (parsed && parsed.tx && parsed.bi) {
         const tx = String(parsed.tx), bi = String(parsed.bi);
-        const res = tx.startsWith("BE-")
-          ? await TransferApi.bulkEntryBoxLookup(COMPANY, bi, tx)
-          : await TransferApi.boxLookupById(COMPANY, bi, tx);
+        // One call for every QR format. box-lookup-by-id already unions boxes_v2,
+        // bulk_entry_boxes AND rtv_boxes and resolves on the (box_id, transaction_no)
+        // pair, so BE- needed no branch of its own — bulk-entry-box-lookup is the same
+        // search with the other two sources switched off. Routing on the prefix only
+        // added a way for the two paths to drift.
+        const res = await TransferApi.boxLookupById(COMPANY, bi, tx);
         return appendBox(res.box, tx);
       }
-      { const msg = "Unrecognised QR format (expected a BE-/TR- box code).";
+      { const msg = "Unrecognised QR format (expected a TR-, BE- or CR- box code).";
         setBanner({ type: "error", text: msg }); setScanInfo({ status: "err", value: text, error: msg }); }
       return false;
     } catch (e) {
@@ -244,14 +363,24 @@ function DirectTransferForm() {
       itemCategory: r.group_name || a.itemCategory, itemDescription: r.item_description || "",
       lotNumber: r.lot_no || "", netWeight: r.weight_kg != null ? String(r.weight_kg) : "0",
       quantity: "0", csCompany: r.company || "", csInwardNo: r.inward_no || "",
-      csMaxBoxes: r.net_qty_on_cartons != null ? Math.ceil(r.net_qty_on_cartons) : 0,
+      // floor, not ceil: 4.3 cartons is four whole boxes you can actually load. Rounding
+      // up offered a fifth that does not exist, and the over-pick only failed at submit.
+      csMaxBoxes: r.net_qty_on_cartons != null ? Math.floor(r.net_qty_on_cartons) : 0,
     } : a)));
   };
 
   const addArticleToList = async (a: Article) => {
     if (!a.itemDescription) { setBanner({ type: "error", text: "Pick an item before adding to the list." }); return; }
     const isCold = a.entryMode === "cold-storage";
-    const qty = Math.max(1, Math.floor(parseFloat(a.quantity) || 0));
+    // Boxes are physical things: 0 means 0. Flooring to 1 picked and shipped a real box the
+    // operator never asked for (handleSelectCold seeds a fresh cold article with "0").
+    const qty = Math.max(0, Math.floor(parseFloat(a.quantity) || 0));
+    if (qty < 1) { setBanner({ type: "error", text: "Enter the number of boxes to add." }); return; }
+    lineMetaRef.current.set(lineKey(a.itemDescription, a.lotNumber), {
+      materialType: a.materialType, itemCategory: a.itemCategory, subCategory: a.subCategory, uom: uomText(a.uom),
+      // A cold pick carries no case pack — its weight is the physical per-box weight.
+      packSize: isCold ? "0" : (a.packSize || "0"), unitPackSize: isCold ? null : (a.unitPackSize || null),
+    });
 
     if (isCold) {
       // csInwardNo may legitimately be "" (cold rows with a NULL inward_no — pick_boxes
@@ -275,7 +404,7 @@ function DirectTransferForm() {
         if (key) scannedKeysRef.current.add(key);
         const id = boxCounter.current++;
         add.push({
-          id, boxNumber: id, boxId: b.box_id || "", transactionNo: b.transaction_no || "",
+          id, boxNumber: id, boxId: b.box_id || "", transactionNo: b.transaction_no || "", vakkal: a.vakkal || "",
           article: a.itemDescription, lotNumber: a.lotNumber, batchNumber: "",
           netWeight: String(b.weight_kg ?? "0"), grossWeight: String(b.weight_kg ?? "0"),
         });
@@ -296,11 +425,13 @@ function DirectTransferForm() {
       setBanner({ type: "error", text: "FG articles need a unit pack size before adding." }); return;
     }
     const totalNet = parseFloat(a.netWeight) || 0;
-    const perBox = qty ? totalNet / qty : totalNet;
+    // Each of these rows is persisted as its own LINE, so a per-box toFixed(3) made the
+    // stored total a sum of rounded values — distribute the remainder instead.
+    const shares = splitWeight(totalNet, qty);
     const add: ScannedBox[] = [];
     for (let i = 0; i < qty; i++) {
       const id = boxCounter.current++;
-      add.push({ id, boxNumber: id, boxId: "", transactionNo: "DIRECT", article: a.itemDescription, lotNumber: a.lotNumber, batchNumber: "", netWeight: perBox.toFixed(3), grossWeight: perBox.toFixed(3) });
+      add.push({ id, boxNumber: id, boxId: "", transactionNo: "DIRECT", article: a.itemDescription, lotNumber: a.lotNumber, batchNumber: a.batchNumber || "", vakkal: a.vakkal || "", netWeight: shares[i], grossWeight: shares[i] });
     }
     setScannedBoxes((boxes) => [...boxes, ...add]);
     setBanner({ type: "success", text: `Added ${qty} ${a.itemDescription} entr${qty === 1 ? "y" : "ies"} to the list.` });
@@ -313,7 +444,7 @@ function DirectTransferForm() {
     if (b && b.boxId && b.transactionNo && b.transactionNo !== "DIRECT") scannedKeysRef.current.delete(`${b.boxId}|${b.transactionNo}`);
     return boxes.filter((x) => x.id !== id);
   });
-  const clearAllBoxes = () => { scannedKeysRef.current.clear(); setScannedBoxes([]); boxCounter.current = 1; };
+  const clearAllBoxes = () => { scannedKeysRef.current.clear(); lineMetaRef.current.clear(); setScannedBoxes([]); boxCounter.current = 1; };
 
   // ── Derived ──
   const totals = useMemo(() => {
@@ -340,17 +471,31 @@ function DirectTransferForm() {
     scannedBoxes.forEach((b) => {
       if ((parseFloat(b.netWeight) || 0) > (parseFloat(b.grossWeight) || 0) + 1e-6) e.push(`Box ${b.boxNumber}: net weight exceeds gross`);
     });
+    // Cold source: every manually-added line needs its vakkal. Scanned boxes are exempt —
+    // no box source table carries one, so demanding it would block the scanner entirely.
+    if (isColdFrom) {
+      articles.forEach((a, i) => {
+        if (a.itemDescription && !a.vakkal.trim()) e.push(`Article ${i + 1}: vakkal is required for cold transfers`);
+      });
+    }
     return e;
   };
 
   const buildPayload = () => {
     // One line per box (doc 08), so the lines mirror what shipped.
-    const lines: TransferLineCreateInput[] = scannedBoxes.map((b) => ({
-      material_type: "RM", item_category: "", sub_category: "", item_description: b.article,
-      quantity: "1", uom: "", pack_size: "0", unit_pack_size: null,
-      net_weight: (parseFloat(b.netWeight) || 0).toFixed(3), total_weight: (parseFloat(b.grossWeight) || 0).toFixed(3),
-      batch_number: b.batchNumber || null, lot_number: b.lotNumber || null, vakkal: null,
-    }));
+    const lines: TransferLineCreateInput[] = scannedBoxes.map((b) => {
+      // The row's real classification, not a hardcoded "RM" — material_type also selects the
+      // backend's net-weight recompute branch. Unknown stays empty: asserting "RM" on a box
+      // nothing owns is a guess the challan then prints as fact.
+      const m = lineMetaRef.current.get(lineKey(b.article, b.lotNumber));
+      return {
+        material_type: m?.materialType || "", item_category: m?.itemCategory || "", sub_category: m?.subCategory || "",
+        item_description: b.article,
+        quantity: "1", uom: m?.uom || "", pack_size: m?.packSize || "0", unit_pack_size: m?.unitPackSize ?? null,
+        net_weight: (parseFloat(b.netWeight) || 0).toFixed(3), total_weight: (parseFloat(b.grossWeight) || 0).toFixed(3),
+        batch_number: b.batchNumber || null, lot_number: b.lotNumber || null, vakkal: b.vakkal || null,
+      };
+    });
     // DIRECT (manually-keyed) entries have no physical box_id — they ship as lines only,
     // never as interunit_transfer_boxes rows (the backend parks their stock via park_lines).
     // Persisting them as boxes surfaced empty box_ids as "N/A" in the view. (Legacy parity.)
@@ -390,7 +535,11 @@ function DirectTransferForm() {
       // Leave submitting=true on success (page navigates away / cold popup blocks) so a
       // second click can't duplicate the dispatch.
     } catch (err) {
-      setBanner({ type: "error", text: err instanceof Error ? err.message : "Failed to submit transfer." });
+      // friendlyApiError, not err.message: the backend's write guards (duplicate
+      // challan, box already in transit, transfer already received) return an
+      // actionable sentence inside the {error,message} envelope, and err.message
+      // is the raw body — the operator would see JSON instead of the instruction.
+      setBanner({ type: "error", text: friendlyApiError(err) });
       setSubmitting(false);
     }
   };
@@ -613,7 +762,14 @@ function DirectArticleSection({ index, data, open, materialTypes, canRemove, isC
     materialType: it.material_type || "", itemCategory: it.group || "", subCategory: it.sub_group || "",
     itemDescription: it.item_description || "", unitPackSize: it.uom != null ? String(it.uom) : data.unitPackSize,
   });
-  const addQty = Math.max(1, Math.floor(parseFloat(data.quantity) || 0));
+  // 0 boxes means 0: the old Math.max(1, …) advertised "Add to list (1 box)" over a field
+  // reading 0, and added one real (cold-picked) box on press.
+  const addQty = Math.max(0, Math.floor(parseFloat(data.quantity) || 0));
+  // A cold article's netWeight is the PER-BOX weight (handleSelectCold stores weight_kg and
+  // patchArticle deliberately skips the recompute), so it has to be multiplied out before it
+  // can sit in the same slot as a regular article's line total — a 100-box pick read as one
+  // box's 11.34 kg. That per-box figure is the group's MIN, so this is a lower bound ("≈").
+  const summaryNet = isCold ? (addQty * (parseFloat(data.netWeight) || 0)).toFixed(3) : data.netWeight;
 
   return (
     <section className="bg-white border border-[var(--aws-border)] rounded-lg overflow-hidden">
@@ -621,7 +777,7 @@ function DirectArticleSection({ index, data, open, materialTypes, canRemove, isC
         <span className="inline-block w-4 text-[var(--text-secondary)]">{open ? "▾" : "▸"}</span>
         <span className="text-[12px] font-semibold text-[var(--text-primary)] shrink-0">Article {index + 1}{isCold ? " · cold" : ""}</span>
         <span className="text-[12px] text-[var(--text-secondary)] truncate flex-1">
-          {data.itemDescription ? <>· {data.itemDescription} · {data.quantity || "0"} {data.uom} · {data.netWeight} kg</> : <span className="italic">New article — not yet filled</span>}
+          {data.itemDescription ? <>· {data.itemDescription} · {data.quantity || "0"} {data.uom} · {isCold ? "≈ " : ""}{summaryNet} kg</> : <span className="italic">New article — not yet filled</span>}
         </span>
         {canRemove && <button type="button" onClick={(e) => { e.stopPropagation(); onRemove(); }} className="text-[12px] text-rose-600 hover:underline shrink-0">Remove</button>}
       </div>
@@ -667,12 +823,15 @@ function DirectArticleSection({ index, data, open, materialTypes, canRemove, isC
                 <Field label="Quantity (Box/Bags)"><input type="number" step="any" min="0" value={data.quantity} onWheel={(e) => e.currentTarget.blur()} onChange={(e) => onPatch({ quantity: e.target.value })} className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" /></Field>
                 <Field label="Net Weight (Kg)"><input type="number" step="any" min="0" value={data.netWeight} onWheel={(e) => e.currentTarget.blur()} onChange={(e) => onPatch({ netWeight: e.target.value })} className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" /></Field>
                 <Field label="Lot Number (optional)"><input value={data.lotNumber} onChange={(e) => onPatch({ lotNumber: e.target.value })} className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" /></Field>
+                <Field label="Batch Number (optional)"><input value={data.batchNumber} onChange={(e) => onPatch({ batchNumber: e.target.value })} className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" /></Field>
+                {/* Cold destinations carry a vakkal mark; the challan prints it and the receiving unit matches cartons against it. */}
+                <Field label={isColdFrom ? "Vakkal *" : "Vakkal (optional)"}><input value={data.vakkal} onChange={(e) => onPatch({ vakkal: e.target.value })} className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" /></Field>
               </div>
             </>
           )}
 
           <div className="mt-3 flex justify-end">
-            <button type="button" onClick={onAddToList} className="px-3 py-1.5 text-[12px] rounded-md border border-[var(--aws-navy)] text-[var(--aws-navy)] hover:bg-[var(--aws-navy)] hover:text-white">
+            <button type="button" onClick={onAddToList} disabled={addQty < 1} className="px-3 py-1.5 text-[12px] rounded-md border border-[var(--aws-navy)] text-[var(--aws-navy)] hover:bg-[var(--aws-navy)] hover:text-white disabled:opacity-50">
               Add to list ({addQty} {addQty === 1 ? "box" : "boxes"})
             </button>
           </div>

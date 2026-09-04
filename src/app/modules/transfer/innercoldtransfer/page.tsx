@@ -156,7 +156,17 @@ function InnerColdTransferForm() {
       itemCategory: r.group_name || "",
       itemDescription: r.item_description || "",
       oldLot: r.lot_no ? String(r.lot_no) : "",
-      perBoxWeight: num(r.weight_kg),
+      // The search returns NO per-box weight: search_service groups the lot and selects
+      // MIN(weight_kg) — the LIGHTEST single carton — next to SUM(no_of_cartons). Taking
+      // that as "Weight / box" and multiplying by the box count understates every lot
+      // whose cartons differ, and disagrees with what the server then records for the
+      // same line (inner_cold_service writes weight_kg / no_of_cartons off the reference
+      // row). Lot 13374: MIN 9.7 kg gave 97.000 for 10 boxes where the server recorded
+      // 113.5 and the FIFO truth is 113.500. The group's own totals are the honest
+      // per-box figure: 17878.15 / 1570 = 11.3874 -> 113.874 kg.
+      perBoxWeight: num(r.net_qty_on_cartons)
+        ? num(r.total_inventory_kgs) / num(r.net_qty_on_cartons)
+        : num(r.weight_kg),
       availableBoxes: r.net_qty_on_cartons != null ? Math.ceil(r.net_qty_on_cartons) : 0,
       quantity: "0", newLot: "", newLocation: "",
     } : a)));
@@ -292,7 +302,7 @@ function InnerColdTransferForm() {
               <Field label="Item Category"><input value={a.itemCategory} readOnly className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-[var(--background)]" /></Field>
               <Field label="Item Description"><input value={a.itemDescription} readOnly className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-[var(--background)]" /></Field>
               <Field label="Old Lot Number"><input value={a.oldLot} readOnly className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-[var(--background)] font-mono" /></Field>
-              <Field label="Weight / box (kg)"><input value={a.perBoxWeight || 0} readOnly className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-[var(--background)]" /></Field>
+              <Field label="Weight / box (kg)"><input value={a.perBoxWeight ? a.perBoxWeight.toFixed(3) : 0} readOnly className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-[var(--background)]" /></Field>
               <Field label={`No. of Boxes${a.availableBoxes ? ` (max ${a.availableBoxes})` : ""}`} required>
                 <input type="number" step="1" min="0" value={a.quantity} onWheel={(e) => e.currentTarget.blur()}
                   onChange={(e) => { const n = parseInt(e.target.value, 10) || 0; patch(a.uid, { quantity: String(a.availableBoxes ? Math.min(n, a.availableBoxes) : n) }); }}
