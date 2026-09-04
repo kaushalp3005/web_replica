@@ -422,6 +422,26 @@ export const bhSignoffRejectByEmail = (
   post(`/api/v1/sample/email/bh-signoff-reject`, { request_id: requestId, email, remarks }),
   "Reject failed");
 
+// Overdue-dispatch reminder actions (087). The mail's two buttons land on the request
+// page with ?req_cancel / ?req_redate plus the signed `t`; the dialogs submit here.
+// PUBLIC — authenticated by that token AND `email` being the request's bound business
+// head, so both work with no session. Same-origin /api proxy, like the reject above.
+export const cancelRequisitionByEmail = (
+  requestId: number, email: string, t: string, reason: string,
+) => jsonOrThrow<Requisition>(
+  post(`/api/v1/sample/email/requisition-cancel`,
+       { request_id: requestId, email, t, reason }),
+  "Cancel failed");
+
+// `expectedDispatchDate` is the raw YYYY-MM-DD an <input type="date"> emits — passed
+// through unparsed, which is exactly what the backend's Optional[date] takes.
+export const redateRequisitionByEmail = (
+  requestId: number, email: string, t: string, expectedDispatchDate: string,
+) => jsonOrThrow<Requisition>(
+  post(`/api/v1/sample/email/requisition-redate`,
+       { request_id: requestId, email, t, expected_dispatch_date: expectedDispatchDate }),
+  "Date change failed");
+
 export const npdReview = (
   id: number, act: "ACCEPT" | "REJECT" | "HOLD", reason?: string, start_date?: string,
 ) => action(id, "npd-review", { action: act, reason, start_date }, "NPD review failed");

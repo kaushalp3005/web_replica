@@ -18,10 +18,12 @@ import {
   dispatchInternal, startProduction,
   markPacking, markReady, invVerify, issueGatePass, convertFull, convertPartial,
   printGatePassBlob, updateRequisition, listBusinessHeads, WAREHOUSES,
+  cancelRequisitionByEmail, redateRequisitionByEmail,
   type Requisition, type RecipientBody, type RequisitionCreate,
   type PurposeTag, type Warehouse, type BusinessHead,
 } from "@/lib/sample";
 import { StatusPill, NpdStatusPill, TYPE_LABEL } from "../_shared";
+import { RedateDialog } from "./_RedateDialog";
 import {
   BillingFields, billingError, billingPayload, billingFrom, type BillingValue,
   TargetArticlesEditor, targetsValid, targetsPayload, EMPTY_TARGET, type TargetRow,
@@ -29,7 +31,7 @@ import {
 
 type ModalMode =
   | null | "reject" | "cancel" | "gatePass" | "convertFull" | "convertPartial"
-  | "npdReject" | "npdHold" | "bhReject";
+  | "npdReject" | "npdHold" | "bhReject" | "redate";
 
 const PURPOSE_OPTIONS: { value: PurposeTag; label: string }[] = [
   { value: "CUSTOMER_DISPLAY", label: "Customer display" },
@@ -61,6 +63,11 @@ export default function SampleDetailPage() {
   // (?bh_reject=<request_id>&email=<addr>). The submit then goes through the
   // email-authenticated endpoint — the BH may have no portal session at all.
   const [emailReject, setEmailReject] = useState<{ requestId: number; email: string } | null>(null);
+  // Set when a dialog was opened from the overdue-dispatch reminder mail
+  // (?req_cancel=<request_id>&email=<addr>&t=<token>, or ?req_redate=…). The submit goes
+  // through the token-authenticated endpoint — the BH may have no portal session at all.
+  const [emailAction, setEmailAction] = useState<
+    { kind: "cancel" | "redate"; requestId: number; email: string; t: string } | null>(null);
 
   // Hydration gate. This page is server-rendered, where useRequireAuth returns
   // true (no token store) but the first browser render starts authed=false — so
@@ -88,17 +95,30 @@ export default function SampleDetailPage() {
     queueMicrotask(() => { void refresh(); });
   }, [authed, id, refresh]);
 
-  // Arriving from the BH approval mail's Reject button → pop the reason dialog bound to
-  // that request + email. Strip the params so a manual refresh doesn't re-open it. Runs
-  // once on mount (client-only — no SSR query access needed).
+  // Arriving from the BH approval mail's Reject button, or from the overdue-dispatch
+  // reminder's Cancel / Change date buttons → pop the matching dialog bound to that
+  // request + email (+ token). Strip the params so a manual refresh doesn't re-open or
+  // re-fire it. Runs once on mount (client-only — no SSR query access needed).
   useEffect(() => {
     if (typeof window === "undefined") return;
     const sp = new URLSearchParams(window.location.search);
-    const rid = Number(sp.get("bh_reject") ?? 0);
     const em = sp.get("email");
+    const rid = Number(sp.get("bh_reject") ?? 0);
     if (rid > 0 && em) {
       window.history.replaceState(null, "", window.location.pathname);
       queueMicrotask(() => { setEmailReject({ requestId: rid, email: em }); setModal("bhReject"); });
+    }
+    const cancelId = Number(sp.get("req_cancel") ?? 0);
+    const redateId = Number(sp.get("req_redate") ?? 0);
+    const tok = sp.get("t") ?? "";
+    if ((cancelId > 0 || redateId > 0) && em && tok) {
+      window.history.replaceState(null, "", window.location.pathname);
+      const kind = cancelId > 0 ? "cancel" : "redate";
+      const requestId = cancelId > 0 ? cancelId : redateId;
+      queueMicrotask(() => {
+        setEmailAction({ kind, requestId, email: em, t: tok });
+        setModal(kind === "cancel" ? "cancel" : "redate");
+      });
     }
   }, []);
 
@@ -399,7 +419,7 @@ export default function SampleDetailPage() {
         )}
       </main>
 
-      {modal && req && (
+      {modal && modal !== "redate" && req && (
         <ActionModal mode={modal} busy={busy} onClose={() => setModal(null)}
           onSubmit={(data) => {
             if (modal === "reject") return run(() => approveRequisition(req.id, "REJECTED", data.remarks));
@@ -413,11 +433,35 @@ export default function SampleDetailPage() {
             }
             if (modal === "npdReject") return run(() => npdReview(req.id, "REJECT", data.reason));
             if (modal === "npdHold") return run(() => npdReview(req.id, "HOLD", data.reason));
-            if (modal === "cancel") return run(() => cancelRequisition(req.id, data.reason ?? ""));
+            // Arrived from the overdue reminder mail → the token-authenticated endpoint,
+            // since the BH may have no portal session. A logged-in cancel still takes the
+            // session path. Mirrors how submitReject picks its endpoint on the job card.
+            if (modal === "cancel") {
+              const reason = data.reason ?? "";
+              return run(async () => {
+                if (emailAction?.kind === "cancel") {
+                  await cancelRequisitionByEmail(
+                    emailAction.requestId, emailAction.email, emailAction.t, reason);
+                  setEmailAction(null);
+                } else {
+                  await cancelRequisition(req.id, reason);
+                }
+              });
+            }
             if (modal === "gatePass") return run(() => issueGatePass(req.id, data as RecipientBody));
             if (modal === "convertFull") return run(() => convertFull(req.id, data));
             if (modal === "convertPartial") return run(() => convertPartial(req.id, { ...(data as RecipientBody), qty: Number(data.qty) }));
           }} />
+      )}
+
+      {modal === "redate" && emailAction?.kind === "redate" && req && (
+        <RedateDialog current={req.expected_dispatch_date} busy={busy}
+          onCancel={() => { setModal(null); setEmailAction(null); }}
+          onSubmit={(isoDate) => run(async () => {
+            await redateRequisitionByEmail(
+              emailAction.requestId, emailAction.email, emailAction.t, isoDate);
+            setEmailAction(null);
+          })} />
       )}
     </div>
   );
