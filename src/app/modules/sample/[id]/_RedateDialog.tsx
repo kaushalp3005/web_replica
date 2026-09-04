@@ -15,9 +15,12 @@ export function RedateDialog({ current, busy, onCancel, onSubmit }: {
   onSubmit: (isoDate: string) => void;
 }) {
   const [value, setValue] = useState((current ?? "").slice(0, 10));
-  // Today, in the browser's own locale-independent ISO form — a new expected dispatch
-  // date in the past would be overdue the moment it was set.
-  const today = new Date().toISOString().slice(0, 10);
+  // Local calendar day, not toISOString()'s UTC one: the reminder scan that will
+  // re-evaluate this date runs on the IST day, and for the first 5.5h of each IST
+  // day a UTC "today" is still yesterday — which would let the BH pick a date that
+  // is already overdue and get chased again on the next tick.
+  const d = new Date();
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const invalid = !value || value < today;
   return (
     <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center p-3"

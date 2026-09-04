@@ -363,7 +363,7 @@ export default function SampleDetailPage() {
       </main>
 
       {modal && modal !== "redate" && req && (
-        <ActionModal mode={modal} busy={busy} onClose={() => setModal(null)}
+        <ActionModal mode={modal} busy={busy} onClose={() => { setModal(null); setEmailAction(null); }}
           onSubmit={(data) => {
             if (modal === "reject") return run(() => approveRequisition(req.id, "REJECTED", data.remarks));
             if (modal === "npdReject") return run(() => npdReview(req.id, "REJECT", data.reason));
