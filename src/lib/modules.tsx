@@ -129,6 +129,23 @@ function InventoryLedgerIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function StockTakeIcon(props: SVGProps<SVGSVGElement>) {
+  // Counted cartons — a stack plus a tick and tally lines. Deliberately unlike
+  // the three tiles it sits near: Job Card's clipboard, Inventory Ledger's
+  // ruled book and Stores' shelf grid.
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <rect x="3" y="4" width="8" height="7" rx="1" />
+      <path d="M6 4v3" />
+      <rect x="3" y="14" width="8" height="7" rx="1" />
+      <path d="M6 14v3" />
+      <path d="M14 8.5l2 2 4.5-4.5" />
+      <path d="M14 15h7" />
+      <path d="M14 18.5h4.5" />
+    </svg>
+  );
+}
+
 export const MODULES: ModuleItem[] = [
   {
     title: "Purchase",
@@ -237,6 +254,22 @@ export const MODULES: ModuleItem[] = [
     implemented: true,
     adminOnly: true,
     Icon: AdminIcon,
+  },
+  {
+    title: "Stock Take",
+    description:
+      "Physical stock count workspace — contents to be defined.",
+    badge: "Inventory",
+    stat: "Stock take operations",
+    route: "stock-take",
+    implemented: true,
+    // Admin-only for now, matching Stores. The counting itself lives in the
+    // separate Stock Take app today; this tile only reserves the console slot.
+    // Widening access is this flag PLUS a ROLE_MODULE_SCOPE entry for any
+    // scoped role — the scoped branch of the /modules filter never consults
+    // adminOnly, so a scope entry alone would expose the tile.
+    adminOnly: true,
+    Icon: StockTakeIcon,
   },
 ];
 
