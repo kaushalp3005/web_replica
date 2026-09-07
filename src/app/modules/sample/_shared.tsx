@@ -2,6 +2,29 @@
 // the Next App Router does NOT treat it as a route. Imported by the queue,
 // wizard, and detail pages.
 
+import { displayStatusOf, DISPLAY_STATUS_LABEL, DISPLAY_STATUS_STYLES } from "@/lib/sample-status";
+
+// The queue pill: the six buckets a human recognises, not the 13 raw lifecycle states.
+// The bucket itself is computed server-side (display_status); this only renders it, and
+// hovering a Hold shows the reason. StatusPill below still shows the raw status and stays
+// in use on the develop / job-card views, where the exact lifecycle state is the point.
+export function SampleStatusPill({ row }: {
+  row: { status?: string | null; display_status?: string | null; hold_reason?: string | null };
+}) {
+  const key = displayStatusOf(row);
+  const s = DISPLAY_STATUS_STYLES[key];
+  const reason = (row.hold_reason ?? "").trim();
+  return (
+    <span
+      className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold whitespace-nowrap"
+      style={{ background: s.bg, color: s.fg, boxShadow: `inset 0 0 0 1px ${s.ring}` }}
+      title={key === "HOLD" && reason ? `On hold — ${reason}` : undefined}
+    >
+      {DISPLAY_STATUS_LABEL[key]}
+    </span>
+  );
+}
+
 export const STATUS_STYLES: Record<string, { bg: string; fg: string; ring: string }> = {
   DRAFT:                 { bg: "#f4f4f4", fg: "#414d5c", ring: "#d5dbdb" },
   SUBMITTED:             { bg: "#eaf3ff", fg: "#1d4ed8", ring: "#bbd9f3" },

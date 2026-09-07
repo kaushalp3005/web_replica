@@ -124,6 +124,7 @@ export interface Requisition {
   paid?: boolean | null;
   amount?: number | null;
   hold_start_date?: string | null;  // date a HOLD takes effect (set on hold)
+  display_status?: string | null;  // server-computed queue bucket (see lib/sample-status)
   hold_reason?: string | null;      // latest HOLD remark (list rows; for the Hold pill tooltip)
   created_at?: string | null;
   updated_at?: string | null;
@@ -207,6 +208,7 @@ export interface ListFilters {
   status?: string;
   sample_type?: string;
   sample_types?: string;   // CSV — narrows to a set (NPD queue passes "NPD,TRIAL")
+  display_statuses?: string;  // CSV — queue bucket (PENDING,HOLD,IN_PROCESS,PARTIAL,…)
   statuses?: string;       // CSV — status bucket (NPD queue maps Pending/Hold/Accepted)
   warehouse?: string;
   requestor?: string;      // exact requestor_team match (filter dropdown)
@@ -223,6 +225,7 @@ export async function listRequisitions(f: ListFilters = {}): Promise<Requisition
   if (f.sample_type) q.set("sample_type", f.sample_type);
   if (f.sample_types) q.set("sample_types", f.sample_types);
   if (f.statuses) q.set("statuses", f.statuses);
+  if (f.display_statuses) q.set("display_statuses", f.display_statuses);
   if (f.warehouse) q.set("warehouse", f.warehouse);
   if (f.requestor) q.set("requestor", f.requestor);
   if (f.q) q.set("q", f.q);

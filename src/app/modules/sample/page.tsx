@@ -13,9 +13,9 @@ import { useRequireAuth, useUserInitial, useMe, useIsAdmin, useHasPermission } f
 import { sampleCaps } from "@/lib/sample-roles";
 import { listRequisitions, WAREHOUSES, type Requisition } from "@/lib/sample";
 import { loadSampleListCache, saveSampleListCache } from "@/lib/sample-list-cache";
-import { STATUS_STYLES, TYPE_LABEL, StatusPill, billingSummary } from "./_shared";
+import { TYPE_LABEL, SampleStatusPill, billingSummary } from "./_shared";
+import { DISPLAY_STATUS_FILTERS, isDisplayStatus } from "@/lib/sample-status";
 
-const STATUS_OPTIONS = Object.keys(STATUS_STYLES);
 const TYPE_OPTIONS = Object.keys(TYPE_LABEL);
 
 // Module-level so the component isn't re-created on every render (React 19
@@ -57,7 +57,10 @@ export default function SampleQueuePage() {
   const canCreateReq = useHasPermission("sample", "requisition", null, "create");
 
   const [cache] = useState(() => loadSampleListCache());
-  const [status, setStatus] = useState(() => cache?.status ?? "");
+  // A filter remembered from before the queue moved to display buckets is a raw
+  // status, which now matches nothing — drop it rather than open to an empty list.
+  const [status, setStatus] = useState(
+    () => (isDisplayStatus(cache?.status) ? (cache?.status ?? "") : ""));
   const [sampleType, setSampleType] = useState(() => cache?.sampleType ?? "");
   const [warehouse, setWarehouse] = useState(() => cache?.warehouse ?? "");
   const [rows, setRows] = useState<Requisition[]>(() => cache?.rows ?? []);
@@ -83,7 +86,8 @@ export default function SampleQueuePage() {
       firstRun.current = false;
       setError(null);
       try {
-        const data = await listRequisitions({ status, sample_type: sampleType, warehouse, limit: 200 });
+        const data = await listRequisitions({
+          display_statuses: status || undefined, sample_type: sampleType, warehouse, limit: 200 });
         if (cancelled) return;
         setRows(data);
         saveSampleListCache({ status, sampleType, warehouse, rows: data, scrollY: 0 });
@@ -164,7 +168,7 @@ export default function SampleQueuePage() {
         </select>
         <select className="form-input !w-auto" value={status} onChange={(e) => setStatus(e.target.value)} aria-label="Status">
           <option value="">All statuses</option>
-          {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
+          {DISPLAY_STATUS_FILTERS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
         </select>
         <select className="form-input !w-auto" value={warehouse} onChange={(e) => setWarehouse(e.target.value)} aria-label="Warehouse">
           <option value="">All warehouses</option>
@@ -191,7 +195,7 @@ export default function SampleQueuePage() {
                 className="text-left bg-white border border-[var(--aws-border)] rounded-md p-3 hover:border-[var(--aws-orange)]">
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-semibold text-[13px] text-[var(--text-primary)] tabular-nums truncate" title={String(r.request_id ?? "")}>{r.request_id ?? "—"}</span>
-                  <StatusPill status={r.status} />
+                  <SampleStatusPill row={r} />
                 </div>
                 <div className="mt-1 text-[12px] text-[var(--text-secondary)] flex flex-wrap gap-x-3 gap-y-0.5">
                   <span>{TYPE_LABEL[r.sample_type] ?? r.sample_type}</span>
@@ -229,7 +233,7 @@ export default function SampleQueuePage() {
                     className="border-t border-[var(--surface-divider)] hover:bg-[var(--surface-subtle)] cursor-pointer">
                     <td className="px-3 py-2 font-medium text-[var(--text-primary)] tabular-nums">{r.request_id ?? "—"}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{TYPE_LABEL[r.sample_type] ?? r.sample_type}</td>
-                    <td className="px-3 py-2"><StatusPill status={r.status} /></td>
+                    <td className="px-3 py-2"><SampleStatusPill row={r} /></td>
                     <td className="px-3 py-2">{r.warehouse}</td>
                     <td className="px-3 py-2 max-w-[200px] truncate" title={r.npd_target_name ?? ""}>{r.npd_target_name ?? "—"}</td>
                     <td className="px-3 py-2 text-right tabular-nums">{r.quantity ?? "—"}</td>
