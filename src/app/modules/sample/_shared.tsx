@@ -67,17 +67,6 @@ export function StatusPill({ status }: { status?: string | null }) {
 // waiting on its business head still files under "Pending" — it just says so honestly.
 export type NpdReviewStatus = "PENDING" | "BH_PENDING" | "HOLD" | "ACCEPTED" | "CANCELLED";
 
-// Filter buckets (the 3 active states) → the underlying statuses they cover.
-export const NPD_STATUS_FILTERS: { value: NpdReviewStatus; label: string; statuses: string[] }[] = [
-  { value: "PENDING", label: "Pending", statuses: ["DRAFT", "SUBMITTED"] },
-  { value: "HOLD", label: "Hold", statuses: ["ON_HOLD"] },
-  {
-    value: "ACCEPTED", label: "Accepted",
-    statuses: ["BH_APPROVED", "IN_PRODUCTION", "PACKING", "READY_FOR_DISPATCH",
-      "INTERNALLY_DISPATCHED", "PARTIALLY_CONVERTED", "GATE_PASS_ISSUED", "CLOSED"],
-  },
-];
-
 export function npdReviewStatus(
   raw?: string | null, bhSignoffState?: string | null,
 ): NpdReviewStatus {

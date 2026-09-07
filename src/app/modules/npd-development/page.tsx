@@ -20,7 +20,8 @@ import {
   WAREHOUSES, NPD_WAREHOUSES, NPD_SAMPLE_TYPES,
   type Requisition, type PurposeTag, type Warehouse, type BusinessHead,
 } from "@/lib/sample";
-import { NpdStatusPill, NPD_STATUS_FILTERS, billingSummary } from "../sample/_shared";
+import { SampleStatusPill, billingSummary } from "../sample/_shared";
+import { DISPLAY_STATUS_FILTERS } from "@/lib/sample-status";
 import { CELL, Sub, Hover, Field, Pair, day, joinLines, shouldFlip } from "./_queue-ui";
 import {
   BillingFields, billingError, billingPayload, billingFrom, EMPTY_BILLING, type BillingValue,
@@ -111,7 +112,7 @@ function EntryPanel({ r }: { r: Requisition }) {
     <>
       <div className="mb-1 flex items-center justify-between gap-2">
         <span className="text-[13px] font-semibold tabular-nums">{r.request_id ?? "—"}</span>
-        <NpdStatusPill status={r.status} holdReason={r.hold_reason} bhSignoffState={r.bh_signoff_state} />
+        <SampleStatusPill row={r} />
       </div>
       <div className="divide-y divide-[var(--surface-divider)]">
         {/* Scalars two-up; only the free-text fields get a full line. */}
@@ -341,12 +342,9 @@ export default function NpdQueuePage() {
       setLoading(true);
       setError(null);
       try {
-        const statusesCsv = status
-          ? NPD_STATUS_FILTERS.find((f) => f.value === status)?.statuses.join(",")
-          : undefined;
         const data = await listRequisitions({
           sample_types: type || NPD_TYPES_CSV,
-          statuses: statusesCsv, warehouse, requestor, q,
+          display_statuses: status || undefined, warehouse, requestor, q,
           date_from: dateFrom || undefined, date_to: dateTo || undefined,
           limit: PAGE_SIZE, offset,
         });
@@ -508,7 +506,7 @@ export default function NpdQueuePage() {
           <select className="form-input !w-auto" value={status}
             onChange={(e) => { setStatus(e.target.value); setOffset(0); }} aria-label="Status">
             <option value="">All statuses</option>
-            {NPD_STATUS_FILTERS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+            {DISPLAY_STATUS_FILTERS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
           </select>
         </div>
         <div className="flex flex-col">
@@ -554,7 +552,7 @@ export default function NpdQueuePage() {
                         title={`Warehouse: ${r.warehouse ?? "—"} · Type: ${typeLabel(r.sample_type)}`}>
                         {r.request_id ?? "—"}
                       </span>
-                      <NpdStatusPill status={r.status} holdReason={r.hold_reason} bhSignoffState={r.bh_signoff_state} />
+                      <SampleStatusPill row={r} />
                     </div>
                     <div className="mt-1 text-[12px] text-[var(--text-secondary)] flex flex-wrap gap-x-3 gap-y-0.5">
                       <span>{day(r.created_at)}</span>
@@ -698,7 +696,7 @@ export default function NpdQueuePage() {
                         {poc && <Sub title={`Sales POC: ${poc}`}>POC {poc}</Sub>}
                       </td>
                       <td className={`${CELL} py-2 align-top`}>
-                        <NpdStatusPill status={r.status} holdReason={r.hold_reason} bhSignoffState={r.bh_signoff_state} />
+                        <SampleStatusPill row={r} />
                       </td>
                       <td className={`${CELL} py-2 align-top`}>
                         <div className="flex justify-center">

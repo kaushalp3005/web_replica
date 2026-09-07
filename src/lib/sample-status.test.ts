@@ -57,7 +57,7 @@ check("case is normalised", displayStatusOf({ status: "on_hold" }), "HOLD");
 
 check("every bucket has a label",
   Object.keys(DISPLAY_STATUS_LABEL).sort(),
-  ["CANCELLED", "DISPATCHED", "HOLD", "IN_PROCESS", "PARTIAL", "PENDING"]);
+  ["BH_PENDING", "CANCELLED", "DISPATCHED", "HOLD", "IN_PROCESS", "PARTIAL", "PENDING"]);
 
 check("the labels read as the user asked",
   [DISPLAY_STATUS_LABEL.PENDING, DISPLAY_STATUS_LABEL.IN_PROCESS,
@@ -67,7 +67,7 @@ check("the labels read as the user asked",
 
 check("the filter offers every bucket, so nothing is unreachable",
   DISPLAY_STATUS_FILTERS.map((f) => f.value).sort(),
-  ["CANCELLED", "DISPATCHED", "HOLD", "IN_PROCESS", "PARTIAL", "PENDING"]);
+  ["BH_PENDING", "CANCELLED", "DISPATCHED", "HOLD", "IN_PROCESS", "PARTIAL", "PENDING"]);
 
 check("the filter sends the bucket verbatim — the server matches on these exact strings",
   DISPLAY_STATUS_FILTERS.every((f) => f.value === f.value.toUpperCase()), true);
@@ -82,6 +82,34 @@ check("a remembered RAW status is rejected", isDisplayStatus("BH_APPROVED"), fal
 check("an empty filter is not a bucket", isDisplayStatus(""), false);
 check("undefined is not a bucket", isDisplayStatus(undefined), false);
 check("lowercase is accepted", isDisplayStatus("partial"), true);
+
+
+// --- the business-head gate ---------------------------------------------------
+// 086's bh_signoff_state is a separate column from status, so the bucket cannot be
+// derived from the lifecycle state alone. It outranks everything: a SUBMITTED request
+// whose business head has not signed off was never handed to NPD, and showing it as
+// plain Pending invites a reviewer to act on something the server will refuse.
+
+check("Awaiting BH is a bucket", DISPLAY_STATUS_LABEL.BH_PENDING, "Awaiting BH");
+
+check("the server's BH_PENDING renders",
+  displayStatusOf({ status: "SUBMITTED", display_status: "BH_PENDING" }), "BH_PENDING");
+
+check("the fallback reads the gate and outranks the raw status",
+  displayStatusOf({ status: "SUBMITTED", bh_signoff_state: "PENDING" }), "BH_PENDING");
+
+check("a cleared gate falls through to the raw status",
+  displayStatusOf({ status: "SUBMITTED", bh_signoff_state: "APPROVED" }), "PENDING");
+
+check("no gate at all (pre-086 rows) falls through",
+  displayStatusOf({ status: "SUBMITTED", bh_signoff_state: null }), "PENDING");
+
+check("the server still wins over the gate",
+  displayStatusOf({ status: "SUBMITTED", bh_signoff_state: "PENDING", display_status: "HOLD" }),
+  "HOLD");
+
+check("the filter offers it too",
+  DISPLAY_STATUS_FILTERS.some((f) => f.value === "BH_PENDING"), true);
 
 console.log(failures === 0 ? "sample-status: all checks passed" : `${failures} failure(s)`);
 if (failures) process.exit(1);
