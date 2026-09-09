@@ -227,6 +227,39 @@ export interface PageQuery {
   order?: "asc" | "desc";
 }
 
+/** Which half of the working day a row was keyed in, split at 14:00 IST.
+ *
+ *  NOTE this is `created_at` — when the document was entered into the system —
+ *  not when goods physically arrived. entry_date, the business date the window
+ *  filters on, carries no time at all (measured: 0 of 1,647 rows). */
+export type LedgerShift = "all" | "am" | "pm";
+
+/** An inclusive entry_date window. Both bounds or neither. */
+export interface LedgerWindow {
+  from?: string | null;
+  to?: string | null;
+  /** Exact days, for a non-contiguous pick. Mutually exclusive with from/to:
+   *  sending the span instead would silently include the days NOT ticked —
+   *  measured on live data, that turned 109,290 kg into 3,121,931 kg. */
+  days?: string[] | null;
+  shift?: LedgerShift;
+}
+
+/** One day that has inward documents, and how it splits by shift. */
+export interface LedgerActivityDay {
+  date: string;
+  docs: number;
+  am: number;
+  pm: number;
+}
+
+export interface LedgerActivity {
+  days: LedgerActivityDay[];
+  min_date: string | null;
+  max_date: string | null;
+  shift_cutoff_hour: number;
+}
+
 const BASE = "/api/v1/ledger";
 
 function qs(params: Record<string, unknown>): string {
@@ -261,8 +294,18 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
 export const LedgerApi = {
   // The flat leaf dataset the module derives every view from. Fixtures are the
   // fallback (see _LedgerData); in live mode this feeds the whole module.
-  leaves(entity: Entity | "both" = "both", signal?: AbortSignal) {
-    return getJson<{ data: LeafItem[] }>(`/leaves${qs({ entity })}`, signal);
+  // A leaf is an aggregate over the requested window — there is no date ON a
+  // leaf, so the window has to be applied server-side before the GROUP BY.
+  // Omit from/to and the leaf is the all-time total, as before.
+  leaves(entity: Entity | "both" = "both", signal?: AbortSignal, w: LedgerWindow = {}) {
+    return getJson<{ data: LeafItem[]; applied?: Record<string, unknown> }>(
+      `/leaves${qs({ entity, from: w.from, to: w.to, day: w.days, shift: w.shift })}`, signal);
+  },
+  // Which entry_dates actually have documents. Drives the day pills: a day with
+  // no row here gets no dot and is not selectable, so nobody is sent to an
+  // empty window and left wondering whether the screen is broken.
+  activity(entity: Entity | "both" = "both", signal?: AbortSignal) {
+    return getJson<LedgerActivity>(`/activity${qs({ entity })}`, signal);
   },
   searchItems(f: LedgerFilter & PageQuery) {
     return getJson<ListEnvelope<ItemSearchResult>>(`/items/search${qs({ ...f })}`);

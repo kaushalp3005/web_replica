@@ -1,9 +1,15 @@
 // Stock Take — typed client for the read-only latest-stock view.
 //
-// The rows come from `stocktake_entries`, which is WRITTEN by the separate Stock
-// Take app (Stock_Take/backend_st) into the same RDS warehouse_db that
-// server_replica reads. This console is a reader: there is no create/update path
-// here, and counting stays in that app.
+// The rows come from `new_stock_entries` — the canonical copy of the
+// `stocktake_entries` that the separate Stock Take app (Stock_Take/backend_st)
+// writes into the same RDS warehouse_db that server_replica reads. This console
+// is a reader: there is no create/update path here, and counting stays in that app.
+//
+// WHY THAT MATTERS TO THIS FILE: floor names arrive canonicalised. The floor app
+// records free text, so the same floor reached the browser as "1 ST FLOOR ",
+// "1ST FLOOR" and "FIRST FLOOR"; here it is the single "First Floor" that
+// FLOORS_BY_WAREHOUSE (admin-api.ts) declares. Filter values are still compared
+// case- and whitespace-insensitively server-side, so a stale value keeps working.
 //
 // Every call goes through apiFetch so it picks up the bearer token and the
 // silent-refresh retry.
@@ -179,6 +185,10 @@ export type StockOperation = "ADDITION" | "SUBTRACTION";
 export interface StockTakeScope {
   warehouses: string[];
   floors: string[];
+  /** Floors per warehouse, so the form can narrow the list once a warehouse is
+   *  chosen. The server builds this from the ERP profile (FLOORS_BY_WAREHOUSE),
+   *  falling back to the data only for warehouses that declare no floors. */
+  floors_by_warehouse?: Record<string, string[]>;
   can_post: boolean;
   blocked_reason: "no_stock_data" | "no_floor_access" | "no_warehouse_access" | null;
   warehouses_unrestricted?: boolean;
@@ -366,4 +376,89 @@ export async function downloadLedgerExcel(f: LedgerFilters = {}): Promise<number
   // some browsers before it has read the blob.
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   return rows;
+}
+
+
+// ── Floor count export ─────────────────────────────────────────────────────
+// The raw counting rows behind the aggregate on the Stock Take landing page:
+// one row per weighing, not one per article. Same filter shape as
+// fetchLatestStock so the file matches the screen it was launched from, plus a
+// date range, because a raw-row sheet is read by period.
+
+/** Filters for the count-row export. A superset of the floor app's five. */
+export interface EntriesExportFilters {
+  warehouse?: string[];
+  floorName?: string[];
+  itemType?: string[];
+  category?: string[];
+  subcategory?: string[];
+  stockType?: string[];
+  enteredBy?: string;
+  search?: string;
+  verified?: boolean;
+  /** IST calendar day, YYYY-MM-DD, inclusive. */
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+/** What the download actually contained, for the confirmation message. */
+export interface EntriesExportResult {
+  /** Submitted count rows written to the sheet. */
+  rows: number;
+  /** Draft rows the export deliberately left out. */
+  drafts: number;
+  filename: string;
+}
+
+function entriesParams(f: EntriesExportFilters): URLSearchParams {
+  const p = new URLSearchParams();
+  const lists: [keyof EntriesExportFilters, string][] = [
+    ["warehouse", "warehouse"],
+    ["floorName", "floorName"],
+    ["itemType", "itemType"],
+    ["category", "category"],
+    ["subcategory", "subcategory"],
+    ["stockType", "stockType"],
+  ];
+  for (const [key, name] of lists) {
+    const v = f[key] as string[] | undefined;
+    if (v?.length) v.forEach((one) => p.append(name, one));
+  }
+  if (f.enteredBy) p.set("enteredBy", f.enteredBy);
+  if (f.search) p.set("search", f.search);
+  if (f.verified !== undefined) p.set("verified", String(f.verified));
+  if (f.dateFrom) p.set("dateFrom", f.dateFrom);
+  if (f.dateTo) p.set("dateTo", f.dateTo);
+  return p;
+}
+
+/** Download every matching count row as .xlsx. Drafts are never included.
+ *
+ *  Like the ledger export this is unpaginated and fetched through apiFetch
+ *  rather than by pointing the browser at the URL, because the endpoint needs
+ *  the bearer token a plain navigation would not carry.
+ *
+ *  X-Total-Rows / X-Draft-Rows / Content-Disposition are only readable because
+ *  they are in the API's CORS expose_headers — an unlisted header comes back as
+ *  null with no error, which is why the counts below have fallbacks. */
+export async function downloadEntriesExcel(
+  f: EntriesExportFilters = {},
+): Promise<EntriesExportResult> {
+  const qs = entriesParams(f).toString();
+  const res = await apiFetch(`${TXN_BASE}/entries/export${qs ? `?${qs}` : ""}`);
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, `Export HTTP ${res.status}`));
+  const rows = Number(res.headers.get("X-Total-Rows") ?? 0);
+  const drafts = Number(res.headers.get("X-Draft-Rows") ?? 0);
+  const blob = await res.blob();
+  const cd = res.headers.get("Content-Disposition") ?? "";
+  const filename = /filename="([^"]+)"/.exec(cd)?.[1] ?? "StockTakeEntries.xlsx";
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { rows, drafts, filename };
 }

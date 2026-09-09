@@ -243,7 +243,18 @@ export function CompanyReconcile() {
         <StatCard label="Computed vs physical" value={stats.computedVsPhysical} delta={`${stats.matched} matched`} />
         <StatCard label="Qty variances" value={fmtInt(stats.variances)} flag={stats.variances > 0} delta="batch ≠ floor" />
         <StatCard label="Store gaps" value={fmtInt(stats.storeGaps)} delta="cold: no floor row" />
-        <StatCard label="Unposted shrink" value={fmtQty(stats.shrink, 0)} unit="kg" flag={stats.shrink > 0} delta="→ post 551" />
+        {/* kg and nos are stated separately. Their sum is not a quantity, and
+            the previous card printed that sum under a hardcoded "kg". */}
+        <StatCard
+          label="Unposted shrink"
+          value={fmtQty(stats.shrink.kg ?? 0, 0)}
+          unit="kg"
+          flag={Object.values(stats.shrink).some((v) => (v ?? 0) > 0)}
+          delta={Object.entries(stats.shrink)
+            .filter(([u, v]) => u !== "kg" && (v ?? 0) > 0)
+            .map(([u, v]) => `${fmtQty(v as number, 0)} ${u}`)
+            .join(" · ") || "no other units"}
+        />
       </div>
       <div className="flex flex-wrap gap-[7px] items-center">
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search item / godown…" aria-label="Search" className={`${selCls} flex-1 min-w-[160px]`} />

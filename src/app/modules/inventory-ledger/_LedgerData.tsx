@@ -13,7 +13,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { LedgerApi } from "@/lib/ledger";
-import type { Entity, LeafItem } from "@/lib/ledger";
+import type { Entity, LeafItem, LedgerActivity, LedgerShift } from "@/lib/ledger";
 import { filterLeaves } from "./_tree";
 import { LEDGER_LEAVES } from "./_fixtures";
 
@@ -26,6 +26,17 @@ export const ENTITY_LABELS: Record<EntityScope, string> = {
 };
 export const ENTITY_SCOPES: EntityScope[] = ["cfpl", "cdpl", "both"];
 const EMPTY_LEAVES: LeafItem[] = [];
+
+/** The entry_date window every view is scoped to. Null bounds mean all time. */
+export interface DateWindow {
+  from: string | null;
+  to: string | null;
+  /** Exact days ticked in Multi mode. Mutually exclusive with from/to. */
+  days: string[] | null;
+  shift: LedgerShift;
+}
+
+export const ALL_TIME: DateWindow = { from: null, to: null, days: null, shift: "all" };
 
 export interface LedgerData {
   /** Leaves for the selected entity — what every view must derive from. */
@@ -40,6 +51,15 @@ export interface LedgerData {
   source: LedgerSource;
   setSource: (s: LedgerSource) => void;
   reload: () => void;
+  /** The entry_date window. Changing it REFETCHES — the leaf is an aggregate
+   *  for the window, so this cannot be applied client-side.
+   *
+   *  NOT called `window`: that shadows the global inside every consumer, and
+   *  this file itself calls window.localStorage. */
+  dateWindow: DateWindow;
+  setDateWindow: (w: DateWindow) => void;
+  /** Which days have documents, for the day pills. Null until loaded. */
+  activity: LedgerActivity | null;
 }
 
 const Ctx = createContext<LedgerData | null>(null);
@@ -54,6 +74,13 @@ export function LedgerDataProvider({ children }: { children: React.ReactNode }) 
     loading: false, error: null, data: null,
   });
   const [reloadKey, setReloadKey] = useState(0);
+  // All time by default: the module answered "everything ever inwarded" before
+  // the window existed, and defaulting to a narrow window would silently change
+  // what every existing figure means.
+  const [dateWindow, setDateWindow] = useState<DateWindow>(ALL_TIME);
+  const [activity, setActivity] = useState<LedgerActivity | null>(null);
+
+  const daysKey = (dateWindow.days ?? []).join(",");
 
   useEffect(() => {
     if (source !== "live") return;
@@ -64,12 +91,38 @@ export function LedgerDataProvider({ children }: { children: React.ReactNode }) 
     void (async () => {
       setRemote({ loading: true, error: null, data: null });
       try {
-        const res = await LedgerApi.leaves("both", ac.signal);
+        const res = await LedgerApi.leaves("both", ac.signal, {
+          from: dateWindow.from, to: dateWindow.to,
+          days: daysKey ? daysKey.split(",") : null,
+          // Omitted when "all" so the URL stays clean and the server takes its
+          // own default rather than being told the default.
+          shift: dateWindow.shift === "all" ? undefined : dateWindow.shift,
+        });
         if (!cancelled) setRemote({ loading: false, error: null, data: res.data ?? [] });
       } catch (e) {
         if (!cancelled && !ac.signal.aborted) {
           setRemote({ loading: false, error: e instanceof Error ? e.message : "Failed to load ledger data.", data: null });
         }
+      }
+    })();
+    return () => { cancelled = true; ac.abort(); };
+  }, [source, reloadKey, dateWindow.from, dateWindow.to, daysKey, dateWindow.shift]);
+
+  // Loaded once per source, NOT per window: which days have documents does not
+  // depend on the window currently selected, and refetching it on every pill
+  // click would make the strip flicker as you scan across it.
+  useEffect(() => {
+    if (source !== "live") return;
+    let cancelled = false;
+    const ac = new AbortController();
+    void (async () => {
+      try {
+        const res = await LedgerApi.activity("both", ac.signal);
+        if (!cancelled) setActivity(res);
+      } catch {
+        // A missing activity feed costs the dots, not the data. The window
+        // controls stay usable and the leaf fetch is unaffected.
+        if (!cancelled && !ac.signal.aborted) setActivity(null);
       }
     })();
     return () => { cancelled = true; ac.abort(); };
@@ -96,6 +149,11 @@ export function LedgerDataProvider({ children }: { children: React.ReactNode }) 
     loading: source === "live" ? remote.loading : false,
     error: source === "live" ? remote.error : null,
     source, setSource, reload,
+    // Fixtures have no dates, so a window over them would filter nothing while
+    // appearing to work. Reported as all-time in sample mode, which is true.
+    dateWindow: source === "live" ? dateWindow : ALL_TIME,
+    setDateWindow,
+    activity: source === "live" ? activity : null,
   };
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

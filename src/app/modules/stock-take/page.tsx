@@ -4,7 +4,10 @@
 // forward from its OWN most recent physical count, so one page spans many count
 // dates; that is why every row shows when it was last counted.
 //
-// Rows come from `stocktake_entries`, written by the separate Stock Take app.
+// Rows come from `new_stock_entries`, the canonical copy of the
+// `stocktake_entries` the separate Stock Take app writes. Floor names are the
+// ones FLOORS_BY_WAREHOUSE declares, so the filter list reads "First Floor"
+// rather than the four spellings the floor app recorded.
 // This page never writes: counting, drafts, verification and the result sheet all
 // stay in that app. What the console adds is a manager-facing answer to "what did
 // the last count find", with the same filters the Stock Take review screens use.
@@ -17,8 +20,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { BackLink } from "@/components/BackLink";
-import { useRequireAuth, useUserInitial, useIsAdmin } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useHasPermission } from "@/lib/user";
 import {
+  downloadEntriesExcel,
   fetchLatestStock,
   fetchStockTakeFilterOptions,
   formatDate,
@@ -95,10 +99,14 @@ export default function StockTakeLandingPage() {
   const initial = useUserInitial();
   // Call for its redirect side-effect only. Do NOT gate render on its return —
   // it is true on the server but false on the client's first paint, which would
-  // cause a hydration mismatch (see inventory-ledger/page.tsx). The isAdmin gate
-  // below is hydration-stable (false on server + client-first-render).
+  // cause a hydration mismatch (see inventory-ledger/page.tsx). The permission
+  // gate below is hydration-stable (false on server + client-first-render).
   useRequireAuth(router.replace);
-  const isAdmin = useIsAdmin();
+  // Admins and the `stock_take` role. useHasPermission returns true for admins
+  // without needing a grant row, matching check_permission on the server. This
+  // is UX only -- app/db/102_stock_take_rbac.sql plus require_permission on every
+  // endpoint is the actual boundary.
+  const canView = useHasPermission("stock_take");
 
   const [data, setData] = useState<LatestStockResponse | null>(null);
   const [options, setOptions] = useState<StockTakeFilterOptions | null>(null);
@@ -113,7 +121,39 @@ export default function StockTakeLandingPage() {
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
   const [sortBy, setSortBy] = useState<SortKey>("totalWeight");
+  // A download is invisible: the file goes to the browser's tray, not the
+  // page. So the row count that came back is echoed here, and so is the
+  // number of drafts left out — otherwise a short sheet looks like data loss.
+  const [exporting, setExporting] = useState(false);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+
+  /** Download the count rows behind this screen, under the SAME filters.
+   *
+   *  Not the rows on screen: the table shows one line per article, netted,
+   *  while the sheet has one line per weighing. The export is the audit trail
+   *  under the figure, so it is expected to be much longer than the table. */
+  const onExport = useCallback(async () => {
+    setExporting(true);
+    setExportMsg(null);
+    try {
+      const r = await downloadEntriesExcel({
+        warehouse: warehouse ? [warehouse] : undefined,
+        floorName: floorName ? [floorName] : undefined,
+        itemType: itemType ? [itemType] : undefined,
+        stockType: stockType ? [stockType] : undefined,
+        search: debouncedSearch || undefined,
+      });
+      setExportMsg(
+        `${r.filename} — ${formatNumber(r.rows, 0)} count entries`
+        + (r.drafts ? `, ${formatNumber(r.drafts, 0)} draft entries excluded.` : "."),
+      );
+    } catch (e) {
+      setExportMsg(e instanceof Error ? e.message : "Export failed.");
+    } finally {
+      setExporting(false);
+    }
+  }, [warehouse, floorName, itemType, stockType, debouncedSearch]);
 
   // Debounce the search box so a typed word is one request, not one per keypress.
   useEffect(() => {
@@ -169,20 +209,20 @@ export default function StockTakeLandingPage() {
   );
 
   useEffect(() => {
-    if (!isAdmin) return;
+    if (!canView) return;
     const ctrl = new AbortController();
     load(ctrl.signal);
     return () => ctrl.abort();
-  }, [isAdmin, load]);
+  }, [canView, load]);
 
   useEffect(() => {
-    if (!isAdmin) return;
+    if (!canView) return;
     const ctrl = new AbortController();
     // Filter options failing is not worth an error banner — the dropdowns just
     // stay empty and every other control keeps working.
     fetchStockTakeFilterOptions(ctrl.signal).then(setOptions).catch(() => {});
     return () => ctrl.abort();
-  }, [isAdmin]);
+  }, [canView]);
 
   function toggleSort(key: SortKey) {
     changeQuery(() => {
@@ -220,7 +260,7 @@ export default function StockTakeLandingPage() {
           <BackLink parentHref="/modules" label="modules" />
         </div>
 
-        {!isAdmin ? (
+        {!canView ? (
           <>
             <h1 className="text-[20px] font-semibold text-[var(--text-primary)] mb-3">Stock Take</h1>
             <section className="bg-white border border-[var(--aws-border)] rounded-md p-6 text-[13px] text-[var(--text-secondary)]">
@@ -257,6 +297,22 @@ export default function StockTakeLandingPage() {
               >
                 Show transactions
               </button>
+              {/* The counting rows themselves, filtered exactly as this screen is.
+                  Separate from the ledger export: that one is adjustments, this
+                  one is what the floor actually weighed. */}
+              <button
+                onClick={onExport}
+                disabled={exporting}
+                title="Every individual count row behind this view, as .xlsx"
+                className="h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:border-[var(--aws-orange)] disabled:opacity-40"
+              >
+                {exporting ? "Preparing\u2026" : "Export counts"}
+              </button>
+              {exportMsg && (
+                <p className="w-full text-[12px] text-[var(--text-secondary)] mt-1" role="status">
+                  {exportMsg}
+                </p>
+              )}
               <p className="w-full text-[13px] text-[var(--text-secondary)] mt-1">
                 Each article at its own most recent physical count, plus adjustments posted since that count. Counting happens in the Stock Take app; adjustments are recorded here.
               </p>

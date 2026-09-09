@@ -32,6 +32,50 @@ function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
 }
 
+// THE LEGACY FEED DOES NOT SPELL A NAME THE SAME WAY TWICE.
+//
+// Live, `group` arrives as 46 distinct strings that are 25 actual groups:
+// "PISTA"/"pista", "ALMOND"/"almond", "Packaging"/"packaging" and 18 more.
+// `subgroup` is worse. Grouping on the raw string therefore lists one real group
+// two or three times, each holding a fraction of its own total — and because the
+// node key was slug(group), which lowercases, those fragments then collided into
+// ONE React key. Measured on the live feed: 21 duplicate `grp-` keys and 62
+// duplicate `sub-` keys. The browser only warns about the ones it has rendered,
+// so the console under-reports it.
+//
+// Identity is therefore the CASE-FOLDED name, and the label shown is whichever
+// spelling appears on the most rows. The built-in fixtures have clean names,
+// which is why none of this is reachable in Sample mode.
+export function canonName(s: string | null | undefined): string {
+  return (s ?? "").trim().toUpperCase();
+}
+
+/** The spelling that appears on the most rows, so a folded node is named the way
+ *  the data mostly names it. Ties break on first appearance, which keeps the
+ *  label stable between renders rather than flickering between spellings.
+ *
+ *  Exported because every view that folds names has to LABEL the result, and two
+ *  views picking different spellings for the same fold would look like two
+ *  different groups. */
+export function commonest(values: string[]): string {
+  const n = new Map<string, number>();
+  for (const v of values) n.set(v, (n.get(v) ?? 0) + 1);
+  let best = values[0] ?? "";
+  let bestN = -1;
+  for (const [v, c] of n) if (c > bestN) { best = v; bestN = c; }
+  return best;
+}
+
+// A node key must be unique, and slug() cannot guarantee that: even AFTER
+// case-folding, "ALMOND INSHELL" and "ALMOND - INSHELL" both slug to
+// "almond-inshell". Keys are built from the canonical names themselves,
+// "\u0000"-joined for the same reason leafKey() uses "\u0000" (see below). slug() survives
+// only where it has to — in `drill_key`, which goes in a URL. That case is
+// checked: the 25 canonical groups produce 25 distinct slugs.
+function nodeKey(kind: string, ...parts: string[]): string {
+  return [kind, ...parts].join("\u0000");
+}
+
 // per-UOM subtotals for a set of leaves (insertion order of first appearance)
 function perUom(leaves: LeafItem[]): UomSubtotal[] {
   const map = new Map<UomClass, { cols: MovementCols; value: number }>();
@@ -84,9 +128,18 @@ function rollup(
 // as the escape sequence below, never as a literal control character: a raw NUL
 // in the source makes git treat this file as binary — no textual diffs, no
 // normal merges, and an invisible character for whoever edits it next.
+// `label` belongs to the identity because the BACKEND's merge key carries it
+// (leaves_service._leaf_key: entity, sku_id, label, item_type, category,
+// sub_category, godown). Leaving it out did not mirror that key, it truncated
+// it — sku_id is 0 on a large share of rows, so the label is what actually
+// separates them, and 10 live leaves shared a key without it.
+//
+// Names are canonicalised for the same reason the tree folds them: two rows
+// differing only in how their group is spelled are not two different items.
 export function leafKey(l: LeafItem): string {
   return [
-    "item", l.sku_id, l.entity, l.godown, l.item_type, l.group, l.subgroup,
+    "item", l.sku_id, l.entity, l.godown, l.label,
+    canonName(l.item_type), canonName(l.group), canonName(l.subgroup),
   ].join("\u0000");
 }
 
@@ -113,18 +166,24 @@ function groupBy<T>(rows: T[], keyOf: (r: T) => string): [string, T[]][] {
 
 // group → sub-group → item
 export function buildLedgerTree(leaves: LeafItem[]): LedgerNode[] {
-  return groupBy(leaves, (l) => l.group).map(([group, gLeaves]) => {
-    const subs = groupBy(gLeaves, (l) => l.subgroup).map(([sub, sLeaves]) =>
-      rollup(`sub-${slug(group)}-${slug(sub)}`, sub, "subgroup", sLeaves, sLeaves.map(leafNode)),
+  return groupBy(leaves, (l) => canonName(l.group)).map(([gKey, gLeaves]) => {
+    const gLabel = commonest(gLeaves.map((l) => l.group));
+    const subs = groupBy(gLeaves, (l) => canonName(l.subgroup)).map(([sKey, sLeaves]) =>
+      rollup(nodeKey("sub", gKey, sKey), commonest(sLeaves.map((l) => l.subgroup)),
+             "subgroup", sLeaves, sLeaves.map(leafNode)),
     );
-    return rollup(`grp-${slug(group)}`, group, "group", gLeaves, subs, slug(group));
+    return rollup(nodeKey("grp", gKey), gLabel, "group", gLeaves, subs, slug(gLabel));
   });
 }
 
 // warehouse → item (the "By Warehouse" perspective)
+// Godowns are already canonicalised server-side by ledger_godown(), so nothing
+// folds here on today's data. Built the same way regardless: that alias table is
+// maintained by hand, and this should not be where a new alias silently breaks.
 export function buildWarehouseTree(leaves: LeafItem[]): LedgerNode[] {
-  return groupBy(leaves, (l) => l.godown).map(([wh, wLeaves]) =>
-    rollup(`wh-${slug(wh)}`, wh, "group", wLeaves, wLeaves.map(leafNode)),
+  return groupBy(leaves, (l) => canonName(l.godown)).map(([wKey, wLeaves]) =>
+    rollup(nodeKey("wh", wKey), commonest(wLeaves.map((l) => l.godown)),
+           "group", wLeaves, wLeaves.map(leafNode)),
   );
 }
 
@@ -140,7 +199,7 @@ export function filterLeaves(leaves: LeafItem[], f: LeafFilter): LeafItem[] {
   const q = (f.q ?? "").trim().toLowerCase();
   return leaves.filter((l) => {
     if (f.entity && f.entity !== "both" && l.entity !== f.entity) return false;
-    if (f.godown && l.godown !== f.godown) return false;
+    if (f.godown && canonName(l.godown) !== canonName(f.godown)) return false;
     if (f.uom && l.uom_class !== f.uom) return false;
     if (q && !(`${l.label} ${l.group} ${l.subgroup}`.toLowerCase().includes(q))) return false;
     return true;

@@ -24,7 +24,7 @@ import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState }
 import { useRouter, useSearchParams } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { BackLink } from "@/components/BackLink";
-import { useRequireAuth, useUserInitial } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useHasPermission } from "@/lib/user";
 import { lookupSku, type SkuLookupResponse } from "@/lib/so";
 import {
   createStockTransaction,
@@ -98,6 +98,9 @@ function StockAdjustScreen() {
   const router = useRouter();
   const initial = useUserInitial();
   useRequireAuth(router.replace);
+  // `create`, not `view`: this page exists to post adjustments, so read-only
+  // access to it would be a form whose only button 403s.
+  const canPost = useHasPermission("stock_take", null, null, "create");
 
   // Deep link from the stock list's row arrow: ?item=&stockType=&warehouse=&floor=
   // The article is a FOCUS, not a filter on the request — the list is still
@@ -125,6 +128,18 @@ function StockAdjustScreen() {
   const [txns, setTxns] = useState<Record<string, StockTransaction[]>>({});
   const [txnBusy, setTxnBusy] = useState<string | null>(null);
 
+  // Floors of the SELECTED warehouse. Before this the Floor list held every
+  // warehouse's floors at once, so someone on W202 was offered A185's areas and
+  // the server rejected the post. Falls back to the flat list when the server is
+  // an older build that does not send the per-warehouse map.
+  const floorOptions = useMemo<string[]>(() => {
+    if (!scope) return [];
+    const byWh = scope.floors_by_warehouse;
+    if (!byWh) return scope.floors;
+    if (!warehouse) return scope.floors;
+    return byWh[warehouse] ?? [];
+  }, [scope, warehouse]);
+
   const [target, setTarget] = useState<Target | null>(null);
   const [operation, setOperation] = useState<StockOperation>("ADDITION");
   const [showNew, setShowNew] = useState(false);
@@ -132,6 +147,7 @@ function StockAdjustScreen() {
 
   // ── Scope ────────────────────────────────────────────────────────────────
   useEffect(() => {
+    if (!canPost) return;
     const c = new AbortController();
     fetchStockTakeScope(c.signal).then(
       (s) => {
@@ -140,18 +156,21 @@ function StockAdjustScreen() {
         // it — the server would reject anything else, so offering it would just
         // produce a 403 on submit.
         const wh = s.warehouses.find((w) => w.toUpperCase() === linkWarehouse.toUpperCase().replace(/-/g, ""));
-        const fl = s.floors.find((f) => f.trim().toUpperCase() === linkFloor.trim().toUpperCase());
-        if (wh) setWarehouse(wh);
-        else if (s.warehouses.length === 1) setWarehouse(s.warehouses[0]);
+        const pinnedWh = wh ?? (s.warehouses.length === 1 ? s.warehouses[0] : "");
+        if (pinnedWh) setWarehouse(pinnedWh);
+        // Resolve the floor within the warehouse that was actually pinned, so a
+        // deep link cannot select a floor belonging to a different building.
+        const inWh = (pinnedWh ? s.floors_by_warehouse?.[pinnedWh] : undefined) ?? s.floors;
+        const fl = inWh.find((f) => f.trim().toUpperCase() === linkFloor.trim().toUpperCase());
         if (fl) setLocation(fl);
-        else if (s.floors.length === 1) setLocation(s.floors[0]);
+        else if (pinnedWh && inWh.length === 1) setLocation(inWh[0]);
       },
       (e: Error) => { if (e.name !== "AbortError") setScopeErr(e.message); },
     );
     return () => c.abort();
     // The link params are real dependencies: arriving from a different row must
     // re-resolve which warehouse/floor gets pinned, not reuse the first one.
-  }, [linkWarehouse, linkFloor]);
+  }, [linkWarehouse, linkFloor, canPost]);
 
   // ── Stock at the chosen place ────────────────────────────────────────────
   const reqId = useRef(0);
@@ -233,7 +252,9 @@ function StockAdjustScreen() {
     setOperation(op);
   }
 
-  const blocked = scope && !scope.can_post;
+  // No permission is just another reason the form cannot open, so it rides the
+  // branch that already exists rather than adding a second denial path.
+  const blocked = !canPost || (scope && !scope.can_post);
 
   return (
     <div className="min-h-screen flex flex-col bg-[var(--background)]">
@@ -279,7 +300,9 @@ function StockAdjustScreen() {
 
         {blocked ? (
           <section className="bg-white border border-[var(--aws-border)] rounded-md p-6 text-[13px] text-[var(--text-secondary)]">
-            {scope!.blocked_reason === "no_stock_data" ? (
+            {!canPost ? (
+              <>You don&rsquo;t have access to post stock adjustments. Ask an administrator for the Stock Take role.</>
+            ) : scope!.blocked_reason === "no_stock_data" ? (
               <>
                 No stock-take locations are available on this server. Its database has no stock take
                 data &mdash; check which database <code>DATABASE_URL</code> points at. This is a server
@@ -300,7 +323,17 @@ function StockAdjustScreen() {
                   <label className={LABEL} htmlFor="wh">Warehouse</label>
                   <select id="wh" className={FIELD} value={warehouse}
                           disabled={scope.warehouses.length === 1}
-                          onChange={(e) => { setWarehouse(e.target.value); setData(null); }}>
+                          onChange={(e) => {
+                            const w = e.target.value;
+                            setWarehouse(w);
+                            setData(null);
+                            // The old floor may not exist in the new warehouse.
+                            // Pin it when there is only one, else clear it —
+                            // never leave a floor selected that this warehouse
+                            // does not have.
+                            const next = scope.floors_by_warehouse?.[w] ?? scope.floors;
+                            setLocation(next.length === 1 ? next[0] : "");
+                          }}>
                     <option value="">Select…</option>
                     {scope.warehouses.map((w) => <option key={w} value={w}>{w}</option>)}
                   </select>
@@ -308,10 +341,10 @@ function StockAdjustScreen() {
                 <div>
                   <label className={LABEL} htmlFor="loc">Floor</label>
                   <select id="loc" className={FIELD} value={location}
-                          disabled={scope.floors.length === 1}
+                          disabled={!warehouse || floorOptions.length === 1}
                           onChange={(e) => { setLocation(e.target.value); setData(null); }}>
-                    <option value="">Select…</option>
-                    {scope.floors.map((f) => <option key={f} value={f}>{f}</option>)}
+                    <option value="">{warehouse ? "Select…" : "Choose a warehouse first"}</option>
+                    {floorOptions.map((f) => <option key={f} value={f}>{f}</option>)}
                   </select>
                 </div>
                 <div>
@@ -321,9 +354,11 @@ function StockAdjustScreen() {
                 </div>
               </div>
               <p className="mt-2 text-[11px] text-[var(--text-muted)]">
-                {scope.floors_unrestricted
-                  ? "Your profile grants access to all floors, so every location with stock is listed."
-                  : `From your profile access — ${scope.floors.length} floor${scope.floors.length === 1 ? "" : "s"} assigned to you.`}
+                {!warehouse
+                  ? `Your profile covers ${scope.warehouses.length} warehouse${scope.warehouses.length === 1 ? "" : "s"} — choose one to see its floors.`
+                  : scope.floors_unrestricted
+                    ? `No floor restriction on your profile, so all ${floorOptions.length} floor${floorOptions.length === 1 ? "" : "s"} of ${warehouse} are listed.`
+                    : `From your profile access — ${floorOptions.length} floor${floorOptions.length === 1 ? "" : "s"} assigned to you in ${warehouse}.`}
               </p>
             </section>
 

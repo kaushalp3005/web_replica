@@ -12,12 +12,17 @@ import { useRequireAuth, useIsAdmin } from "@/lib/user";
 import { LedgerChrome } from "./_chrome";
 import { ItemSearch, slugifySku } from "./_ItemSearch";
 import { StockSummary } from "./_StockSummary";
+import { LedgerOverview } from "./_Summary";
 import { CompanyBatches, CompanyAgeing, CompanyFifo, CompanyReconcile, RegistersView } from "./_CompanyViews";
 import { LedgerGate, LedgerSourceToggle, LedgerEntityToggle } from "./_LedgerData";
 import { SectionTabs, type TabDef } from "./_ui";
 import type { ItemSearchResult } from "@/lib/ledger";
 
 const TABS: TabDef[] = [
+  // The roll-up sits FIRST: it answers "what is in here" before the granular
+  // tree answers "what is in this group". Ported from the Stock Take app's
+  // summary page — see _Summary.tsx.
+  { key: "overview", label: "Overview" },
   { key: "summary", label: "Stock Summary" },
   { key: "ledger", label: "Item Ledger" },
   { key: "monthly", label: "Monthly" },
@@ -36,7 +41,7 @@ export default function InventoryLedgerPage() {
   // is hydration-stable (false on server + client-first-render) and guards the body.
   useRequireAuth(router.replace);
   const isAdmin = useIsAdmin();
-  const [tab, setTab] = useState("summary");
+  const [tab, setTab] = useState("overview");
   // Entity scope lives in LedgerDataProvider (see LedgerEntityToggle) so it
   // actually filters the leaf set and survives navigation into the drill pages.
   const [searchOpen, setSearchOpen] = useState(false);
@@ -88,6 +93,9 @@ export default function InventoryLedgerPage() {
       <SectionTabs tabs={TABS} active={tab} onSelect={selectTab} />
       <div className="mt-4">
         <LedgerGate>
+          {tab === "overview" && (
+            <LedgerOverview onDrillGroup={(k) => router.push(`/modules/inventory-ledger/${k}`)} />
+          )}
           {tab === "summary" && (
             <StockSummary
               onDrillGroup={(k) => router.push(`/modules/inventory-ledger/${k}`)}

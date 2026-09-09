@@ -17,7 +17,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useRouter, useSearchParams } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { BackLink } from "@/components/BackLink";
-import { useRequireAuth, useUserInitial } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useHasPermission } from "@/lib/user";
 import {
   downloadLedgerExcel,
   fetchLedger,
@@ -59,6 +59,7 @@ function LedgerScreen() {
   const router = useRouter();
   const initial = useUserInitial();
   useRequireAuth(router.replace);
+  const canView = useHasPermission("stock_take");
   const params = useSearchParams();
 
   const [options, setOptions] = useState<StockTakeFilterOptions | null>(null);
@@ -88,10 +89,11 @@ function LedgerScreen() {
   }), [warehouse, location, itemName, operation, mode, day, from, to]);
 
   useEffect(() => {
+    if (!canView) return;
     const c = new AbortController();
     fetchStockTakeFilterOptions(c.signal).then(setOptions).catch(() => {});
     return () => c.abort();
-  }, []);
+  }, [canView]);
 
   const reqId = useRef(0);
   const load = useCallback((signal?: AbortSignal) => {
@@ -106,10 +108,11 @@ function LedgerScreen() {
   }, [filters, page]);
 
   useEffect(() => {
+    if (!canView) return;
     const c = new AbortController();
     load(c.signal);
     return () => c.abort();
-  }, [load]);
+  }, [load, canView]);
 
   // Derived, so no setState runs inside an effect body.
   const loading = !data && !error;
@@ -162,12 +165,17 @@ function LedgerScreen() {
               Every addition and subtraction recorded between physical counts. Entries are final — a correction is a new balancing entry.
             </p>
           </div>
-          <button onClick={onExport} disabled={busy}
+          <button onClick={onExport} disabled={busy || !canView}
                   className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[14px] font-medium disabled:opacity-40 hover:bg-[var(--aws-orange-hover)]">
             {busy ? "Preparing…" : "Download Excel"}
           </button>
         </div>
 
+        {!canView && (
+          <section className="bg-white border border-[var(--aws-border)] rounded-md p-6 mb-4 text-[13px] text-[var(--text-secondary)]">
+            You don&rsquo;t have access to the Stock Take module. Ask an administrator for the Stock Take role.
+          </section>
+        )}
         {note && <section className="bg-white border border-[#1d7324] rounded-md p-3 mb-4 text-[13px] text-[#1d7324]">{note}</section>}
         {error && <section className="bg-white border border-[#d13212] rounded-md p-4 mb-4 text-[13px] text-[#d13212]">{error}</section>}
 
