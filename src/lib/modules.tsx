@@ -145,6 +145,23 @@ function BomIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function StockTakeIcon(props: SVGProps<SVGSVGElement>) {
+  // Counted cartons â€” a stack plus a tick and tally lines. Deliberately unlike
+  // the three tiles it sits near: Job Card's clipboard, Inventory Ledger's
+  // ruled book and Stores' shelf grid.
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <rect x="3" y="4" width="8" height="7" rx="1" />
+      <path d="M6 4v3" />
+      <rect x="3" y="14" width="8" height="7" rx="1" />
+      <path d="M6 14v3" />
+      <path d="M14 8.5l2 2 4.5-4.5" />
+      <path d="M14 15h7" />
+      <path d="M14 18.5h4.5" />
+    </svg>
+  );
+}
+
 export const MODULES: ModuleItem[] = [
   {
     title: "Purchase",
@@ -261,6 +278,28 @@ export const MODULES: ModuleItem[] = [
     Icon: BomIcon,
   },
   {
+    title: "Stock Take",
+    description:
+      "Counted stock by article and place, with an append-only adjustment ledger and Excel exports.",
+    badge: "Inventory",
+    stat: "Counted stock · Adjustments",
+    route: "stock-take",
+    implemented: true,
+    // Admins plus the `stock_take` role, and nobody else. Both this and the
+    // ROLE_MODULE_SCOPE entry are needed, and they cover different users:
+    // allowedRoles handles someone whose other roles are UNSCOPED (scopedRoutesFor
+    // returns null, so the filter falls through to this list), while the scope
+    // entry handles someone who ALSO holds a scoped role — that branch matches on
+    // the scope map alone and never consults allowedRoles.
+    //
+    // This mirrors, and does not replace, the real gate: app/db/102_stock_take_rbac.sql
+    // grants stock_take.{view,create,export} to this role and to admins, and every
+    // /api/v1/stock-take/* endpoint requires it. Hiding a tile removes the link,
+    // not the route.
+    allowedRoles: ["stock_take"],
+    Icon: StockTakeIcon,
+  },
+  {
     title: "Admin",
     description:
       "Manage users, assign roles, edit factory / floor scope, and curate the permission catalog. Admin role required.",
@@ -310,6 +349,12 @@ export const ROLE_MODULE_SCOPE: Record<string, string[]> = {
   // bom.view in the database) when planners are meant to have it.
   planner:       ["production/so-creation", "production/planning", "production/plan-list", "production/prod-indents", "job-card"],
   floor_manager: ["job-card"],
+  // Stock take is the whole job for this role, so it is scoped to that one tile.
+  // Listed here as well as in the tile's allowedRoles because a user holding
+  // stock_take TOGETHER WITH a scoped role (a floor_manager who also counts —
+  // the expected case) takes the scoped branch of the filter, which unions the
+  // scope lists and ignores allowedRoles entirely.
+  stock_take:    ["stock-take"],
   // QC roles see only the standalone QC module (inward inspection / NCR /
   // parameters). The scope overrides the QC tile's adminOnly flag (like
   // purchase); the QC landing page admits qc_manager/qc_inspector to match.

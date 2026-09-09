@@ -373,6 +373,11 @@ export const FLOORS_BY_WAREHOUSE: Record<string, string[]> = {
     "Roasting Area", "Mezzanine", "Sorting Area", "Printing Area",
     "Dmart Production Area", "Dmart Packing Area", "Cheese Floor",
     "FG store", "FFS Packing Area",
+    // Added 2026-09-09. These are real storage areas that the floor app has been
+    // recording for months under names this list never carried -- RACK, RACK AREA,
+    // STORE and DOCK AREA between them held 437,006 kg with no declared home, and
+    // so were grantable to nobody. Named as the warehouse team named them.
+    "A185 Stores", "A185 Stores Rack", "A185 Cold",
   ],
 };
 
