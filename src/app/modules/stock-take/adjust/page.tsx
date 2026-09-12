@@ -677,9 +677,41 @@ function AdjustDialog({ target, operation, warehouse, location, onCancel, onPost
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // Which LINE this posting lands on, not a property of the article. Starts on
+  // the row that was clicked, so + on an off-grade row stays off grade.
+  const [offGrade, setOffGrade] = useState(target.stock_type === "Off Grade/Rejection");
+  const stockType = offGrade ? "Off Grade/Rejection" : "Fresh Stock";
+  const switched = stockType !== target.stock_type;
+
+  // The balance of the line actually being posted to. Toggling the tick changes
+  // the article identity, so the figure the overdraw guard checks has to change
+  // with it — otherwise a subtraction is measured against the fresh line while
+  // being booked against the off-grade one.
+  //
+  // Tri-state, and DERIVED rather than synced: undefined = not looked up yet,
+  // null = that line holds nothing here, a number = its balance. Writing the
+  // unswitched case into state inside the effect is what
+  // react-hooks/set-state-in-effect forbids, and it would be redundant anyway —
+  // target.available_kg is already the answer when nothing was switched.
+  const [fetched, setFetched] = useState<number | null | undefined>(undefined);
+  const avail = switched ? (fetched ?? null) : target.available_kg;
+  const availPending = switched && fetched === undefined;
+
+  useEffect(() => {
+    if (!switched) return;
+    const c = new AbortController();
+    fetchStockBalance(
+      { itemName: target.item_name, stockType, warehouse, location }, c.signal)
+      .then((b) => setFetched(b.uncounted && b.available_kg === 0 ? null : b.available_kg))
+      // An unreachable lookup must not block the posting; it only costs the
+      // guard, and the server still records the movement correctly.
+      .catch(() => setFetched(null));
+    return () => c.abort();
+  }, [switched, stockType, target.item_name, warehouse, location]);
+
   const qty = Number(qtyKg);
   const isSub = operation === "SUBTRACTION";
-  const overdrawn = isSub && target.available_kg != null && qty > 0 && qty > target.available_kg;
+  const overdrawn = isSub && avail != null && qty > 0 && qty > avail;
   const ok = Number(units) > 0 && qty > 0 && reason.trim().length > 0 && !busy;
 
   async function submit() {
@@ -692,7 +724,7 @@ function AdjustDialog({ target, operation, warehouse, location, onCancel, onPost
         material_type: target.material_type,
         item_category: target.item_category,
         item_subcategory: target.item_subcategory,
-        stock_type: target.stock_type,
+        stock_type: stockType,
         units: Number(units),
         qty_kg: qty,
         operation,
@@ -701,7 +733,8 @@ function AdjustDialog({ target, operation, warehouse, location, onCancel, onPost
         location,
       });
       onPosted(
-        `Transaction #${r.transaction.txn_code} posted — ${target.item_name} is now ${formatNumber(r.balance_after_kg)} kg.`
+        `Transaction #${r.transaction.txn_code} posted — ${target.item_name}`
+        + ` (${stockType}) is now ${formatNumber(r.balance_after_kg)} kg.`
         + (r.overdrawn ? " The balance is now negative and will need reconciling." : ""),
       );
     } catch (e) {
@@ -739,6 +772,20 @@ function AdjustDialog({ target, operation, warehouse, location, onCancel, onPost
               ? <> — <span className="text-[#1d7324]">appending to the existing line</span></>
               : null}
         </p>
+
+        <label className="flex items-center gap-2 mt-3 text-[13px] text-[var(--text-primary)] cursor-pointer select-none">
+          <input type="checkbox" checked={offGrade} onChange={(e) => setOffGrade(e.target.checked)}
+                 className="h-4 w-4 accent-[#a8500a]" />
+          <span>Off grade / rejection</span>
+          {switched && (
+            <span className="text-[11px] text-[#a8500a] font-medium">
+              — posting to the {stockType} line instead
+              {availPending ? ", checking its balance…"
+                : avail != null ? `, currently ${formatNumber(avail)} kg`
+                : ", which has no stock here yet"}
+            </span>
+          )}
+        </label>
 
         <div className="grid grid-cols-2 gap-3 mt-4">
           <div>
