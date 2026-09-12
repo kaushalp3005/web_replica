@@ -237,8 +237,14 @@ export default function StockTakeLandingPage() {
     if (!canView) return;
     const ctrl = new AbortController();
     // Filter options failing is not worth an error banner — the dropdowns just
-    // stay empty and every other control keeps working.
-    fetchStockTakeFilterOptions(ctrl.signal).then(setOptions).catch(() => {});
+    // stay empty and every other control keeps working. But it IS worth saying
+    // so: a 500 here is indistinguishable from "no data" on screen, and that is
+    // exactly how a broken response model hid behind four empty dropdowns.
+    fetchStockTakeFilterOptions(ctrl.signal).then(setOptions).catch((e: Error) => {
+      if (e.name !== "AbortError") {
+        console.warn("stock-take: filter options unavailable, dropdowns will be empty:", e.message);
+      }
+    });
     return () => ctrl.abort();
   }, [canView]);
 
