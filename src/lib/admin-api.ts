@@ -368,6 +368,10 @@ export const FLOORS_BY_WAREHOUSE: Record<string, string[]> = {
   "W202": [
     "Lower Basement", "Upper Basement", "First Floor", "First Floor Mezz",
     "Second Floor", "Second Floor Mezz", "Terrace",
+    // Added 2026-09-12. The largest W202 floor the profile never declared —
+    // 301 rows, 51,790 kg, still being counted — so it could be read but not
+    // posted to, and could not be granted to anyone.
+    "Store",
   ],
   "A185": [
     "Roasting Area", "Mezzanine", "Sorting Area", "Printing Area",
