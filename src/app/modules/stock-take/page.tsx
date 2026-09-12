@@ -355,10 +355,23 @@ export default function StockTakeLandingPage() {
                     : "—",
                 },
                 { label: "Current stock (kg)", value: totals ? formatNumber(totals.total_weight) : "—" },
+                // Already counted inside Current stock — off grade is a separate
+                // line per article, not a deduction — so it is shown as a share
+                // of it rather than as another addend.
+                {
+                  label: "Off grade (kg)",
+                  value: totals ? formatNumber(totals.off_grade_weight) : "—",
+                  hint: totals && totals.total_weight > 0
+                    ? `${formatNumber((totals.off_grade_weight / totals.total_weight) * 100, 1)}% of current · ${formatNumber(totals.off_grade_items, 0)} lines`
+                    : undefined,
+                },
               ].map((s) => (
                 <div key={s.label} className="bg-white border border-[var(--aws-border)] rounded-md p-4">
                   <div className="text-[11px] uppercase tracking-wide text-[var(--text-secondary)]">{s.label}</div>
                   <div className="text-[20px] font-semibold text-[var(--text-primary)] mt-1 tabular-nums">{s.value}</div>
+                  {"hint" in s && s.hint && (
+                    <div className="text-[11px] text-[var(--text-secondary)] mt-0.5">{s.hint}</div>
+                  )}
                 </div>
               ))}
             </div>

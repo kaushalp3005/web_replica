@@ -32,6 +32,7 @@ import {
   fetchStockTakeScope,
   formatDate,
   formatNumber,
+  fetchStockBalance,
   listStockTransactions,
   verifyAdjustments,
   type LatestStockResponse,
@@ -241,6 +242,40 @@ function StockAdjustScreen() {
         () => setTxns((prev) => ({ ...prev, [key]: [] })),
       )
       .finally(() => setTxnBusy(null));
+  }
+
+  /** Adopt the existing line when the picked article is already stocked here.
+   *
+   *  ASKS THE SERVER rather than scanning `rows`. `rows` is the filtered,
+   *  first-page view — narrowed by the search box and by a ?item= deep link, and
+   *  capped at PAGE_SIZE — so a local scan reports "new" for any article the
+   *  user is not currently looking at. GET /balance answers for exactly one
+   *  article + stock type + place, which is the same identity the server's
+   *  upsert uses: UPPER(BTRIM(item_name)) plus stock_type.
+   *
+   *  Getting this wrong was never destructive — the upsert merges the posting
+   *  either way — but it left the overdraw guard inert and recorded
+   *  "new article" in the ledger for something counted here for months.
+   *
+   *  On failure the pick still proceeds: an unreachable balance lookup is not a
+   *  reason to block an adjustment, and the server merges correctly regardless. */
+  async function reconcile(t: Target): Promise<Target> {
+    if (!warehouse || !location) return t;
+    try {
+      const bal = await fetchStockBalance({
+        itemName: t.item_name, stockType: t.stock_type,
+        warehouse, location,
+      });
+      if (bal.uncounted && bal.available_kg === 0) return t;
+      return {
+        ...t,
+        is_new_article: false,
+        // What makes the overdraw guard work on an appended article.
+        available_kg: bal.available_kg,
+      };
+    } catch {
+      return t;
+    }
   }
 
   function openFor(item: StockTakeItem, op: StockOperation) {
@@ -587,6 +622,14 @@ function StockAdjustScreen() {
           location={location}
           onCancel={() => setTarget(null)}
           onPosted={(msg) => {
+            // A deep link can pin the view to one article AND one stock type
+            // (?item=&stockType=). Posting off grade against a Fresh-pinned view
+            // writes a row that filter excludes, so the work lands and vanishes —
+            // the same "nothing happened" the verify button had. Drop the focus
+            // when what was just posted would not survive it.
+            if (focused && focusStockType && target.stock_type !== focusStockType) {
+              setFocusCleared(true);
+            }
             setTarget(null); setFlash(msg);
             // The breakdown for this row is now stale; drop it so a re-expand refetches.
             setTxns((prev) => { const n = { ...prev }; delete n[rowKey(target)]; return n; });
@@ -598,7 +641,16 @@ function StockAdjustScreen() {
       {showNew && (
         <NewArticleDialog
           onCancel={() => setShowNew(false)}
-          onPick={(t) => { setShowNew(false); setTarget(t); setOperation("ADDITION"); }}
+          onPick={(t) => {
+            setShowNew(false);
+            setOperation("ADDITION");
+            // Show the dialog immediately, then fill in the existing balance when
+            // the lookup lands — waiting on a round trip before opening would
+            // make every pick feel slow for the sake of one field.
+            setTarget(t);
+            reconcile(t).then((r) => setTarget((cur) =>
+              cur && cur.item_name === t.item_name && cur.stock_type === t.stock_type ? r : cur));
+          }}
         />
       )}
 
@@ -669,12 +721,23 @@ function AdjustDialog({ target, operation, warehouse, location, onCancel, onPost
         <p className="text-[13px] text-[var(--text-primary)] mt-1">{target.item_name}</p>
         <p className="text-[12px] text-[var(--text-secondary)]">
           {[target.material_type, target.item_category, target.item_subcategory].filter(Boolean).join(" · ")}
-          {" · "}{target.stock_type}
+          {" · "}
+          {/* Coloured, not plain text: off grade is a different line for the same
+              article, and posting to the wrong one is invisible afterwards. */}
+          <span className={`px-1.5 py-0.5 rounded-sm text-[11px] ${
+            target.stock_type === "Fresh Stock"
+              ? "bg-[#eaf6ec] text-[#1d7324]" : "bg-[#fdf0e6] text-[#a8500a] font-medium"}`}>
+            {target.stock_type}
+          </span>
         </p>
         <p className="text-[12px] text-[var(--text-secondary)] mt-1">
           {warehouse} · {location}
           {target.available_kg != null && <> — currently <span className="font-medium text-[var(--text-primary)]">{formatNumber(target.available_kg)} kg</span></>}
-          {target.is_new_article && <> — <span className="text-[#a8500a]">new article, never counted here</span></>}
+          {target.is_new_article
+            ? <> — <span className="text-[#a8500a]">new article, never counted here</span></>
+            : target.available_kg != null
+              ? <> — <span className="text-[#1d7324]">appending to the existing line</span></>
+              : null}
         </p>
 
         <div className="grid grid-cols-2 gap-3 mt-4">
@@ -741,6 +804,11 @@ function NewArticleDialog({ onCancel, onPick }: {
   const [sub, setSub] = useState("");
   const [free, setFree] = useState({ name: "", type: "", cat: "", sub: "" });
   const [err, setErr] = useState<string | null>(null);
+  // Off grade is a SEPARATE LINE for the same article, not a property of it:
+  // identity is the name plus the stock type, and 233 articles already exist as
+  // both. So this picks which of the two lines the posting lands on.
+  const [offGrade, setOffGrade] = useState(false);
+  const stockType = offGrade ? "Off Grade/Rejection" : "Fresh Stock";
 
   useEffect(() => {
     if (tab !== "search" || q.trim().length < 2) return;
@@ -776,7 +844,7 @@ function NewArticleDialog({ onCancel, onPick }: {
       material_type: String(s.item_type ?? ""),
       item_category: String(s.item_group ?? ""),
       item_subcategory: String(s.sub_group ?? ""),
-      stock_type: "Fresh Stock",
+      stock_type: stockType,
       sku_id: s.sku_id != null ? Number(s.sku_id) : null,
       is_new_article: false,
       available_kg: null,
@@ -793,6 +861,15 @@ function NewArticleDialog({ onCancel, onPick }: {
         <p className="text-[12px] text-[var(--text-secondary)] mb-3">
           For stock on your floor that has never been counted here.
         </p>
+
+        <label className="flex items-center gap-2 mb-3 text-[13px] text-[var(--text-primary)] cursor-pointer select-none">
+          <input type="checkbox" checked={offGrade} onChange={(e) => setOffGrade(e.target.checked)}
+                 className="h-4 w-4 accent-[#a8500a]" />
+          <span>Off grade / rejection</span>
+          <span className="text-[11px] text-[var(--text-secondary)]">
+            — records against the article&rsquo;s off-grade line, keeping the same name
+          </span>
+        </label>
 
         <div className="inline-flex rounded-[2px] border border-[var(--aws-border-strong)] overflow-hidden mb-3">
           {(["search", "browse", "free"] as const).map((t) => (
@@ -895,7 +972,7 @@ function NewArticleDialog({ onCancel, onPick }: {
                     onClick={() => onPick({
                       item_name: free.name.trim(), material_type: free.type.trim(),
                       item_category: free.cat.trim(), item_subcategory: free.sub.trim(),
-                      stock_type: "Fresh Stock", sku_id: null, is_new_article: true, available_kg: null,
+                      stock_type: stockType, sku_id: null, is_new_article: true, available_kg: null,
                     })}
                     className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[14px] font-medium disabled:opacity-40">
               Continue

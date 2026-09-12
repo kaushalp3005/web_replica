@@ -71,6 +71,11 @@ export interface StockTakeTotals {
   stale_items: number;
   /** Articles that have only ever been adjusted, never counted. */
   never_counted_items: number;
+  /** Off Grade/Rejection, broken out of the same aggregate. It is a separate
+   *  LINE per article, not a property of one, so it is already inside
+   *  total_weight — this says how much of the figure is rejection stock. */
+  off_grade_weight: number;
+  off_grade_items: number;
 }
 
 export interface LatestStockResponse {
