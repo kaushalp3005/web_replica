@@ -33,6 +33,7 @@ import {
   formatDate,
   formatNumber,
   listStockTransactions,
+  verifyAdjustments,
   type LatestStockResponse,
   type StockTakeItem,
   type StockOperation,
@@ -101,6 +102,10 @@ function StockAdjustScreen() {
   // `create`, not `view`: this page exists to post adjustments, so read-only
   // access to it would be a form whose only button 403s.
   const canPost = useHasPermission("stock_take", null, null, "create");
+  // A different action from `create` on purpose: whoever posts an adjustment
+  // must not be the one who signs it off. See 108_stock_take_verification_role.sql.
+  const canVerify = useHasPermission("stock_take", null, null, "verify");
+  const [verifyBusy, setVerifyBusy] = useState<string | null>(null);
 
   // Deep link from the stock list's row arrow: ?item=&stockType=&warehouse=&floor=
   // The article is a FOCUS, not a filter on the request — the list is still
@@ -254,6 +259,28 @@ function StockAdjustScreen() {
 
   // No permission is just another reason the form cannot open, so it rides the
   // branch that already exists rather than adding a second denial path.
+  async function onVerifyRow(it: StockTakeItem) {
+    const key = rowKey(it);
+    setVerifyBusy(key); setFlash(null); setError(null);
+    try {
+      const res = await verifyAdjustments({
+        warehouse, floorName: location,
+        itemName: it.item_name, stockType: it.stock_type,
+      });
+      setFlash(res.verified_count === 0
+        ? `${it.item_name} was already signed off.`
+        : `Verified ${it.item_name} — ${res.verified_count} row${res.verified_count === 1 ? "" : "s"} as ${res.verified_by}.`);
+      // Re-read rather than patching local state: the sign-off lives on the
+      // adjustment row, and the expanded breakdown reads it back from there.
+      load();
+      if (expanded === key) { setExpanded(null); }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Verify failed");
+    } finally {
+      setVerifyBusy(null);
+    }
+  }
+
   const blocked = !canPost || (scope && !scope.can_post);
 
   return (
@@ -454,6 +481,23 @@ function StockAdjustScreen() {
                             <button onClick={() => openFor(it, "SUBTRACTION")} title={`Subtract from ${it.item_name}`}
                                     aria-label={`Subtract from ${it.item_name}`}
                                     className="h-7 w-7 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[#a8500a] font-bold hover:border-[#a8500a]">−</button>
+                            {it.verified ? (
+                              // The point of the indicator: before this, a
+                              // successful verify changed nothing on screen, so
+                              // a working button looked broken.
+                              <span className="inline-flex items-center h-7 px-2 text-[11px] font-medium text-[#1d7324]"
+                                    title={`Verified by ${it.verified_by ?? "—"}${it.verified_at ? ` · ${formatWhen(it.verified_at)}` : ""}`}>
+                                ✓ Verified
+                              </span>
+                            ) : canVerify ? (
+                              <button onClick={() => onVerifyRow(it)}
+                                      disabled={verifyBusy === rowKey(it)}
+                                      title={`Sign off ${it.item_name} here — its counted figure and any adjustments, whatever day they fall on`}
+                                      aria-label={`Verify ${it.item_name}`}
+                                      className="h-7 px-2 rounded-[2px] border border-[#1d7324] bg-white text-[#1d7324] text-[11px] font-medium disabled:opacity-40 hover:bg-[#f0f7f0]">
+                                {verifyBusy === rowKey(it) ? "…" : "Verify"}
+                              </button>
+                            ) : null}
                           </div>
                         </td>
                       </tr>
@@ -474,7 +518,8 @@ function StockAdjustScreen() {
                                     <th className="text-right font-medium py-1 pr-3">Units</th>
                                     <th className="text-right font-medium py-1 pr-3">Qty (kg)</th>
                                     <th className="text-left font-medium py-1 pr-3">Reason</th>
-                                    <th className="text-left font-medium py-1">By</th>
+                                    <th className="text-left font-medium py-1 pr-3">By</th>
+                                    <th className="text-left font-medium py-1">Verified</th>
                                   </tr>
                                 </thead>
                                 <tbody>
@@ -494,7 +539,17 @@ function StockAdjustScreen() {
                                         {t.operation === "ADDITION" ? "+" : "−"}{formatNumber(t.qty_kg ?? 0)}
                                       </td>
                                       <td className="py-1 pr-3">{t.reason}</td>
-                                      <td className="py-1 whitespace-nowrap text-[var(--text-secondary)]">{t.created_by}</td>
+                                      <td className="py-1 pr-3 whitespace-nowrap text-[var(--text-secondary)]">{t.created_by}</td>
+                                      <td className="py-1 whitespace-nowrap">
+                                        {t.verified ? (
+                                          <span className="text-[#1d7324]"
+                                                title={t.verified_at ? `${t.verified_by} · ${formatWhen(t.verified_at)}` : undefined}>
+                                            ✓ {t.verified_by}
+                                          </span>
+                                        ) : (
+                                          <span className="text-[var(--aws-orange)]">Not verified</span>
+                                        )}
+                                      </td>
                                     </tr>
                                   ))}
                                   <tr className="border-t border-[var(--aws-border-strong)]">
@@ -502,7 +557,7 @@ function StockAdjustScreen() {
                                     <td className="py-1 pr-3 text-right tabular-nums font-semibold">
                                       {it.net_adjustment_kg > 0 ? "+" : ""}{formatNumber(it.net_adjustment_kg)}
                                     </td>
-                                    <td colSpan={2} className="py-1 text-[var(--text-muted)]">
+                                    <td colSpan={3} className="py-1 text-[var(--text-muted)]">
                                       {formatNumber(it.counted_weight)} counted → {formatNumber(it.total_weight)} current
                                     </td>
                                   </tr>

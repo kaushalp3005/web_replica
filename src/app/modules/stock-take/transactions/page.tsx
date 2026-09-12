@@ -26,6 +26,7 @@ import {
   type LedgerFilters,
   type LedgerPage,
   type StockOperation,
+  verifyAdjustments,
   type StockTakeFilterOptions,
 } from "@/lib/stock-take";
 
@@ -60,6 +61,10 @@ function LedgerScreen() {
   const initial = useUserInitial();
   useRequireAuth(router.replace);
   const canView = useHasPermission("stock_take");
+  // A separate action from `create`: the stock_take role posts adjustments and
+  // stock_take_verification signs them off, so nobody approves their own work.
+  const canVerify = useHasPermission("stock_take", null, null, "verify");
+  const [verifying, setVerifying] = useState(false);
   const params = useSearchParams();
 
   const [options, setOptions] = useState<StockTakeFilterOptions | null>(null);
@@ -121,6 +126,33 @@ function LedgerScreen() {
    *  set is meaningless against the new one. Applied at the event. */
   function change(fn: () => void) { fn(); setPage(1); setData(null); setError(null); }
 
+  // A sign-off is per DAY — one row per article/place/day carries it — so a
+  // range filter has no single day to sign. Rather than quietly signing today
+  // while a range is on screen, the button names the day it will act on.
+  const verifyDay = mode === "day" && day ? day : "";
+
+  async function onVerify() {
+    setVerifying(true); setNote(null); setError(null);
+    try {
+      // Sign off exactly what is on screen: the day and place currently
+      // filtered. Sending no day would default to today, which is not
+      // necessarily the day being looked at.
+      const res = await verifyAdjustments({
+        day: verifyDay || undefined,
+        warehouse: warehouse || undefined,
+        floorName: location || undefined,
+      });
+      setNote(res.verified_count === 0
+        ? "Nothing left to verify — every adjustment in view is already signed off."
+        : `Verified ${res.verified_count} adjustment${res.verified_count === 1 ? "" : "s"} as ${res.verified_by}.`);
+      load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Verify failed");
+    } finally {
+      setVerifying(false);
+    }
+  }
+
   async function onExport() {
     setBusy(true); setNote(null); setError(null);
     try {
@@ -165,6 +197,15 @@ function LedgerScreen() {
               Every addition and subtraction recorded between physical counts. Entries are final — a correction is a new balancing entry.
             </p>
           </div>
+          {canVerify && (
+            <button onClick={onVerify} disabled={verifying || !canView}
+                    title={verifyDay
+                      ? `Sign off every adjustment on ${verifyDay}${warehouse ? ` in ${warehouse}` : ""}${location ? ` · ${location}` : ""}`
+                      : "Sign off today's adjustments. Pick a single day above to sign off a different one."}
+                    className="h-9 px-4 rounded-[2px] border border-[#1d7324] text-[#1d7324] text-[14px] font-medium disabled:opacity-40 hover:bg-[#f0f7f0]">
+              {verifying ? "Verifying…" : verifyDay ? `Verify ${verifyDay}` : "Verify today"}
+            </button>
+          )}
           <button onClick={onExport} disabled={busy || !canView}
                   className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[14px] font-medium disabled:opacity-40 hover:bg-[var(--aws-orange-hover)]">
             {busy ? "Preparing…" : "Download Excel"}
@@ -265,13 +306,13 @@ function LedgerScreen() {
             <table className="w-full text-[13px] border-collapse">
               <thead>
                 <tr className="bg-[#fafafa]">
-                  {["Txn", "When", "Warehouse", "Floor", "Article", "Stock type", "Units", "Qty (kg)", "Reason", "By"].map((h) => (
+                  {["Txn", "When", "Warehouse", "Floor", "Article", "Stock type", "Units", "Qty (kg)", "Reason", "By", "Verified"].map((h) => (
                     <th key={h} scope="col" className={`${CELL} font-semibold text-[var(--text-primary)] whitespace-nowrap`}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {loading && <tr><td colSpan={10} className="px-3 py-8 text-center text-[var(--text-secondary)]">Loading…</td></tr>}
+                {loading && <tr><td colSpan={11} className="px-3 py-8 text-center text-[var(--text-secondary)]">Loading…</td></tr>}
                 {!loading && rows.length === 0 && (
                   <tr><td colSpan={10} className="px-3 py-8 text-center text-[var(--text-secondary)]">No transactions match these filters.</td></tr>
                 )}
@@ -297,6 +338,15 @@ function LedgerScreen() {
                     </td>
                     <td className={CELL}>{t.reason}</td>
                     <td className={`${CELL} whitespace-nowrap text-[var(--text-secondary)]`}>{t.created_by}</td>
+                    <td className={`${CELL} whitespace-nowrap`}>
+                      {t.verified ? (
+                        <span className="text-[#1d7324]" title={t.verified_at ? `${t.verified_by} · ${formatWhen(t.verified_at)}` : undefined}>
+                          ✓ {t.verified_by}
+                        </span>
+                      ) : (
+                        <span className="text-[var(--aws-orange)]">Not verified</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

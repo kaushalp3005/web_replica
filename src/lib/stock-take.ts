@@ -45,6 +45,11 @@ export interface StockTakeItem {
   transaction_count: number;
   warehouse_count: number;
   floor_count: number;
+  /** Sign-off for the whole line — every entries row behind this figure.
+   *  BOOL_AND server-side: one unverified row means the figure is not signed. */
+  verified: boolean;
+  verified_by: string | null;
+  verified_at: string | null;
 }
 
 export interface StockTakeTotals {
@@ -236,6 +241,59 @@ export interface StockTransaction {
   is_reversal: boolean;
   created_by: string;
   created_at: string;
+  /** The Asia/Kolkata calendar day this posting belongs to, YYYY-MM-DD.
+   *  created_at is an absolute instant whose ISO form is UTC, so slicing a day
+   *  off it would put anything after 18:30 IST on the previous day. */
+  business_day?: string;
+  /** Sign-off, READ from the adjustment row this posting rolls into — the
+   *  ledger is append-only and cannot carry a mutable flag. One sign-off covers
+   *  every posting against the same article and place on the same day. */
+  verified?: boolean;
+  verified_by?: string | null;
+  verified_at?: string | null;
+}
+
+export interface VerifyAdjustmentsInput {
+  /** Specific adjustment rows. Omit to sign off a whole day. */
+  entryIds?: number[];
+  /** IST day, YYYY-MM-DD. Defaults to today. */
+  day?: string;
+  warehouse?: string;
+  floorName?: string;
+  /** Narrow to one article, so a reviewer can sign off a single line. */
+  itemName?: string;
+  stockType?: string;
+}
+
+export interface VerifyAdjustmentsResult {
+  verified_count: number;
+  verified_by: string;
+  rows: {
+    entry_id: number;
+    item_name: string;
+    warehouse: string;
+    floor_name: string;
+    total_weight: number;
+    verified_by: string;
+    verified_at: string;
+  }[];
+}
+
+/** Sign off console stock adjustments. Requires the `verify` action, which the
+ *  stock_take role deliberately does not hold — posting and approving are
+ *  separate jobs. Re-running touches only rows that are still unverified, so a
+ *  second click cannot rewrite who signed a figure off. */
+export async function verifyAdjustments(
+  input: VerifyAdjustmentsInput = {},
+  signal?: AbortSignal,
+): Promise<VerifyAdjustmentsResult> {
+  const res = await apiFetch(`${TXN_BASE}/adjustments/verify`, {
+    method: "POST",
+    body: JSON.stringify(input),
+    signal,
+  });
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, `Verify HTTP ${res.status}`));
+  return (await res.json()) as VerifyAdjustmentsResult;
 }
 
 export interface CreateTransactionInput {
