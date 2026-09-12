@@ -110,6 +110,10 @@ export default function StockTakeLandingPage() {
 
   const [data, setData] = useState<LatestStockResponse | null>(null);
   const [options, setOptions] = useState<StockTakeFilterOptions | null>(null);
+
+  // Floors of the SELECTED warehouse. Without this the Floor list spans every
+  // warehouse at once, so a W202 user is offered A185's areas and picking one
+  // returns an empty table rather than an error.
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -118,6 +122,20 @@ export default function StockTakeLandingPage() {
   const [itemType, setItemType] = useState("");
   const [stockType, setStockType] = useState("");
   const [search, setSearch] = useState("");
+
+  // Changing warehouse must not leave a floor selected that the new warehouse
+  // does not have — the table would come back empty with nothing to explain it.
+  const setWarehouseAndResetFloor = useCallback((w: string) => {
+    setWarehouse(w);
+    setFloorName("");
+  }, []);
+
+  const floorOptions = useMemo<string[]>(() => {
+    if (!options) return [];
+    const byWh = options.floors_by_warehouse;
+    if (!byWh || !warehouse) return options.floors;
+    return byWh[warehouse.trim().toUpperCase()] ?? [];
+  }, [options, warehouse]);
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [page, setPage] = useState(1);
   const [sortBy, setSortBy] = useState<SortKey>("totalWeight");
@@ -349,8 +367,8 @@ export default function StockTakeLandingPage() {
                 className="flex-1 min-w-[220px] h-9 px-3 text-[14px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
               />
               {([
-                ["Warehouse", warehouse, setWarehouse, options?.warehouses],
-                ["Floor", floorName, setFloorName, options?.floors],
+                ["Warehouse", warehouse, setWarehouseAndResetFloor, options?.warehouses],
+                ["Floor", floorName, setFloorName, floorOptions],
                 ["Type", itemType, setItemType, options?.item_types],
                 ["Stock type", stockType, setStockType, options?.stock_types],
               ] as const).map(([label, value, set, opts]) => (

@@ -79,10 +79,18 @@ export interface LatestStockResponse {
 }
 
 export interface StockTakeFilterOptions {
+  /** Scoped to the caller's profile — allowed_warehouses, or every warehouse
+   *  holding stock when the profile does not restrict. */
   warehouses: string[];
+  /** Every floor across `warehouses`, for when no warehouse is selected. */
   floors: string[];
   item_types: string[];
   stock_types: string[];
+  /** Floors per warehouse, so Floor can narrow once a Warehouse is picked.
+   *  Built from floors stock is RECORDED at, not the declared floor profile the
+   *  Adjust form uses: a floor nobody declared can still hold counted stock, and
+   *  a filter that cannot name it would make that stock unreachable. */
+  floors_by_warehouse?: Record<string, string[]>;
 }
 
 export interface LatestStockQuery {
