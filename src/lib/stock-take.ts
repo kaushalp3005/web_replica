@@ -112,6 +112,10 @@ export interface LatestStockQuery {
   stockType?: string[];
   enteredBy?: string;
   search?: string;
+  /** Only lines carrying at least one adjustment. Counted on the ledger half
+   *  of the merge, so a line adjusted +10 then −10 still qualifies — it was
+   *  adjusted twice, and netting to zero is exactly what a reviewer looks for. */
+  adjustedOnly?: boolean;
   verified?: boolean;
   includeDrafts?: boolean;
   /** Latest count on or before this day, YYYY-MM-DD. */
@@ -141,6 +145,7 @@ function buildParams(q: LatestStockQuery): string {
   }
   if (q.enteredBy) p.set("enteredBy", q.enteredBy);
   if (q.search) p.set("search", q.search);
+  if (q.adjustedOnly) p.set("adjustedOnly", "true");
   if (q.verified !== undefined) p.set("verified", String(q.verified));
   if (q.includeDrafts) p.set("includeDrafts", "true");
   if (q.asOf) p.set("asOf", q.asOf);
@@ -360,13 +365,15 @@ export async function createStockTransaction(
 }
 
 export async function listStockTransactions(
-  q: { warehouse?: string; location?: string; itemName?: string; page?: number; pageSize?: number } = {},
+  q: { warehouse?: string; location?: string; itemName?: string; stockType?: StockTypeName;
+       page?: number; pageSize?: number } = {},
   signal?: AbortSignal,
 ): Promise<{ transactions: StockTransaction[]; pagination: { page: number; page_size: number; total: number; total_pages: number } }> {
   const p = new URLSearchParams();
   if (q.warehouse) p.set("warehouse", q.warehouse);
   if (q.location) p.set("location", q.location);
   if (q.itemName) p.set("itemName", q.itemName);
+  if (q.stockType) p.set("stockType", q.stockType);
   if (q.page) p.set("page", String(q.page));
   if (q.pageSize) p.set("pageSize", String(q.pageSize));
   const qs = p.toString();
@@ -380,10 +387,21 @@ export async function listStockTransactions(
 // WHERE clause — an export that filtered differently from the screen it was
 // launched from would hand someone a spreadsheet that disagrees with it.
 
+/** The two values chk_nse_stock_type admits. Half of an article's identity. */
+export type StockTypeName = "Fresh Stock" | "Off Grade/Rejection";
+
 export interface LedgerFilters {
   warehouse?: string;
   location?: string;
+  /** EXACT article name — identity, not a search. The adjust screen's row
+   *  breakdown sends this and must get back one article's postings and no
+   *  neighbour's: nine article pairs in this ledger have one name contained in
+   *  another, so "ZAHIDI DATES" loosened to a substring also matches
+   *  PL ZAHIDI DATES 500G and ZAHIDI DATES 1KG. */
   itemName?: string;
+  /** Substring of the article name, case-insensitive — what a search box sends. */
+  itemSearch?: string;
+  stockType?: StockTypeName;
   operation?: StockOperation;
   /** Exact day, YYYY-MM-DD. Overrides the range server-side. */
   date?: string;
@@ -396,6 +414,8 @@ function ledgerParams(f: LedgerFilters): URLSearchParams {
   if (f.warehouse) p.set("warehouse", f.warehouse);
   if (f.location) p.set("location", f.location);
   if (f.itemName) p.set("itemName", f.itemName);
+  if (f.itemSearch) p.set("itemSearch", f.itemSearch);
+  if (f.stockType) p.set("stockType", f.stockType);
   if (f.operation) p.set("operation", f.operation);
   if (f.date) p.set("date", f.date);
   else {

@@ -40,6 +40,7 @@ import {
   type StockOperation,
   type StockTakeScope,
   type StockTransaction,
+  type StockTypeName,
 } from "@/lib/stock-take";
 
 /** Identity of one table row — item plus stock type, the same pair the aggregate
@@ -56,6 +57,8 @@ function formatWhen(iso: string): string {
 }
 
 const PAGE_SIZE = 200;
+/** Long enough that typing an article name costs one request, not eight. */
+const SEARCH_DEBOUNCE_MS = 250;
 
 const FIELD =
   "h-9 w-full px-3 text-[14px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] disabled:bg-[#f5f5f5] disabled:text-[var(--text-secondary)]";
@@ -127,6 +130,29 @@ function StockAdjustScreen() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
 
+  // A focus narrows to exactly one article (name + stock type, the row's real
+  // identity); the search box narrows by substring. Focus is dismissible.
+  // Declared here rather than beside `rows` because the REQUEST depends on both
+  // — see serverSearch below.
+  const [focusCleared, setFocusCleared] = useState(false);
+  const focused = Boolean(focusItem) && !focusCleared;
+
+  // What the box sends to the server, debounced. The screen keeps filtering
+  // `rows` as you type so it still feels instant, but the filtering that decides
+  // whether an article is reachable AT ALL happens in the query: the response is
+  // one page of PAGE_SIZE lines and six floors here hold more than that, so an
+  // article past the cut cannot be found by narrowing what already arrived.
+  const [adjustedOnly, setAdjustedOnly] = useState(false);
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setQuery(search.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // A pinned article wins: it is the one thing the operator came here for, and
+  // on a long floor it is exactly the case that used to come back missing.
+  const serverSearch = useMemo(() => (focused ? focusItem.trim() : query), [focused, focusItem, query]);
+
   // Per-row transaction breakdown. Netting collapses several postings into one
   // number, which hides "I entered 10 twice" — so each row can be expanded to
   // show the individual entries behind its Adjusted figure.
@@ -186,7 +212,9 @@ function StockAdjustScreen() {
     // No setState before the fetch — `loading` is derived below instead, so this
     // effect never cascades a render (react-hooks/set-state-in-effect).
     fetchLatestStock(
-      { warehouse: [warehouse], floorName: [location], pageSize: PAGE_SIZE, sortBy: "itemName", sortOrder: "asc" },
+      { warehouse: [warehouse], floorName: [location], search: serverSearch || undefined,
+        adjustedOnly: adjustedOnly || undefined,
+        pageSize: PAGE_SIZE, sortBy: "itemName", sortOrder: "asc" },
       signal,
     ).then(
       (d) => { if (id === reqId.current) { setData(d); setError(null); } },
@@ -195,7 +223,7 @@ function StockAdjustScreen() {
         setError(e.message); setData(null);
       },
     );
-  }, [warehouse, location]);
+  }, [warehouse, location, serverSearch, adjustedOnly]);
 
   useEffect(() => {
     const c = new AbortController();
@@ -207,11 +235,6 @@ function StockAdjustScreen() {
   // failed. Changing warehouse/floor clears `data`, which flips this back on.
   const loading = Boolean(warehouse && location && !data && !error);
 
-  // A focus narrows to exactly one article (name + stock type, the row's real
-  // identity); the search box narrows by substring. Focus is dismissible.
-  const [focusCleared, setFocusCleared] = useState(false);
-  const focused = Boolean(focusItem) && !focusCleared;
-
   const rows = useMemo(() => {
     const all = data?.items ?? [];
     if (focused) {
@@ -221,7 +244,11 @@ function StockAdjustScreen() {
         && (!focusStockType || i.stock_type === focusStockType));
     }
     const q = search.trim().toUpperCase();
-    return q ? all.filter((i) => i.item_name.toUpperCase().includes(q)) : all;
+    if (!q) return all;
+    return all.filter((i) =>
+      i.item_name.toUpperCase().includes(q)
+      || (i.item_category ?? "").toUpperCase().includes(q)
+      || (i.item_subcategory ?? "").toUpperCase().includes(q));
   }, [data, search, focused, focusItem, focusStockType]);
 
   function toggleExpand(item: StockTakeItem) {
@@ -230,15 +257,14 @@ function StockAdjustScreen() {
     setExpanded(key);
     if (txns[key]) return;
     setTxnBusy(key);
-    listStockTransactions({ warehouse, location, itemName: item.item_name, pageSize: 200 })
+    // Stock type is filtered BY THE SERVER, not after the fact. Splitting the
+    // response here ran after its pageSize cut, so a line with more postings
+    // than one page would drop whichever of its two stock types sorted later —
+    // and the breakdown would quietly show a Net short of the row above it.
+    listStockTransactions({ warehouse, location, itemName: item.item_name,
+                            stockType: item.stock_type as StockTypeName, pageSize: 200 })
       .then(
-        (r) => setTxns((prev) => ({
-          ...prev,
-          // The ledger endpoint filters by item and place but not by stock type,
-          // so the split is applied here — otherwise a Fresh row would show the
-          // Off Grade postings too.
-          [key]: r.transactions.filter((t) => t.stock_type === item.stock_type),
-        })),
+        (r) => setTxns((prev) => ({ ...prev, [key]: r.transactions })),
         () => setTxns((prev) => ({ ...prev, [key]: [] })),
       )
       .finally(() => setTxnBusy(null));
@@ -412,9 +438,19 @@ function StockAdjustScreen() {
                 <div>
                   <label className={LABEL} htmlFor="q">Find an item</label>
                   <input id="q" className={FIELD} type="search" value={search}
-                         onChange={(e) => setSearch(e.target.value)} placeholder="Filter the list below" />
+                         onChange={(e) => setSearch(e.target.value)} placeholder="Search every article on this floor" />
                 </div>
               </div>
+              <label className="flex items-center gap-2 mt-3 text-[13px] text-[var(--text-primary)] cursor-pointer select-none w-fit">
+                <input type="checkbox" checked={adjustedOnly}
+                       onChange={(e) => { setAdjustedOnly(e.target.checked); setData(null); }}
+                       className="h-4 w-4 accent-[#a8500a]" />
+                <span>Only lines with an adjustment</span>
+                <span className="text-[11px] text-[var(--text-secondary)]">
+                  — hides everything that has only been counted
+                </span>
+              </label>
+
               <p className="mt-2 text-[11px] text-[var(--text-muted)]">
                 {!warehouse
                   ? `Your profile covers ${scope.warehouses.length} warehouse${scope.warehouses.length === 1 ? "" : "s"} — choose one to see its floors.`
@@ -447,6 +483,10 @@ function StockAdjustScreen() {
                 {data?.as_of_date
                   ? <>Stock here as of <span className="font-medium text-[var(--text-primary)]">{formatDate(data.as_of_date)}</span>, including adjustments since.</>
                   : warehouse && location ? "No counted stock at this location yet." : "Choose a warehouse and floor."}
+                {data && data.pagination.total > data.pagination.page_size && (
+                  <> Showing the first {data.pagination.page_size} of {data.pagination.total} lines — type in
+                  {" "}<span className="font-medium text-[var(--text-primary)]">Find an item</span> to reach the rest.</>
+                )}
               </p>
               <button onClick={() => setShowNew(true)} disabled={!warehouse || !location}
                       className="h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] disabled:opacity-40 hover:border-[var(--aws-orange)]">
@@ -475,6 +515,8 @@ function StockAdjustScreen() {
                       <tr><td colSpan={8} className="px-3 py-8 text-center text-[var(--text-secondary)]">
                         {!warehouse || !location ? "Choose a warehouse and floor to see its stock."
                           : focused ? `${focusItem} has no stock at ${warehouse} · ${location}. Pick another floor, or use “+ New article” to record it here.`
+                          : adjustedOnly && search ? `Nothing matching “${search}” has been adjusted here. Untick “Only lines with an adjustment” to see what was counted.`
+                          : adjustedOnly ? "No adjustments have been posted at this location."
                           : search ? `Nothing matches “${search}”. Use “+ New article” if it has never been counted here.`
                           : "No stock counted here. Use “+ New article” to record something."}
                       </td></tr>

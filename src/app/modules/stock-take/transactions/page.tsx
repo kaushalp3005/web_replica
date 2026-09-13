@@ -26,6 +26,7 @@ import {
   type LedgerFilters,
   type LedgerPage,
   type StockOperation,
+  type StockTypeName,
   verifyAdjustments,
   type StockTakeFilterOptions,
 } from "@/lib/stock-take";
@@ -70,7 +71,13 @@ function LedgerScreen() {
   const [options, setOptions] = useState<StockTakeFilterOptions | null>(null);
   const [warehouse, setWarehouse] = useState(params.get("warehouse") ?? "");
   const [location, setLocation] = useState(params.get("floor") ?? "");
+  // Two article filters, and they ask different questions. `itemName` is one
+  // article exactly — it only arrives by deep link (?item=), and is shown as a
+  // removable line so nobody is left wondering why the screen is narrow.
+  // `itemSearch` is the box, a substring.
   const [itemName, setItemName] = useState(params.get("item") ?? "");
+  const [itemSearch, setItemSearch] = useState(params.get("q") ?? "");
+  const [stockType, setStockType] = useState<"" | StockTypeName>("");
   const [operation, setOperation] = useState<"" | StockOperation>("");
   const [mode, setMode] = useState<"range" | "day">("range");
   const [day, setDay] = useState("");
@@ -87,11 +94,13 @@ function LedgerScreen() {
     warehouse: warehouse || undefined,
     location: location || undefined,
     itemName: itemName || undefined,
+    itemSearch: itemSearch || undefined,
+    stockType: stockType || undefined,
     operation: operation || undefined,
     date: mode === "day" ? (day || undefined) : undefined,
     dateFrom: mode === "range" ? (from || undefined) : undefined,
     dateTo: mode === "range" ? (to || undefined) : undefined,
-  }), [warehouse, location, itemName, operation, mode, day, from, to]);
+  }), [warehouse, location, itemName, itemSearch, stockType, operation, mode, day, from, to]);
 
   useEffect(() => {
     if (!canView) return;
@@ -221,7 +230,7 @@ function LedgerScreen() {
         {error && <section className="bg-white border border-[#d13212] rounded-md p-4 mb-4 text-[13px] text-[#d13212]">{error}</section>}
 
         <section className="bg-white border border-[var(--aws-border)] rounded-md p-4 mb-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
             <div>
               <label className={LABEL} htmlFor="w">Warehouse</label>
               <select id="w" className={FIELD} value={warehouse} onChange={(e) => change(() => setWarehouse(e.target.value))}>
@@ -238,8 +247,17 @@ function LedgerScreen() {
             </div>
             <div>
               <label className={LABEL} htmlFor="i">Article</label>
-              <input id="i" className={FIELD} value={itemName} placeholder="Exact article name"
-                     onChange={(e) => change(() => setItemName(e.target.value))} />
+              <input id="i" className={FIELD} value={itemSearch} placeholder="Search by name"
+                     onChange={(e) => change(() => setItemSearch(e.target.value))} />
+            </div>
+            <div>
+              <label className={LABEL} htmlFor="st">Stock type</label>
+              <select id="st" className={FIELD} value={stockType}
+                      onChange={(e) => change(() => setStockType(e.target.value as "" | StockTypeName))}>
+                <option value="">Both</option>
+                <option value="Fresh Stock">Fresh Stock</option>
+                <option value="Off Grade/Rejection">Off Grade / Rejection</option>
+              </select>
             </div>
             <div>
               <label className={LABEL} htmlFor="o">Operation</label>
@@ -251,6 +269,15 @@ function LedgerScreen() {
               </select>
             </div>
           </div>
+
+          {itemName && (
+            <p className="mt-3 text-[12px] text-[var(--text-secondary)]">
+              Showing one article exactly: <span className="font-medium text-[var(--text-primary)]">{itemName}</span>
+              {" — "}
+              <button onClick={() => change(() => setItemName(""))}
+                      className="underline hover:text-[var(--aws-orange)]">show all articles</button>
+            </p>
+          )}
 
           <div className="mt-3 flex flex-wrap items-end gap-3">
             <div className="inline-flex rounded-[2px] border border-[var(--aws-border-strong)] overflow-hidden">
@@ -281,7 +308,8 @@ function LedgerScreen() {
             )}
             <div className="flex-1" />
             <button onClick={() => change(() => {
-              setWarehouse(""); setLocation(""); setItemName(""); setOperation("");
+              setWarehouse(""); setLocation(""); setItemName(""); setItemSearch("");
+              setStockType(""); setOperation("");
               setDay(""); setFrom(""); setTo("");
             })} className="h-9 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:border-[var(--aws-orange)]">
               Clear filters
