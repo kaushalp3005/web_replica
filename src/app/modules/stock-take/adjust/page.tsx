@@ -482,7 +482,14 @@ function StockAdjustScreen() {
               <p className="text-[13px] text-[var(--text-secondary)]">
                 {data?.as_of_date
                   ? <>Stock here as of <span className="font-medium text-[var(--text-primary)]">{formatDate(data.as_of_date)}</span>, including adjustments since.</>
-                  : warehouse && location ? "No counted stock at this location yet." : "Choose a warehouse and floor."}
+                  : !warehouse || !location ? "Choose a warehouse and floor."
+                  /* Never counted, but stock HAS been posted here. Saying "no
+                     counted stock" over a populated table reads as "nothing is
+                     here", which is what made 33.8 tonnes on A185 Cold look
+                     lost. */
+                  : rows.length > 0
+                    ? <>Never physically counted here — these figures come from adjustments alone.</>
+                    : "No counted stock at this location yet."}
                 {data && data.pagination.total > data.pagination.page_size && (
                   <> Showing the first {data.pagination.page_size} of {data.pagination.total} lines — type in
                   {" "}<span className="font-medium text-[var(--text-primary)]">Find an item</span> to reach the rest.</>
