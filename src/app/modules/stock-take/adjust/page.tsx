@@ -35,6 +35,7 @@ import {
   fetchStockBalance,
   listStockTransactions,
   verifyAdjustments,
+  verifyTransactions,
   type LatestStockResponse,
   type StockTakeItem,
   type StockOperation,
@@ -110,6 +111,9 @@ function StockAdjustScreen() {
   // must not be the one who signs it off. See 108_stock_take_verification_role.sql.
   const canVerify = useHasPermission("stock_take", null, null, "verify");
   const [verifyBusy, setVerifyBusy] = useState<string | null>(null);
+  // Keyed by txn_id, not by row: a reviewer ticks postings one at a time down an
+  // expanded breakdown, and a row-level flag would grey out all of them at once.
+  const [txnVerifyBusy, setTxnVerifyBusy] = useState<number | null>(null);
 
   // Deep link from the stock list's row arrow: ?item=&stockType=&warehouse=&floor=
   // The article is a FOCUS, not a filter on the request — the list is still
@@ -316,6 +320,46 @@ function StockAdjustScreen() {
       available_kg: item.total_weight,
     });
     setOperation(op);
+  }
+
+  /** Sign off, or withdraw, ONE posting.
+   *
+   *  The line follows the postings: signing the last unsigned one signs the
+   *  whole line off, and un-ticking any one takes the line's signature back off.
+   *  The server does that reconciliation and reports it in `entries_reconciled`,
+   *  so this only has to re-read — patching local state would have to
+   *  re-implement the rule in the browser and would drift the first time the
+   *  rule changed.
+   *
+   *  BOTH READS ARE REFRESHED. The breakdown shows the posting's own sign-off,
+   *  the row above it shows the line's, and after a reconcile those two are no
+   *  longer independent.
+   */
+  async function onToggleTxnVerified(t: StockTransaction, it: StockTakeItem) {
+    const key = rowKey(it);
+    setTxnVerifyBusy(t.txn_id); setFlash(null); setError(null);
+    try {
+      const next = !t.verified;
+      const res = await verifyTransactions([t.txn_id], next);
+      const fresh = await listStockTransactions({
+        warehouse, location, itemName: it.item_name,
+        stockType: it.stock_type as StockTypeName, pageSize: 200 });
+      setTxns((prev) => ({ ...prev, [key]: fresh.transactions }));
+      setFlash(
+        res.changed === 0
+          ? `#${t.txn_code} was already ${next ? "verified" : "unverified"}.`
+          : `#${t.txn_code} ${next ? "verified" : "unverified"}.`
+            + (res.entries_reconciled
+               ? ` ${it.item_name} is now ${next ? "fully signed off" : "no longer signed off"}.`
+               : ""));
+      // Only when the line itself moved: re-reading the whole list on every
+      // tick would collapse the breakdown the reviewer is working down.
+      if (res.entries_reconciled) load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Verify failed");
+    } finally {
+      setTxnVerifyBusy(null);
+    }
   }
 
   // No permission is just another reason the form cannot open, so it rides the
@@ -625,7 +669,32 @@ function StockAdjustScreen() {
                                       <td className="py-1 pr-3">{t.reason}</td>
                                       <td className="py-1 pr-3 whitespace-nowrap text-[var(--text-secondary)]">{t.created_by}</td>
                                       <td className="py-1 whitespace-nowrap">
-                                        {t.verified ? (
+                                        {/* A verifier gets a toggle; everyone else sees the
+                                            same text as before. Signing the last unsigned
+                                            posting signs the whole line off, and un-ticking
+                                            any one takes that signature back off — the
+                                            server reconciles, onToggleTxnVerified re-reads. */}
+                                        {canVerify ? (
+                                          <button
+                                            type="button"
+                                            disabled={txnVerifyBusy !== null}
+                                            onClick={() => onToggleTxnVerified(t, it)}
+                                            title={t.verified
+                                              ? `Signed off by ${t.verified_by}${t.verified_at ? ` · ${formatWhen(t.verified_at)}` : ""}. Click to withdraw.`
+                                              : "Click to sign this posting off."}
+                                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[2px] border text-[11px] disabled:opacity-50 disabled:cursor-not-allowed ${
+                                              t.verified
+                                                ? "border-[#1d7324] text-[#1d7324] hover:bg-[#eaf6ec]"
+                                                : "border-[var(--aws-orange)] text-[var(--aws-orange)] hover:bg-[#fdf0e6]"
+                                            }`}
+                                          >
+                                            {txnVerifyBusy === t.txn_id
+                                              ? "…"
+                                              : t.verified
+                                                ? `✓ ${t.verified_by}`
+                                                : "Not verified"}
+                                          </button>
+                                        ) : t.verified ? (
                                           <span className="text-[#1d7324]"
                                                 title={t.verified_at ? `${t.verified_by} · ${formatWhen(t.verified_at)}` : undefined}>
                                             ✓ {t.verified_by}

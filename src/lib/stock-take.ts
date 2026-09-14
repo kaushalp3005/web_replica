@@ -255,9 +255,12 @@ export interface StockTransaction {
    *  created_at is an absolute instant whose ISO form is UTC, so slicing a day
    *  off it would put anything after 18:30 IST on the previous day. */
   business_day?: string;
-  /** Sign-off, READ from the adjustment row this posting rolls into — the
-   *  ledger is append-only and cannot carry a mutable flag. One sign-off covers
-   *  every posting against the same article and place on the same day. */
+  /** Sign-off on THIS posting, stored on the ledger row itself since
+   *  110_stocktake_txn_verification.sql. The ledger is still append-only — the
+   *  posting's own facts are frozen — but these three columns are exempt,
+   *  because whether someone has checked a posting is not part of the posting.
+   *  Kept in step with the line: the adjustment row in new_stock_entries is
+   *  verified exactly when every posting behind it is. */
   verified?: boolean;
   verified_by?: string | null;
   verified_at?: string | null;
@@ -273,11 +276,16 @@ export interface VerifyAdjustmentsInput {
   /** Narrow to one article, so a reviewer can sign off a single line. */
   itemName?: string;
   stockType?: string;
+  /** false withdraws the sign-off, clearing the name and time with it. */
+  verified?: boolean;
 }
 
 export interface VerifyAdjustmentsResult {
   verified_count: number;
-  verified_by: string;
+  verified?: boolean;
+  /** How many individual postings the line's sign-off dragged with it (rule 2). */
+  transactions_cascaded?: number;
+  verified_by: string | null;
   rows: {
     entry_id: number;
     item_name: string;
@@ -287,6 +295,45 @@ export interface VerifyAdjustmentsResult {
     verified_by: string;
     verified_at: string;
   }[];
+}
+
+export interface VerifyTransactionsResult {
+  /** Postings whose state actually moved. Re-ticking a signed one returns 0. */
+  changed: number;
+  /** Lines the reconciliation moved as a consequence (rule 1). */
+  entries_reconciled: number;
+  verified: boolean;
+  transactions: {
+    txn_id: number;
+    txn_code: string;
+    verified: boolean;
+    verified_by: string | null;
+    verified_at: string | null;
+  }[];
+}
+
+/** Sign off (or withdraw) individual postings by txn_id.
+ *
+ *  THE TWO HALVES ARE ONE INVARIANT. A line in new_stock_entries is verified
+ *  exactly when every posting behind it — same article, place, stock type and
+ *  IST day — is verified. So signing the last unsigned posting here signs the
+ *  line off by itself, and un-ticking any one of them takes the line's signature
+ *  back off. `entries_reconciled` says how many lines moved as a result, which
+ *  is the caller's cue to re-read rather than patch local state.
+ *
+ *  Requires the `verify` action, the same gate verifyAdjustments uses. */
+export async function verifyTransactions(
+  txnIds: number[],
+  verified = true,
+  signal?: AbortSignal,
+): Promise<VerifyTransactionsResult> {
+  const res = await apiFetch(`${TXN_BASE}/transactions/verify`, {
+    method: "POST",
+    body: JSON.stringify({ txnIds, verified }),
+    signal,
+  });
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, `Verify HTTP ${res.status}`));
+  return (await res.json()) as VerifyTransactionsResult;
 }
 
 /** Sign off console stock adjustments. Requires the `verify` action, which the
