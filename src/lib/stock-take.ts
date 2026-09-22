@@ -101,6 +101,16 @@ export interface StockTakeFilterOptions {
    *  Adjust form uses: a floor nobody declared can still hold counted stock, and
    *  a filter that cannot name it would make that stock unreachable. */
   floors_by_warehouse?: Record<string, string[]>;
+  /** What people call a warehouse, by code: D39 -> "Savla D-39". Codes with no
+   *  name are absent; show the code. */
+  warehouse_labels?: Record<string, string>;
+  /** Which of `warehouses` are the third-party cold stores (Savla, Rishi, ...). */
+  cold_warehouses?: string[];
+}
+
+/** "Savla D-39" for D39; the code itself when the server sent no name for it. */
+export function warehouseLabel(code: string, labels?: Record<string, string>): string {
+  return labels?.[code] ?? code;
 }
 
 export interface LatestStockQuery {
@@ -212,6 +222,8 @@ export interface StockTakeScope {
    *  chosen. The server builds this from the ERP profile (FLOORS_BY_WAREHOUSE),
    *  falling back to the data only for warehouses that declare no floors. */
   floors_by_warehouse?: Record<string, string[]>;
+  /** D39 -> "Savla D-39", as on the Stock Take page. */
+  warehouse_labels?: Record<string, string>;
   can_post: boolean;
   blocked_reason: "no_stock_data" | "no_floor_access" | "no_warehouse_access" | null;
   warehouses_unrestricted?: boolean;
@@ -396,6 +408,49 @@ export async function fetchStockBalance(
   const res = await apiFetch(`${TXN_BASE}/balance?${p}`, { signal });
   if (!res.ok) throw new Error(await readApiErrorMessage(res, `Balance HTTP ${res.status}`));
   return (await res.json()) as StockBalance;
+}
+
+/** One article on one warehouse + floor, as GET /floor-stock returns it. Same
+ *  rule as the Stock Take screen: the latest count THERE, plus adjustments posted
+ *  there since. Fresh Stock and Off Grade/Rejection are separate rows. */
+export interface FloorStockItem {
+  item_name: string;
+  item_type: string | null;
+  item_category: string | null;
+  item_subcategory: string | null;
+  stock_type: string;
+  /** The floor app's pack weight, kg per unit (0.05, 1.0; 0 = not recorded) — NOT a unit
+   *  name. The quantity is a count of those units (pieces for packaging). */
+  unit_uom: number | null;
+  counted_quantity: number;
+  counted_weight: number;
+  net_adjustment_kg: number;
+  net_adjustment_units: number;
+  available_quantity: number;
+  available_kg: number;
+  /** Last physical count at this place (YYYY-MM-DD); null = adjusted here, never counted here. */
+  last_counted_date: string | null;
+  entry_count: number;
+  txn_count: number;
+}
+
+export interface FloorStockResponse {
+  /** Unhyphenated, as the entries table stores it (W202). */
+  warehouse: string;
+  floor: string;
+  /** Largest available first. */
+  items: FloorStockItem[];
+}
+
+/** Everything recorded on one warehouse + floor — the job card's material tab. */
+export async function fetchFloorStock(
+  q: { warehouse: string; floor: string },
+  signal?: AbortSignal,
+): Promise<FloorStockResponse> {
+  const p = new URLSearchParams({ warehouse: q.warehouse, floorName: q.floor });
+  const res = await apiFetch(`${BASE}/floor-stock?${p}`, { signal });
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, `Floor stock HTTP ${res.status}`));
+  return (await res.json()) as FloorStockResponse;
 }
 
 export async function createStockTransaction(
@@ -599,4 +654,58 @@ export async function downloadEntriesExcel(
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   return { rows, drafts, filename };
+}
+
+// ── Current stock export ───────────────────────────────────────────────────
+// The landing page's figures kept apart per warehouse and floor, for every
+// warehouse the caller may see (the cold stores included): a Summary sheet with
+// a total per warehouse and floor, and every item under it. Same filters as the
+// page, so the file matches the screen it was downloaded from.
+
+export interface StockExportFilters {
+  warehouse?: string[];
+  floorName?: string[];
+  itemType?: string[];
+  category?: string[];
+  subcategory?: string[];
+  stockType?: string[];
+  search?: string;
+  asOf?: string;
+}
+
+/** Download current stock by warehouse and floor as .xlsx. */
+export async function downloadStockExcel(
+  f: StockExportFilters = {},
+): Promise<{ rows: number; filename: string }> {
+  const p = new URLSearchParams();
+  const lists: [keyof StockExportFilters, string][] = [
+    ["warehouse", "warehouse"],
+    ["floorName", "floorName"],
+    ["itemType", "itemType"],
+    ["category", "category"],
+    ["subcategory", "subcategory"],
+    ["stockType", "stockType"],
+  ];
+  for (const [key, name] of lists) {
+    const v = f[key] as string[] | undefined;
+    if (v?.length) v.forEach((one) => p.append(name, one));
+  }
+  if (f.search) p.set("search", f.search);
+  if (f.asOf) p.set("asOf", f.asOf);
+  const qs = p.toString();
+  const res = await apiFetch(`${BASE}/latest-stock/export${qs ? `?${qs}` : ""}`);
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, `Download HTTP ${res.status}`));
+  const rows = Number(res.headers.get("X-Total-Rows") ?? 0);
+  const blob = await res.blob();
+  const cd = res.headers.get("Content-Disposition") ?? "";
+  const filename = /filename="([^"]+)"/.exec(cd)?.[1] ?? "Current_Stock.xlsx";
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { rows, filename };
 }

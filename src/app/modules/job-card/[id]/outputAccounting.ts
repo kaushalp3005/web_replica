@@ -90,34 +90,86 @@ function lineKey(bomLineId: number | null | undefined, name: string | null | und
   return bomLineId != null ? `b${bomLineId}` : `n${name ?? ""}`;
 }
 
+/** The fields of a catalogue article the key resolution reads. */
+export type ArticleKeyLike = { bom_line_id: number | null; material_sku_name: string };
+
+const nameKey = (n: string | null | undefined) => (n ?? "").trim().toUpperCase();
+
+/** A saved row's grid key. A row with no bom_line_id resolves to the catalogue
+ *  article of the same name (UPPER/TRIM), preferring one with a BOM line — so a
+ *  figure saved for an added article still shows after the BOM module gains that
+ *  article (the add is then "superseded"), and PM stays PM in the RM/PM maps. */
+export function resolveRowKey(
+  bomLineId: number | null | undefined,
+  name: string | null | undefined,
+  articles?: readonly ArticleKeyLike[],
+): string {
+  if (bomLineId != null) return `b${bomLineId}`;
+  if (articles) {
+    const k = nameKey(name);
+    const matches = articles.filter((a) => nameKey(a.material_sku_name) === k);
+    const withLine = matches.find((a) => a.bom_line_id != null);
+    if (withLine) return `b${withLine.bom_line_id}`;
+    if (matches[0]) return `n${matches[0].material_sku_name}`;
+  }
+  return lineKey(bomLineId, name);
+}
+
+const toNum = (v: unknown) => {
+  const n = typeof v === "number" ? v : parseFloat(String(v ?? ""));
+  return Number.isFinite(n) ? n : 0;
+};
+
 /** Material Consumption inputs, keyed like the grid. Reads the operator's
- *  recorded `actual_consumed_qty` (job_card_material_consumption_v2). */
+ *  recorded `actual_consumed_qty` (job_card_material_consumption_v2). Rows at
+ *  0 (or below) are skipped, so a cleared figure — saved as 0 — shows empty.
+ *  With `articles`, a row with no bom_line_id resolves to its article by name
+ *  (resolveRowKey).
+ *
+ *  Under one batch, the batch's own row wins over a legacy no-batch twin
+ *  (matchesBatch shows those under every batch), whatever their order — and a
+ *  batch row cleared to 0 hides the twin. Otherwise the twin's figure would
+ *  come back after a clear, and the next save would write it into the batch. */
 export function consumptionStateFromDetail(
   lines: ConsumptionLineLike[] | undefined | null,
   batchFilter: BatchFilter = undefined,
+  articles?: readonly ArticleKeyLike[],
 ): Record<string, string> {
   const out: Record<string, string> = {};
+  const ownKeys = new Set<string>();
+  const legacy: Record<string, string> = {};
   for (const c of lines ?? []) {
     if (!matchesBatch(c, batchFilter)) continue;
     const q = c.actual_consumed_qty;
     if (q == null || q === "") continue;
-    out[lineKey(c.bom_line_id, c.material_sku_name)] = String(q);
+    const k = resolveRowKey(c.bom_line_id, c.material_sku_name, articles);
+    const twin = typeof batchFilter === "number" && c.batch_id == null;
+    if (!twin) ownKeys.add(k);
+    if (!(toNum(q) > 0)) continue;
+    if (twin) legacy[k] = String(q);
+    else out[k] = String(q);
+  }
+  for (const [k, v] of Object.entries(legacy)) {
+    if (!ownKeys.has(k)) out[k] = v;
   }
   return out;
 }
 
 /** Balance Material per-article inputs. Only the per-article `returned` rows
- *  feed this grid; control_sample / extra_given are surfaced elsewhere. */
+ *  feed this grid; control_sample / extra_given are surfaced elsewhere. With
+ *  `articles`, a row with no bom_line_id resolves to its article by name
+ *  (resolveRowKey). */
 export function balanceStateFromDetail(
   rows: BalanceRowLike[] | undefined | null,
   batchFilter: BatchFilter = undefined,
+  articles?: readonly ArticleKeyLike[],
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const b of rows ?? []) {
     if (!matchesBatch(b, batchFilter)) continue;
     if (b.balance_type !== "returned") continue;
     if (b.qty_kg == null || b.qty_kg === "") continue;
-    out[lineKey(b.bom_line_id, b.material_name)] = String(b.qty_kg);
+    out[resolveRowKey(b.bom_line_id, b.material_name, articles)] = String(b.qty_kg);
   }
   return out;
 }
@@ -135,11 +187,23 @@ export function rejectionsFromDetail(
   batchFilter: BatchFilter = undefined,
 ): RejectionRow[] {
   const rows: RejectionRow[] = [];
+  // As for consumption: under one batch, a (category, article) row of the
+  // batch hides a legacy no-batch twin, even when it was cleared to 0.
+  const bpKey = (bp: ByproductRowLike) => `${bp.category ?? ""}|${nameKey(bp.material_name)}`;
+  const ownKeys = new Set<string>();
+  if (typeof batchFilter === "number") {
+    for (const bp of byproducts ?? []) {
+      if (bp.batch_id === batchFilter) ownKeys.add(bpKey(bp));
+    }
+  }
   for (const bp of byproducts ?? []) {
     if (!matchesBatch(bp, batchFilter)) continue;
     const cat = bp.category ?? "";
     if (cat === "control_sample") continue;
     if (cat.startsWith("pm_")) continue;
+    if (typeof batchFilter === "number" && bp.batch_id == null && ownKeys.has(bpKey(bp))) continue;
+    // A cleared off-grade row is saved as 0; it must not come back as a "0" row.
+    if (!(toNum(bp.qty_kg) > 0)) continue;
     rows.push({
       category: cat,
       // Migration 034 — article attribution persisted server-side.
@@ -153,6 +217,40 @@ export function rejectionsFromDetail(
     });
   }
   return rows;
+}
+
+/** Keys to send as consumed 0: saved (as last seeded) above 0, now empty or 0.
+ *  `seeded` must be what the inputs were last seeded with, not the live server
+ *  memo — that one moves on every 60 s poll while the form is dirty, and would
+ *  zero a figure someone else saved meanwhile. */
+export function clearedConsumptionKeys(
+  seeded: Record<string, string>,
+  current: Record<string, string>,
+): string[] {
+  return Object.keys(seeded).filter((k) => toNum(seeded[k]) > 0 && !(toNum(current[k]) > 0));
+}
+
+const rejKey = (r: RejectionRow) => `${r.category}|${nameKey(r.materialName)}`;
+
+/** Off-grade rows to send as 0: seeded (category + article) rows the operator
+ *  removed, zeroed or pointed at another article. No (category, no-article)
+ *  zero when the payload has an attributed row in that category —
+ *  save_byproducts deletes those itself. */
+export function clearedRejections(seeded: readonly RejectionRow[], outgoing: readonly RejectionRow[]): RejectionRow[] {
+  const live = outgoing.filter((r) => r.category && toNum(r.qty) > 0);
+  const liveKeys = new Set(live.map(rejKey));
+  const attributed = new Set(live.filter((r) => r.materialName.trim()).map((r) => r.category));
+  const out: RejectionRow[] = [];
+  const seen = new Set<string>();
+  for (const r of seeded) {
+    if (!r.category || !(toNum(r.qty) > 0)) continue;
+    const k = rejKey(r);
+    if (liveKeys.has(k) || seen.has(k)) continue;
+    if (!r.materialName.trim() && attributed.has(r.category)) continue;
+    seen.add(k);
+    out.push({ ...r, qty: "0" });
+  }
+  return out;
 }
 
 /** R10/C6 — pull the saved control_sample qty (kg) from the JC detail

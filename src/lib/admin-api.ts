@@ -364,6 +364,14 @@ export const WAREHOUSE_OPTIONS: { value: string; label: string }[] = [
   { value: "Supreme", label: "Supreme" },
 ];
 
+// What a user's profile may be granted: the list above plus Eskimo, the fifth
+// cold store (its stock is on Stock Take). Kept apart from WAREHOUSE_OPTIONS
+// because purchase's walk-in form offers that list as destinations.
+export const GRANTABLE_WAREHOUSE_OPTIONS: { value: string; label: string }[] = [
+  ...WAREHOUSE_OPTIONS,
+  { value: "Eskimo", label: "Eskimo" },
+];
+
 export const FLOORS_BY_WAREHOUSE: Record<string, string[]> = {
   "W202": [
     "Lower Basement", "Upper Basement", "First Floor", "First Floor Mezz",

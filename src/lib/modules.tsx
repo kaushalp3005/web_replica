@@ -162,6 +162,19 @@ function StockTakeIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function StoresIcon(props: SVGProps<SVGSVGElement>) {
+  // A shelf grid — the racked store the tile stands for. Deliberately unlike
+  // Stock Take's counted cartons and Inventory Ledger's ruled book next to it.
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <rect x="3" y="3" width="18" height="18" rx="1.5" />
+      <path d="M3 9h18M3 15h18" />
+      <path d="M9 3v18M15 3v18" />
+      <path d="M5.5 7.2h2M11 7.2h2M17 13.2h2M5.5 19.2h2" />
+    </svg>
+  );
+}
+
 export const MODULES: ModuleItem[] = [
   {
     title: "Purchase",
@@ -278,6 +291,28 @@ export const MODULES: ModuleItem[] = [
     Icon: BomIcon,
   },
   {
+    title: "Stores",
+    description:
+      "Material requests sent from job cards' Material allocation tab — every request in one table with its full report on hover, issued or cancelled from here.",
+    badge: "Inventory",
+    stat: "Production Indents",
+    route: "stores",
+    implemented: true,
+    // Admins plus store_head, which is scoped in through ROLE_MODULE_SCOPE (the
+    // scoped branch of the /modules filter ignores adminOnly); adminOnly only hides
+    // the tile from UNSCOPED non-admins. The one sub-module (Production Indents)
+    // lists the floor requisitions raised from job cards via
+    // /api/v1/floor-requisitions, so the real gate is
+    // production.floor_requisitions.{view,issue,cancel} (app/db/111: admin,
+    // floor_manager, store_head); these flags only decide who sees the tile.
+    // Opening it to a role is a ROLE_MODULE_SCOPE entry ("stores/production-indents")
+    // for a scoped role, or - for an unscoped role - dropping this adminOnly flag
+    // AND adding an allowedRoles entry (the /modules filter checks !adminOnly
+    // first, so allowedRoles alone does nothing while the flag is set).
+    adminOnly: true,
+    Icon: StoresIcon,
+  },
+  {
     title: "Stock Take",
     description:
       "Counted stock by article and place, with an append-only adjustment ledger and Excel exports.",
@@ -331,7 +366,11 @@ export const ROLE_MODULE_SCOPE: Record<string, string[]> = {
   // backend, where 085 grants store_head purchase.material_in.* and nothing
   // else, so purchase.po.* / vendor.* would 403 anyway. The scope also
   // overrides Purchase's adminOnly flag.
-  store_head:    ["purchase/material-in"],
+  // …plus Floor Requisitions, where stores issues what the floor asked for from a
+  // job card (production.floor_requisitions.{view,issue,cancel}, app/db/111), and
+  // the same requests under Stores → Production Indents (table + request report).
+  // That sub-route key also shows the Stores tile, overriding its adminOnly flag.
+  store_head:    ["purchase/material-in", "production/floor-requisitions", "stores/production-indents"],
   // Scoped production roles. Keys are either a top-level module route
   // ("job-card") or a "<module>/<sub>" sub-route for finer gating WITHIN a
   // landing page — SO Creation / Planning / Plan List / Production Indents all

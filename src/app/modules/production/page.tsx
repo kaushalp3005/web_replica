@@ -38,6 +38,7 @@ const SUB_MODULES: SubModule[] = [
   { group: "Execution",  title: "Store Dashboard",    description: "Warehouse-side allocation and dispatch summary.",                                                                                                      route: "/modules/production/store",       implemented: false, hidden: true },
   { group: "Inventory",  title: "Indents",            description: "Raise and track RM / PM indents to the warehouse.",                                                                                                    route: "/modules/production/indents",     implemented: false, hidden: true },
   { group: "Inventory",  title: "Production Indents", description: "Maker-checker FG/SFG production indents and RM/PM purchase indents.",                                                                                  route: "/modules/production/prod-indents",implemented: true },
+  { group: "Inventory",  title: "Floor Requisitions", description: "Material the floor requested from job cards · issue it, or cancel it with a reason.",                                                   route: "/modules/production/floor-requisitions", implemented: true },
   { group: "Monitoring", title: "QC Dashboard",       description: "Aggregate QC outcomes and pending sign-offs.",                                                                                                         route: "/modules/production/qc",          implemented: false, hidden: true },
   { group: "Monitoring", title: "Alerts",             description: "Open alerts requiring operator attention.",                                                                                                            route: "/modules/production/alerts",      implemented: false, hidden: true },
 ];
@@ -64,12 +65,15 @@ export default function ProductionLandingPage() {
   // something to do on the page, and each tab self-gates from there.
   const canSeeProdIndents = useHasPermission("production", "production_indents", null, "view");
   const canSeePurchIndents = useHasPermission("production", "indents", null, "view");
+  // Floor Requisitions: store issues what the floor requested from a job card.
+  const canSeeFloorReqs = useHasPermission("production", "floor_requisitions", null, "view");
   // Route → required permission for the tiles covered by the SO/Planning
   // permission map. Tiles not listed here keep their role-scope gate only.
   function tileAllowed(route: string): boolean {
     if (route === "/modules/production/so-creation") return canSeeSo;
     if (route === "/modules/production/planning" || route === "/modules/production/plan-list") return canSeePlans;
     if (route === "/modules/production/prod-indents") return canSeeProdIndents || canSeePurchIndents;
+    if (route === "/modules/production/floor-requisitions") return canSeeFloorReqs;
     return true;
   }
 

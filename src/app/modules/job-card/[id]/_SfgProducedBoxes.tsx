@@ -75,6 +75,9 @@ const cellInput =
   "outline-none focus:border-[#9a393e] disabled:bg-[var(--surface-subtle)] disabled:text-[var(--text-muted)]";
 const th =
   "px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap";
+// A box card's field label (below md) reads as its table column header does.
+const cardLabel =
+  "flex flex-col gap-0.5 text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]";
 const smallBtn =
   "h-7 px-2 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white " +
   "hover:border-[var(--aws-navy)] disabled:opacity-50 disabled:cursor-not-allowed";
@@ -406,14 +409,70 @@ function BatchGroupCard({
     void saveAndPrint(inRange);
   }
 
+  // Each saved box's row state AND its controls, built ONCE here: the table (md
+  // and up) and the card list (below md) both render these, so the two layouts
+  // always carry the same values, handlers and locked state.
+  const rowViews = pageBoxes.map((b) => {
+    // Editable when the box status allows AND the role has box_printing/create.
+    const locked = !isEditable(b) || !canManageBoxes; // PENDING/PRINTED editable; received/consumed locked
+    // A field ever edited (per the JC edit log) gets a light-red input.
+    const red = (field: string) => (changedKeys?.has(`box:${b.box_id}.${field}`) ? " bg-[#fbeced]" : "");
+    return {
+      box: b,
+      printed: b.status === "PRINTED",
+      number: boxNum(b.box_id),
+      sfg: b.fg_sku_name || b.sfg_code || "—",
+      status: (b.status || "—").toLowerCase(),
+      printButton: (
+        <button type="button" title="Print this box (saves it + marks printed)" aria-label="Print box"
+          disabled={busy !== null || !canManageBoxes} onClick={() => void saveAndPrint([b])}
+          className="p-1 rounded hover:bg-[#eaf0fb] text-[var(--text-secondary)] hover:text-[#2c5fa8] disabled:opacity-50 disabled:cursor-not-allowed">
+          <PrinterIcon size={11} />
+        </button>
+      ),
+      gross: (
+        <NumInput step="0.001" inputMode="decimal" placeholder="0.000" disabled={locked}
+          className={cellInput + red("gross_weight")} value={rowVal(b, "gross")} onChange={(e) => setBoxField(b, "gross", e.target.value)} />
+      ),
+      net: (
+        <NumInput step="0.001" inputMode="decimal" placeholder="0.000" disabled={locked}
+          className={cellInput + red("net_weight")} value={rowVal(b, "net")} onChange={(e) => setBoxField(b, "net", e.target.value)} />
+      ),
+      batch: (
+        <select className={cellInput + red("batch_code")} value={rowVal(b, "batchId")} disabled={locked}
+          onChange={(e) => setBoxField(b, "batchId", e.target.value)}>
+          <option value="">— Select batch —</option>
+          {batches.map((bt) => (
+            <option key={bt.batch_id} value={String(bt.batch_id)}>{batchOptLabel(bt)}</option>
+          ))}
+        </select>
+      ),
+      count: (
+        <NumInput step="1" inputMode="numeric" placeholder="0" disabled={locked}
+          className={cellInput + red("units")} value={rowVal(b, "count")} onChange={(e) => setBoxField(b, "count", e.target.value)} />
+      ),
+    };
+  });
+
+  // The same, for the "+ Add Boxes" draft rows.
+  const addViews = (addRows ?? []).map((r, idx) => ({
+    row: r,
+    gross: <NumInput step="0.001" inputMode="decimal" placeholder="0.000" className={cellInput} value={r.gross} onChange={(e) => setAddField(idx, "gross", e.target.value)} />,
+    net: <NumInput step="0.001" inputMode="decimal" placeholder="0.000" className={cellInput} value={r.net} onChange={(e) => setAddField(idx, "net", e.target.value)} />,
+    count: <NumInput step="1" inputMode="numeric" placeholder="0" className={cellInput} value={r.count} onChange={(e) => setAddField(idx, "count", e.target.value)} />,
+  }));
+
   return (
     <div ref={cardRef} className="border border-[var(--aws-border)] rounded-[2px] p-2.5 bg-[var(--surface-subtle)] scroll-mt-2">
-      <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
+      {/* Below sm the toggle takes the whole row and its fragments wrap as whole
+          phrases, so the label, the box count and the Σ net don't each break into
+          a narrow ragged column; from sm up the row is unchanged. */}
+      <div className="flex items-start sm:items-center justify-between gap-2 mb-2 flex-wrap">
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
-          className="text-[12px] font-semibold text-[var(--text-primary)] inline-flex items-center gap-1.5"
+          className="text-[12px] font-semibold text-[var(--text-primary)] inline-flex w-full sm:w-auto text-left flex-wrap sm:flex-nowrap items-baseline sm:items-center gap-x-1.5 gap-y-0.5"
         >
           <span className={["text-[10px] transition-transform inline-block", open ? "rotate-90" : ""].join(" ")} aria-hidden>▸</span>
           {group.label}
@@ -447,7 +506,9 @@ function BatchGroupCard({
               <PrinterIcon /> Range
             </button>
             {rangeOpen ? (
-              <div className="absolute right-0 top-full mt-1 z-50 w-56 bg-white border border-[var(--aws-border-strong)] rounded-[2px] shadow-lg p-2.5">
+              // max-w keeps the popover inside the viewport on a phone, whatever
+              // the wrapped button row above it is doing.
+              <div className="absolute right-0 top-full mt-1 z-50 w-56 max-w-[calc(100vw-2rem)] bg-white border border-[var(--aws-border-strong)] rounded-[2px] shadow-lg p-2.5">
                 <div className="text-[11px] text-[var(--text-secondary)] mb-1.5">Print boxes #{minNum}–#{maxNum}</div>
                 <div className="flex items-center gap-1.5 mb-2">
                   <NumInput value={rangeFrom} onChange={(e) => setRangeFrom(e.target.value)} aria-label="From box number"
@@ -475,13 +536,15 @@ function BatchGroupCard({
 
       {open && total > 0 ? (
         <>
-          <div className="overflow-x-auto rounded-[2px] border border-[var(--aws-border)] bg-white">
+          {/* Nine columns: a table from md up, where Box ID stays pinned to the
+              left as the rest scrolls, and a card per box below it. */}
+          <div className="hidden md:block overflow-x-auto rounded-[2px] border border-[var(--aws-border)] bg-white">
             <table className="w-full text-[12px] border-collapse">
               <thead className="bg-[var(--surface-subtle)]">
                 <tr className="border-b border-[var(--aws-border)]">
                   <th className={`${th} w-8`} aria-label="Print" />
                   <th className={th}>Box #</th>
-                  <th className={th}>Box ID</th>
+                  <th className={`${th} sticky left-0 z-10 bg-[var(--surface-subtle)]`}>Box ID</th>
                   <th className={th}>SFG</th>
                   <th className={th}>Gross Wt (kg)</th>
                   <th className={th}>Net Wt (kg)</th>
@@ -491,57 +554,49 @@ function BatchGroupCard({
                 </tr>
               </thead>
               <tbody>
-                {pageBoxes.map((b) => {
-                  // Editable when the box status allows AND the role has box_printing/create.
-                  const locked = !isEditable(b) || !canManageBoxes; // PENDING/PRINTED editable; received/consumed locked
-                  // A field ever edited (per the JC edit log) gets a light-red input.
-                  const red = (field: string) =>
-                    changedKeys?.has(`box:${b.box_id}.${field}`) ? " bg-[#fbeced]" : "";
-                  return (
-                    <tr key={b.box_id} className={"border-b border-[var(--aws-border)] last:border-b-0" + (b.status === "PRINTED" ? " bg-[#eaf6ed]" : "")}>
-                      <td className="px-1.5 py-1">
-                        <button type="button" title="Print this box (saves it + marks printed)" aria-label="Print box"
-                          disabled={busy !== null || !canManageBoxes} onClick={() => void saveAndPrint([b])}
-                          className="p-1 rounded hover:bg-[#eaf0fb] text-[var(--text-secondary)] hover:text-[#2c5fa8] disabled:opacity-50 disabled:cursor-not-allowed">
-                          <PrinterIcon size={11} />
-                        </button>
-                      </td>
-                      <td className="px-2 py-1 font-mono text-[var(--text-muted)] whitespace-nowrap">{boxNum(b.box_id)}</td>
-                      <td className="px-2 py-1 font-mono text-[var(--aws-link)] font-semibold whitespace-nowrap">{b.box_id}</td>
-                      <td className="px-2 py-1 whitespace-nowrap">{b.fg_sku_name || b.sfg_code || "—"}</td>
-                      <td className="px-2 py-1 w-28">
-                        <NumInput step="0.001" inputMode="decimal" placeholder="0.000" disabled={locked}
-                          className={cellInput + red("gross_weight")} value={rowVal(b, "gross")} onChange={(e) => setBoxField(b, "gross", e.target.value)} />
-                      </td>
-                      <td className="px-2 py-1 w-28">
-                        <NumInput step="0.001" inputMode="decimal" placeholder="0.000" disabled={locked}
-                          className={cellInput + red("net_weight")} value={rowVal(b, "net")} onChange={(e) => setBoxField(b, "net", e.target.value)} />
-                      </td>
-                      <td className="px-2 py-1 w-40">
-                        <select className={cellInput + red("batch_code")} value={rowVal(b, "batchId")} disabled={locked}
-                          onChange={(e) => setBoxField(b, "batchId", e.target.value)}>
-                          <option value="">— Select batch —</option>
-                          {batches.map((bt) => (
-                            <option key={bt.batch_id} value={String(bt.batch_id)}>{batchOptLabel(bt)}</option>
-                          ))}
-                        </select>
-                      </td>
-                      <td className="px-2 py-1 w-20">
-                        <NumInput step="1" inputMode="numeric" placeholder="0" disabled={locked}
-                          className={cellInput + red("units")} value={rowVal(b, "count")} onChange={(e) => setBoxField(b, "count", e.target.value)} />
-                      </td>
-                      <td className="px-2 py-1 capitalize whitespace-nowrap">{(b.status || "—").toLowerCase()}</td>
-                    </tr>
-                  );
-                })}
+                {rowViews.map((v) => (
+                  <tr key={v.box.box_id} className={"border-b border-[var(--aws-border)] last:border-b-0" + (v.printed ? " bg-[#eaf6ed]" : "")}>
+                    <td className="px-1.5 py-1">{v.printButton}</td>
+                    <td className="px-2 py-1 font-mono text-[var(--text-muted)] whitespace-nowrap">{v.number}</td>
+                    <td className={"px-2 py-1 font-mono text-[var(--aws-link)] font-semibold whitespace-nowrap sticky left-0 z-10 " + (v.printed ? "bg-[#eaf6ed]" : "bg-white")}>{v.box.box_id}</td>
+                    <td className="px-2 py-1 whitespace-normal lg:whitespace-nowrap">{v.sfg}</td>
+                    <td className="px-2 py-1 w-28">{v.gross}</td>
+                    <td className="px-2 py-1 w-28">{v.net}</td>
+                    <td className="px-2 py-1 w-40">{v.batch}</td>
+                    <td className="px-2 py-1 w-20">{v.count}</td>
+                    <td className="px-2 py-1 capitalize whitespace-nowrap">{v.status}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
+          <ul className="md:hidden space-y-2">
+            {rowViews.map((v) => (
+              <li key={v.box.box_id} className={"border border-[var(--aws-border)] rounded-[2px] p-2.5 " + (v.printed ? "bg-[#eaf6ed]" : "bg-white")}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-mono text-[12px] font-semibold text-[var(--aws-link)] break-all">{v.box.box_id}</div>
+                    <div className="text-[11px] text-[var(--text-muted)]">Box #{v.number} · <span className="capitalize">{v.status}</span></div>
+                  </div>
+                  {v.printButton}
+                </div>
+                <p className="mt-1 text-[12px] text-[var(--text-primary)] break-words">{v.sfg}</p>
+                <div className="mt-1.5 grid grid-cols-2 gap-2">
+                  <label className={cardLabel}>Gross Wt (kg){v.gross}</label>
+                  <label className={cardLabel}>Net Wt (kg){v.net}</label>
+                  <label className={`${cardLabel} col-span-2`}>Batch{v.batch}</label>
+                  <label className={cardLabel}>Count{v.count}</label>
+                </div>
+              </li>
+            ))}
+          </ul>
           {totalPages > 1 ? (
-            <div className="flex items-center gap-2 text-[12px] mt-1.5">
+            // The box range is the first thing to go on a phone, where the four
+            // parts no longer fit on one line.
+            <div className="flex flex-wrap items-center gap-2 text-[12px] mt-1.5">
               <button type="button" className={smallBtn} disabled={clampedPage <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>‹</button>
               <span className="text-[var(--text-secondary)]">Page {clampedPage} of {totalPages}</span>
-              <span className="text-[var(--text-muted)]">(Box {start + 1}–{Math.min(start + DISPLAY, total)} of {total})</span>
+              <span className="hidden sm:inline text-[var(--text-muted)]">(Box {start + 1}–{Math.min(start + DISPLAY, total)} of {total})</span>
               <button type="button" className={smallBtn} disabled={clampedPage >= totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>›</button>
             </div>
           ) : null}
@@ -573,28 +628,43 @@ function BatchGroupCard({
             </button>
           </div>
           {addRows?.length ? (
-            <div className="overflow-x-auto rounded-[2px] border border-[var(--aws-border)] bg-white">
-              <table className="w-full text-[12px] border-collapse">
-                <thead className="bg-[var(--surface-subtle)]">
-                  <tr className="border-b border-[var(--aws-border)]">
-                    <th className={th}>Box #</th>
-                    <th className={th}>Gross Wt (kg)</th>
-                    <th className={th}>Net Wt (kg)</th>
-                    <th className={th}>Count</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {addRows.map((r, idx) => (
-                    <tr key={r.box_number} className="border-b border-[var(--aws-border)] last:border-b-0">
-                      <td className="px-2 py-1 font-mono text-[var(--text-muted)] whitespace-nowrap">{r.box_number}</td>
-                      <td className="px-2 py-1 w-28"><NumInput step="0.001" inputMode="decimal" placeholder="0.000" className={cellInput} value={r.gross} onChange={(e) => setAddField(idx, "gross", e.target.value)} /></td>
-                      <td className="px-2 py-1 w-28"><NumInput step="0.001" inputMode="decimal" placeholder="0.000" className={cellInput} value={r.net} onChange={(e) => setAddField(idx, "net", e.target.value)} /></td>
-                      <td className="px-2 py-1 w-20"><NumInput step="1" inputMode="numeric" placeholder="0" className={cellInput} value={r.count} onChange={(e) => setAddField(idx, "count", e.target.value)} /></td>
+            <>
+              <div className="hidden md:block overflow-x-auto rounded-[2px] border border-[var(--aws-border)] bg-white">
+                <table className="w-full text-[12px] border-collapse">
+                  <thead className="bg-[var(--surface-subtle)]">
+                    <tr className="border-b border-[var(--aws-border)]">
+                      <th className={th}>Box #</th>
+                      <th className={th}>Gross Wt (kg)</th>
+                      <th className={th}>Net Wt (kg)</th>
+                      <th className={th}>Count</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {addViews.map((v) => (
+                      <tr key={v.row.box_number} className="border-b border-[var(--aws-border)] last:border-b-0">
+                        <td className="px-2 py-1 font-mono text-[var(--text-muted)] whitespace-nowrap">{v.row.box_number}</td>
+                        <td className="px-2 py-1 w-28">{v.gross}</td>
+                        <td className="px-2 py-1 w-28">{v.net}</td>
+                        <td className="px-2 py-1 w-20">{v.count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {/* Below md: one card per draft box, same three fields. */}
+              <ul className="md:hidden space-y-2">
+                {addViews.map((v) => (
+                  <li key={v.row.box_number} className="border border-[var(--aws-border)] rounded-[2px] bg-white p-2.5">
+                    <span className="font-mono text-[12px] font-semibold text-[var(--text-primary)]">Box #{v.row.box_number}</span>
+                    <div className="mt-1.5 grid grid-cols-2 gap-2">
+                      <label className={cardLabel}>Gross Wt (kg){v.gross}</label>
+                      <label className={cardLabel}>Net Wt (kg){v.net}</label>
+                      <label className={cardLabel}>Count{v.count}</label>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </>
           ) : (
             <p className="text-[11px] text-[var(--text-muted)] italic">
               Enter a count and click Generate. New boxes join <strong>{group.label}</strong>.

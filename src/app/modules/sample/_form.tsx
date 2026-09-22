@@ -8,6 +8,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { lookupSku, type SkuLookupResponse } from "@/lib/sample";
+import { browseTypeOptions, pickLookupFilters, searchResults, type SearchResult } from "@/lib/article-picker";
 import { searchBoms, browseBoms, type BomOption, type BomBrowseResult } from "@/lib/npd-dev";
 import { CascadeDropdown } from "@/components/CascadeDropdown";
 
@@ -262,7 +263,7 @@ export function ArticlePicker({ onAdd, restrictItemType }: {
 
   // Search-tab state
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<string[]>([]);
+  const [results, setResults] = useState<SearchResult[]>([]);
   const [searching, setSearching] = useState(false);
 
   // Why the list is empty. Both tabs used to drop a rejected lookup on the floor
@@ -316,8 +317,12 @@ export function ArticlePicker({ onAdd, restrictItemType }: {
         Promise.all(types.map((ty) => lookupSku({ item_type: ty || undefined, search: q }))).then(
           (lists) => {
             if (cancelled) return;
-            const names = lists.flatMap((r) => r.options?.particulars ?? []);
-            setResults(Array.from(new Set(names)).slice(0, 50));
+            // Each result keeps the allowed type it came back under, so choose()
+            // can pin it: with two allowed types an unpinned lookup resolves the
+            // name alone, and a name that also exists as another type (e.g. an FG
+            // of the same name) could come back as the wrong SKU. A name under
+            // several allowed types (both FG and SFG) is one result per type.
+            setResults(searchResults(types, lists.map((r) => r.options?.particulars ?? [])));
             setError(null);
             setSearching(false);
           },
@@ -335,19 +340,18 @@ export function ArticlePicker({ onAdd, restrictItemType }: {
 
   // The particulars option only carries a name; resolve it to a sku_id (and the
   // canonical name) through a second lookup before handing the article up.
-  async function choose(name: string) {
+  async function choose(name: string, resultType: string | null = null) {
     setParticulars(name);
     if (!name) return;
     setBusy(true);
     try {
-      const r = await lookupSku({
-        particulars: name,
-        // Only pin item_type when a single type is allowed; with several the
-        // name alone resolves (the backend falls back to a name-only match).
-        item_type: itemType || singleType || undefined,
-        item_group: itemGroup || undefined,
-        sub_group: subGroup || undefined,
-      });
+      // Search: pinned to the result's own type (else the single allowed type),
+      // never to the Browse tab's leftover filters. Browse: the chosen filters.
+      // With nothing to pin, the name alone resolves (the backend falls back to
+      // a name-only match).
+      const r = await lookupSku(pickLookupFilters({
+        tab, name, singleType, resultType, itemType, itemGroup, subGroup,
+      }));
       const sel = r.selected_item;
       if (sel && sel.sku_id != null) onAdd({ sku_id: Number(sel.sku_id), sku_name: sel.particulars ?? name, item_type: sel.item_type });
     } catch {
@@ -387,10 +391,15 @@ export function ArticlePicker({ onAdd, restrictItemType }: {
           {(query.trim() || searching) && (
             <ul className="mt-1 max-h-56 overflow-auto border border-[var(--aws-border)] rounded-[2px] bg-white">
               {searching && <li className="px-3 py-2 text-[12px] text-[var(--text-muted)]">Searching…</li>}
-              {!searching && results.map((name) => (
-                <li key={name}>
-                  <button type="button" disabled={busy} onClick={() => choose(name)}
-                    className="block w-full text-left px-3 py-1.5 text-[13px] hover:bg-[var(--surface-subtle)] disabled:opacity-50">{name}</button>
+              {!searching && results.map((res) => (
+                <li key={`${res.name}|${res.type ?? ""}`}>
+                  <button type="button" disabled={busy} onClick={() => choose(res.name, res.type)}
+                    className="block w-full text-left px-3 py-1.5 text-[13px] hover:bg-[var(--surface-subtle)] disabled:opacity-50">
+                    {res.name}
+                    {res.showType && res.type ? (
+                      <span className="ml-2 rounded border border-[var(--aws-border)] px-1.5 text-[11px] text-[var(--text-secondary)]">{res.type.toUpperCase()}</span>
+                    ) : null}
+                  </button>
                 </li>
               ))}
               {/* The lookup failing and the name genuinely not existing are
@@ -420,7 +429,7 @@ export function ArticlePicker({ onAdd, restrictItemType }: {
             </div>
           ) : (
             <CascadeDropdown label="Material type" value={itemType}
-              options={allowed ? (opts.item_types ?? []).filter((t) => allowed.includes(t)) : (opts.item_types ?? [])}
+              options={browseTypeOptions(opts.item_types, allowed)}
               disabled={busy}
               placeholder="Select material type…"
               onChange={(v) => { setItemType(v); setItemGroup(""); setSubGroup(""); setParticulars(""); }} />

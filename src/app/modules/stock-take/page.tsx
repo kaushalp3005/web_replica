@@ -23,10 +23,12 @@ import { BackLink } from "@/components/BackLink";
 import { useRequireAuth, useUserInitial, useHasPermission } from "@/lib/user";
 import {
   downloadEntriesExcel,
+  downloadStockExcel,
   fetchLatestStock,
   fetchStockTakeFilterOptions,
   formatDate,
   formatNumber,
+  warehouseLabel,
   type LatestStockResponse,
   type StockTakeFilterOptions,
 } from "@/lib/stock-take";
@@ -143,6 +145,7 @@ export default function StockTakeLandingPage() {
   // page. So the row count that came back is echoed here, and so is the
   // number of drafts left out — otherwise a short sheet looks like data loss.
   const [exporting, setExporting] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
 
@@ -172,6 +175,39 @@ export default function StockTakeLandingPage() {
       setExporting(false);
     }
   }, [warehouse, floorName, itemType, stockType, debouncedSearch]);
+
+  /** Download current stock under the same filters, kept apart per warehouse
+   *  and floor: every warehouse you can see (the cold stores included) and every
+   *  floor, with a total for each. */
+  const onDownloadStock = useCallback(async () => {
+    setDownloading(true);
+    setExportMsg(null);
+    try {
+      const r = await downloadStockExcel({
+        warehouse: warehouse ? [warehouse] : undefined,
+        floorName: floorName ? [floorName] : undefined,
+        itemType: itemType ? [itemType] : undefined,
+        stockType: stockType ? [stockType] : undefined,
+        search: debouncedSearch || undefined,
+      });
+      setExportMsg(`${r.filename} — ${formatNumber(r.rows, 0)} stock lines by warehouse and floor.`);
+    } catch (e) {
+      setExportMsg(e instanceof Error ? e.message : "Download failed.");
+    } finally {
+      setDownloading(false);
+    }
+  }, [warehouse, floorName, itemType, stockType, debouncedSearch]);
+
+  // Factories first, then the cold stores, each under its own heading — and by
+  // name ("Savla D-39"), not by code.
+  const warehouseGroups = useMemo(() => {
+    const all = options?.warehouses ?? [];
+    const cold = new Set(options?.cold_warehouses ?? []);
+    return [
+      { label: "Factories and godowns", codes: all.filter((w) => !cold.has(w)) },
+      { label: "Cold storage", codes: all.filter((w) => cold.has(w)) },
+    ].filter((g) => g.codes.length > 0);
+  }, [options]);
 
   // Debounce the search box so a typed word is one request, not one per keypress.
   useEffect(() => {
@@ -321,16 +357,26 @@ export default function StockTakeLandingPage() {
               >
                 Show transactions
               </button>
+              {/* Current stock as on screen, per warehouse and floor — every
+                  warehouse including the cold stores, and every floor. */}
+              <button
+                onClick={onDownloadStock}
+                disabled={downloading}
+                title="Current stock for every warehouse and floor, with totals, as .xlsx"
+                className="h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:border-[var(--aws-orange)] disabled:opacity-40"
+              >
+                {downloading ? "Preparing\u2026" : "Download stock"}
+              </button>
               {/* The counting rows themselves, filtered exactly as this screen is.
                   Separate from the ledger export: that one is adjustments, this
                   one is what the floor actually weighed. */}
               <button
                 onClick={onExport}
                 disabled={exporting}
-                title="Every individual count row behind this view, as .xlsx"
+                title="Every individual count row behind this view (physical counts only, no adjustments), as .xlsx"
                 className="h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:border-[var(--aws-orange)] disabled:opacity-40"
               >
-                {exporting ? "Preparing\u2026" : "Export counts"}
+                {exporting ? "Preparing\u2026" : "Export count entries"}
               </button>
               {exportMsg && (
                 <p className="w-full text-[12px] text-[var(--text-secondary)] mt-1" role="status">
@@ -385,8 +431,22 @@ export default function StockTakeLandingPage() {
                 aria-label="Search stock take items"
                 className="flex-1 min-w-[220px] h-9 px-3 text-[14px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
               />
+              <select
+                value={warehouse}
+                onChange={(e) => changeQuery(() => setWarehouseAndResetFloor(e.target.value))}
+                aria-label="Warehouse"
+                className="h-9 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e]"
+              >
+                <option value="">Warehouse: all</option>
+                {warehouseGroups.map((g) => (
+                  <optgroup key={g.label} label={g.label}>
+                    {g.codes.map((w) => (
+                      <option key={w} value={w}>{warehouseLabel(w, options?.warehouse_labels)}</option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
               {([
-                ["Warehouse", warehouse, setWarehouseAndResetFloor, options?.warehouses],
                 ["Floor", floorName, setFloorName, floorOptions],
                 ["Type", itemType, setItemType, options?.item_types],
                 ["Stock type", stockType, setStockType, options?.stock_types],

@@ -2,11 +2,19 @@
 
 // Raw Material tab — sits beside "Stage Chain" on the job card detail page.
 // Top of the tab is a camera QR scanner with a region-of-interest (ROI) box.
-// Scanning a sticker identifies the box: it POSTs the raw QR to
-// /api/v1/production/scan-identify, which routes by structure — JSON
-// {"tx","bi"} → warehouse/cold tables by (box_id, transaction_no); a bare id →
-// sfg_box by carton_id; either miss → exhaustive scan of every box table — and
-// returns which table the box lives in plus its details, shown in the card below.
+// Scanning a sticker stores its box against this job card: handleScan POSTs the
+// box id to /api/v1/production/job-cards-v2/{id}/box-scans. The server looks
+// the box up in Stores' record (floor_requisition_box) first, then sfg_box,
+// po_box, then the warehouse/cold tables. The list below shows the stored boxes;
+// the ones Stores sent for this job card also show their request.
+//
+// With `manualPrint` (the Raw Material tab, not Boxes printing), Manual print
+// (_RmManualPrint — Stores' manual print) takes the place of the "Applied to the
+// next scan" panel: it prints stickers for boxes that have none and stores each
+// box here as it prints; those rows say so and carry a 🖨 reprint. A box no
+// table knows is then not typed in: the scan says to print it a sticker. ✕
+// removes only the stored row: the box stays in sfg_box, so scanning its
+// sticker stores it again.
 //
 // ROI design (why this is responsive on every device):
 //   • The viewport is a SQUARE container and the video uses object-cover, so a
@@ -38,6 +46,9 @@ import { BarcodeFormat, DecodeHintType } from "@zxing/library";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
 import { rollupByArticle, type ArticleIssue } from "@/lib/scanRollup";
 import { friendlyApiError } from "@/lib/apiErrors";
+import { printedLabel, storedMessage, storesRefLabel, type PrintedRef, type StoresRef } from "@/lib/box-scan";
+import { PrinterIcon } from "@/app/modules/purchase/material-in/[transaction_no]/_SectionEditor";
+import { printJobCardStickers, RmManualPrint } from "./_RmManualPrint";
 
 // BarcodeDetector is not in the TS DOM lib yet — declare the slice we use.
 // boundingBox lets us land the AR tap-target ON the detected QR (when present).
@@ -82,9 +93,29 @@ type BoxScan = {
   gross_weight: number | null;
   count: number | null;
   scanned_at: string | null;
+  stores?: StoresRef | null; // set when Stores sent this box for this job card
+  printed?: PrintedRef | null; // set when Manual print on this tab printed the box
+  job_card_number?: string | null;
+  entity?: string | null;
 };
 type ScanTotals = { boxes: number; net_weight: number; gross_weight: number; count: number };
 type Toast = { kind: "ok" | "err"; text: string } | null;
+
+const NO_ARTICLES: string[] = [];
+
+// The scan route's refusal of a box no table knows when no article was sent:
+// 422 {detail: {error: "article_required"}}. Reads a clone, so the body is still
+// there for readApiErrorMessage when it is some other refusal.
+async function isArticleRequired(res: Response): Promise<boolean> {
+  if (res.status !== 422) return false;
+  try {
+    const data = (await res.clone().json()) as { detail?: { error?: unknown } | string } | null;
+    const detail = data?.detail;
+    return typeof detail === "object" && detail !== null && detail.error === "article_required";
+  } catch {
+    return false;
+  }
+}
 
 export function RawMaterialTab({
   jcId,
@@ -92,18 +123,27 @@ export function RawMaterialTab({
   listHeading = "Scanned raw-material boxes",
   emptyHint = "Scan a raw-material QR to add its box.",
   issuesHeading = "RM issued (per article)",
+  manualPrint = false,
+  rmArticles = NO_ARTICLES,
 }: {
   jcId: number;
   scanTitle?: string;
   listHeading?: string;
   emptyHint?: string;
   issuesHeading?: string;
+  /** Show Manual print (the Raw Material tab only). */
+  manualPrint?: boolean;
+  /** This job card's BOM RM articles, Manual print's quick picks. */
+  rmArticles?: string[];
 }) {
   const [boxes, setBoxes] = useState<BoxScan[]>([]);
   const [totals, setTotals] = useState<ScanTotals | null>(null);
+  // Manual print's next free "Box #" for this job card; null until the list loads.
+  const [nextNumber, setNextNumber] = useState<number | null>(null);
   const [loadingList, setLoadingList] = useState(true);
   // Detail applied to the NEXT scan. For a KNOWN box these override its resolved
   // values (blank → keep the box's own); for an UNKNOWN box `article` is required.
+  // Only the panel without Manual print sets them; with it they stay blank.
   const [article, setArticle] = useState("");
   const [netW, setNetW] = useState("");
   const [grossW, setGrossW] = useState("");
@@ -129,9 +169,10 @@ export function RawMaterialTab({
     try {
       const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/box-scans`);
       if (res.ok) {
-        const data = (await res.json()) as { scans?: BoxScan[]; totals?: ScanTotals };
+        const data = (await res.json()) as { scans?: BoxScan[]; totals?: ScanTotals; next_box_number?: number };
         setBoxes(data.scans ?? []);
         setTotals(data.totals ?? null);
+        setNextNumber(typeof data.next_box_number === "number" ? data.next_box_number : null);
       }
     } catch {
       /* keep the last good list */
@@ -148,8 +189,9 @@ export function RawMaterialTab({
   useEffect(() => () => { if (toastTimerRef.current != null) window.clearTimeout(toastTimerRef.current); }, []);
 
   // A scan STORES the box against this JC (upsert). RM labels are a bare box id
-  // or JSON {"tx","bi"} — send the bare id; the server matches po_box.box_id and
-  // resolves the article + weights from the box itself.
+  // or JSON {"tx","bi"} — send the bare id. The server checks Stores' record
+  // first, then sfg_box, po_box and the warehouse/cold tables, and fills in the
+  // article + weights (Stores' figures for a box Stores sent).
   const handleScan = useCallback((value: string) => {
     const raw = value.trim();
     if (!raw || inFlightRef.current) return;
@@ -181,12 +223,18 @@ export function RawMaterialTab({
         if (!res.ok) {
           if (res.status === 409) {
             setDupWarn(code); // redundant box — persistent red banner below the QR
+          } else if (manualPrint && (await isArticleRequired(res))) {
+            // No article field here to fill in — the box needs a sticker instead.
+            flashToast({ kind: "err", text: `Box ${code} isn't in any box table. Print it a sticker with Manual print below.` });
           } else {
             flashToast({ kind: "err", text: await readApiErrorMessage(res, `Couldn't store ${code}`) });
           }
           return;
         }
-        flashToast({ kind: "ok", text: `Stored ${code}` });
+        // The stored row says whether Stores sent this box. The box is stored
+        // either way, so a body that won't parse just leaves the request out.
+        const saved = (await res.json().catch(() => null)) as { scan?: { stores?: StoresRef | null } } | null;
+        flashToast({ kind: "ok", text: storedMessage(code, saved?.scan?.stores) });
         await refresh();
       } catch (e) {
         flashToast({ kind: "err", text: friendlyApiError(e) });
@@ -194,7 +242,7 @@ export function RawMaterialTab({
         inFlightRef.current = false;
       }
     })();
-  }, [jcId, article, netW, grossW, count, flashToast, refresh]);
+  }, [jcId, article, netW, grossW, count, manualPrint, flashToast, refresh]);
 
   const deleteBox = useCallback(async (code: string) => {
     setBusy(code);
@@ -216,58 +264,86 @@ export function RawMaterialTab({
     }
   }, [jcId, flashToast, refresh]);
 
+  // 🖨 on a box Manual print printed here: its sticker again, from the row's own figures.
+  const reprint = useCallback((b: BoxScan, code: string) => {
+    printJobCardStickers({ entity: b.entity ?? null, job_card_number: b.job_card_number ?? null }, [{
+      box_code: code,
+      box_number: b.printed?.box_number ?? null,
+      article: b.article ?? "",
+      net_weight: b.net_weight != null ? Number(b.net_weight) : null,
+      gross_weight: b.gross_weight != null ? Number(b.gross_weight) : null,
+      count: b.count,
+      lot_number: b.printed?.lot_number ?? null,
+    }]).then(
+      () => flashToast({ kind: "ok", text: `Sent ${code} to print.` }),
+      (e) => flashToast({ kind: "err", text: `Couldn't print: ${e instanceof Error ? e.message : String(e)}` }),
+    );
+  }, [flashToast]);
+
   return (
     <div className="space-y-4">
       <QrScanner onResult={handleScan} warning={dupWarn} title={scanTitle} />
 
-      {/* Detail applied to the NEXT scan. Auto-filled for a known box; for a new
+      {/* Manual print takes this panel's place on the Raw Material tab. Elsewhere:
+          detail applied to the NEXT scan, auto-filled for a known box; for a new
           / unknown box, at least an Article is required to store it. */}
-      <div className="bg-white border border-[var(--aws-border)] rounded-md p-3 space-y-2">
-        <div className="text-[11px] text-[var(--text-muted)]">
-          Applied to the next scan. Auto-filled for a known box — for a new/unknown box, enter at least an <span className="font-semibold text-[var(--text-primary)]">Article</span>.
+      {manualPrint ? (
+        <RmManualPrint
+          jcId={jcId}
+          rmArticles={rmArticles}
+          nextNumber={nextNumber}
+          onSaved={() => void refresh()}
+          onStale={() => void refresh()}
+          onMessage={flashToast}
+        />
+      ) : (
+        <div className="bg-white border border-[var(--aws-border)] rounded-md p-3 space-y-2">
+          <div className="text-[11px] text-[var(--text-muted)]">
+            Applied to the next scan. Auto-filled for a known box — for a new/unknown box, enter at least an <span className="font-semibold text-[var(--text-primary)]">Article</span>.
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <label className="col-span-2 sm:col-span-1 flex flex-col gap-1">
+              <span className="text-[11px] text-[var(--text-muted)]">Article</span>
+              <input
+                value={article}
+                onChange={(e) => setArticle(e.target.value)}
+                placeholder="auto"
+                className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] text-[var(--text-muted)]">Net wt (kg)</span>
+              <input
+                type="number" min={0} step="0.001" inputMode="decimal"
+                value={netW}
+                onChange={(e) => setNetW(e.target.value)}
+                placeholder="auto"
+                className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] text-[var(--text-muted)]">Gross wt (kg)</span>
+              <input
+                type="number" min={0} step="0.001" inputMode="decimal"
+                value={grossW}
+                onChange={(e) => setGrossW(e.target.value)}
+                placeholder="auto"
+                className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-[11px] text-[var(--text-muted)]">Count</span>
+              <input
+                type="number" min={0} inputMode="numeric"
+                value={count}
+                onChange={(e) => setCount(e.target.value)}
+                placeholder="auto"
+                className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
+              />
+            </label>
+          </div>
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-          <label className="col-span-2 sm:col-span-1 flex flex-col gap-1">
-            <span className="text-[11px] text-[var(--text-muted)]">Article</span>
-            <input
-              value={article}
-              onChange={(e) => setArticle(e.target.value)}
-              placeholder="auto"
-              className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-[var(--text-muted)]">Net wt (kg)</span>
-            <input
-              type="number" min={0} step="0.001" inputMode="decimal"
-              value={netW}
-              onChange={(e) => setNetW(e.target.value)}
-              placeholder="auto"
-              className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-[var(--text-muted)]">Gross wt (kg)</span>
-            <input
-              type="number" min={0} step="0.001" inputMode="decimal"
-              value={grossW}
-              onChange={(e) => setGrossW(e.target.value)}
-              placeholder="auto"
-              className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
-            />
-          </label>
-          <label className="flex flex-col gap-1">
-            <span className="text-[11px] text-[var(--text-muted)]">Count</span>
-            <input
-              type="number" min={0} inputMode="numeric"
-              value={count}
-              onChange={(e) => setCount(e.target.value)}
-              placeholder="auto"
-              className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
-            />
-          </label>
-        </div>
-      </div>
+      )}
 
       {toast ? (
         <div
@@ -313,7 +389,8 @@ export function RawMaterialTab({
         </div>
       ) : null}
 
-      {/* Stored raw-material boxes for this job card — ✕ removes one box. */}
+      {/* Stored raw-material boxes for this job card — 🖨 reprints one printed
+          here, ✕ removes one box. */}
       <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
         <div className="px-4 py-3 border-b border-[var(--aws-border)] flex items-center justify-between gap-2">
           <h3 className="text-[14px] font-semibold text-[var(--text-primary)]">{listHeading}</h3>
@@ -334,6 +411,8 @@ export function RawMaterialTab({
           <ul className="divide-y divide-[var(--aws-border)]">
             {boxes.map((b) => {
               const code = b.box_id ?? b.sfg_box_id ?? "";
+              const sentBy = storesRefLabel(b.stores);
+              const printed = printedLabel(b.printed);
               return (
                 <li key={code} className="px-4 py-3 flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -341,22 +420,42 @@ export function RawMaterialTab({
                     <div className="text-[12px] text-[var(--text-muted)] break-all">
                       {b.article ?? "—"}{b.transaction_no ? ` · ${b.transaction_no}` : ""}
                     </div>
+                    {sentBy ? (
+                      <div className="text-[12px] text-[var(--text-secondary)] break-all">{sentBy}</div>
+                    ) : null}
+                    {printed ? (
+                      <div className="text-[12px] text-[var(--text-secondary)] break-all">{printed}</div>
+                    ) : null}
                     <div className="text-[12px] text-[var(--text-secondary)] mt-0.5">
                       {b.net_weight != null ? `${Number(b.net_weight).toFixed(3)} kg net` : "— net"}
                       {b.gross_weight != null ? ` · ${Number(b.gross_weight).toFixed(3)} kg gross` : ""}
                       {b.count != null ? ` · ${b.count} units` : ""}
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => void deleteBox(code)}
-                    disabled={busy === code || !code}
-                    aria-label={`Remove box ${code}`}
-                    title="Remove this box"
-                    className="shrink-0 h-7 w-7 flex items-center justify-center rounded-[2px] border border-[var(--aws-border-strong)] text-[var(--text-muted)] hover:border-[var(--text-danger)] hover:text-[var(--text-danger)] disabled:opacity-50"
-                  >
-                    ✕
-                  </button>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    {printed ? (
+                      <button
+                        type="button"
+                        onClick={() => reprint(b, code)}
+                        disabled={!code}
+                        aria-label={`Reprint box ${code}`}
+                        title="Reprint this sticker"
+                        className="shrink-0 h-7 w-7 flex items-center justify-center rounded-[2px] border border-[var(--aws-border-strong)] text-[var(--text-muted)] hover:border-[#2c5fa8] hover:text-[#2c5fa8] disabled:opacity-50"
+                      >
+                        <PrinterIcon size={12} />
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => void deleteBox(code)}
+                      disabled={busy === code || !code}
+                      aria-label={`Remove box ${code}`}
+                      title="Remove this box"
+                      className="shrink-0 h-7 w-7 flex items-center justify-center rounded-[2px] border border-[var(--aws-border-strong)] text-[var(--text-muted)] hover:border-[var(--text-danger)] hover:text-[var(--text-danger)] disabled:opacity-50"
+                    >
+                      ✕
+                    </button>
+                  </div>
                 </li>
               );
             })}
@@ -476,7 +575,8 @@ function cameraErrorMessage(name: string | undefined): string {
   return "Could not start the camera. Check permissions and try again.";
 }
 
-function QrScanner({ onResult, warning, title = "Scan Raw Material QR" }: { onResult?: (value: string) => void; warning?: string | null; title?: string }) {
+// Also the scanner in Stores → Production Indents' Scan material dialog.
+export function QrScanner({ onResult, warning, title = "Scan Raw Material QR" }: { onResult?: (value: string) => void; warning?: string | null; title?: string }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null); // offscreen decode buffer
   const streamRef = useRef<MediaStream | null>(null);

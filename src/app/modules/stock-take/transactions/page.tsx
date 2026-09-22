@@ -22,6 +22,7 @@ import {
   downloadLedgerExcel,
   fetchLedger,
   fetchStockTakeFilterOptions,
+  warehouseLabel,
   formatNumber,
   type LedgerFilters,
   type LedgerPage,
@@ -235,7 +236,9 @@ function LedgerScreen() {
               <label className={LABEL} htmlFor="w">Warehouse</label>
               <select id="w" className={FIELD} value={warehouse} onChange={(e) => change(() => setWarehouse(e.target.value))}>
                 <option value="">All warehouses</option>
-                {(options?.warehouses ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
+                {(options?.warehouses ?? []).map((o) => (
+                  <option key={o} value={o}>{warehouseLabel(o, options?.warehouse_labels)}</option>
+                ))}
               </select>
             </div>
             <div>

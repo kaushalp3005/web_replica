@@ -20,6 +20,8 @@ import {
   controlSampleFromDetail,
   pmVarianceFromDetail,
   additivesFromDetail,
+  clearedConsumptionKeys,
+  clearedRejections,
   type PmVarianceState,
   type RejectionRow,
 } from "./outputAccounting";
@@ -29,6 +31,7 @@ import { useHasPermission, useIsAdmin, useMe, useRequireAuth, useUserInitial } f
 import { BALANCE_TOLERANCE_KG, WEIGHT_SAMPLE_COUNT } from "@/lib/constants";
 import { classifyProcess, classifySteps, isPmBearingStage, STAGE_CREATE_WIP } from "@/lib/processCatalog";
 import { friendlyApiError } from "@/lib/apiErrors";
+import { hasBomChanges, type BomChanges } from "@/lib/job-card-bom-rules";
 import { BackLink } from "@/components/BackLink";
 import { LockBanner } from "../_LockBanner";
 import { lockBannerId, useLockState, userMayForceUnlock } from "../_useLockState";
@@ -36,7 +39,10 @@ import { lockBannerId, useLockState, userMayForceUnlock } from "../_useLockState
 import { ActionButton, LockableButton } from "../_ActionButton";
 import { AmendmentsTab } from "../_AmendmentsTab";
 import { RawMaterialTab, BoxScanPanel } from "./_RawMaterialTab";
-import { rollupByArticle, matchIssues, type ArticleIssue } from "@/lib/scanRollup";
+import { rmArticleOptions } from "@/lib/box-scan";
+import { MaterialAllocationTab } from "./_MaterialAllocationTab";
+import { rollupByArticle, matchIssues, varianceBaseline, type ArticleIssue, type VarianceBaseline } from "@/lib/scanRollup";
+import { boxingState, rollupBoxesByBatch, type BoxingBatch } from "@/lib/job-card-boxing";
 import { SfgProducedBoxes, type BatchOpt } from "./_SfgProducedBoxes";
 // W4-MED-3/M10 — single subscription via context (see _UserContext.tsx).
 import { UserProvider } from "../_UserContext";
@@ -82,6 +88,15 @@ type BomLine = {
   quantity_per_unit?: number | null;
   loss_pct?: number | null;
   godown?: string | null;
+  /** An article added to this job card (job_card_bom_change) — no BOM line. */
+  added?: boolean;
+  /** An added article's real type ('rm' | 'pm' | 'fg' | 'sfg'); item_type is its
+   *  accounting kind, so an added FG / SFG says item_type 'rm' (spec Addendum A). */
+  article_type?: string | null;
+  change_id?: number | null;
+  sku_id?: number | null;
+  required_qty?: number | null;
+  required_unit?: string | null;
 };
 
 type IndentLine = {
@@ -282,6 +297,8 @@ type JobCardDetail = {
   shift_log?: Array<Record<string, unknown>>;
   sign_offs?: Array<Record<string, unknown>>;
   bom_lines?: BomLine[];
+  /** Per-job-card BOM changes (migration 115); null before it. */
+  bom_changes?: BomChanges | null;
   consumption_lines?: ConsumptionLine[];
   balance_materials?: BalanceMaterialRow[];
   byproducts?: ByproductRow[];
@@ -303,17 +320,23 @@ type JobCardDetail = {
 // Materials + Shifts (which existed on the web prototype) intentionally don't
 // have Android counterparts; the equivalent info lives inside Accounting
 // (BOM articles, consumption) and the toolbar/header time strip respectively.
-type TabKey = "chain" | "rawmaterial" | "overview" | "accounting" | "quality" | "signoffs" | "remarks" | "sfgboxes" | "amendments";
+type TabKey = "chain" | "allocation" | "rawmaterial" | "overview" | "accounting" | "quality" | "signoffs" | "remarks" | "sfgboxes" | "amendments";
 
-const TABS: { key: TabKey; label: string }[] = [
-  { key: "chain",      label: "Stage Chain" },
-  { key: "rawmaterial", label: "Raw Material" },
+// `short` is the label the strip shows below md, where nine full labels add up
+// to roughly 900 px of scroller in a 360 px window. Only the long ones need
+// one; the rest fall back to `label`.
+const TABS: { key: TabKey; label: string; short?: string }[] = [
+  { key: "chain",      label: "Stage Chain", short: "Chain" },
   { key: "overview",   label: "Overview" },
+  // What the job card's own floor holds (Stock Take), BOM articles first.
+  { key: "allocation", label: "Material allocation and requisition", short: "Allocation" },
+  { key: "rawmaterial", label: "Raw Material" },
   { key: "accounting", label: "Accounting" },
+  // Printing follows accounting in the flow, so it sits beside it.
+  { key: "sfgboxes",   label: "Boxes printing", short: "Boxes" },
   { key: "quality",    label: "Quality" },
   { key: "signoffs",   label: "Sign-offs" },
   { key: "remarks",    label: "Remarks" },
-  { key: "sfgboxes",   label: "Boxes printing" },
   // Amendments tab hidden per operator request. The 'amendments' route
   // case is kept below so a stale ?tab=amendments URL doesn't 404, and
   // AmendmentsTab + the backend endpoints remain untouched — only the
@@ -440,7 +463,7 @@ function computeBatchSummary(
   // callers that want the raw server snapshot (e.g. debugging tools)
   // can read it; computeBatchSummary just doesn't use it.
   // Consumption rows (PM excluded — they don't convert into FG mass).
-  const consumption = consumptionStateFromDetail(detail.consumption_lines, batchId);
+  const consumption = consumptionStateFromDetail(detail.consumption_lines, batchId, articles);
   const articleByKey = new Map<string, BatchSummaryArticle>();
   for (const a of articles) {
     const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
@@ -456,7 +479,7 @@ function computeBatchSummary(
   );
   // Balance materials — "returned to store". PM (pcs) is packaging; it never
   // enters the kg balance, so only RM articles sum in (mirrors rmConsumedKg).
-  const balance = balanceStateFromDetail(detail.balance_materials, batchId);
+  const balance = balanceStateFromDetail(detail.balance_materials, batchId, articles);
   const balTotal = Object.entries(balance).reduce((s, [k, v]) => s + (isRmKey(k) ? _num(v) : 0), 0);
   // Off-grade (excluding wastage and control_sample) + wastage
   const rejections = rejectionsFromDetail(detail.byproducts, detail.balance_materials, batchId);
@@ -539,7 +562,10 @@ function computeBatchSummary(
 function computeArticles(detail: JobCardDetail): BatchSummaryArticle[] {
   const bom = detail.bom_lines ?? [];
   let out: BatchSummaryArticle[];
-  if (bom.length > 0) {
+  // With BOM changes the server has already built the list (falling back to the
+  // indents itself if the BOM had no lines); an empty list then means every
+  // article was removed, so never fall back here.
+  if (bom.length > 0 || hasBomChanges(detail.bom_changes)) {
     out = bom.map((b) => ({
       bom_line_id: b.bom_line_id,
       material_sku_name: b.material_sku_name,
@@ -897,7 +923,9 @@ function JobCardDetailPageBody() {
 
   return (
     <div className="min-h-screen flex flex-col bg-[var(--background)]">
-      <header className="bg-[var(--aws-navy)] h-[45px] flex items-center px-6 gap-4">
+      {/* Gutter tracks <main> below (px-4 sm:px-6) so the brand lockup and the
+          avatar line up with the card edges on a phone. */}
+      <header className="bg-[var(--aws-navy)] h-[45px] flex items-center px-4 sm:px-6 gap-4">
         <BrandMark />
         <span className="text-[#d5dbdb] text-[13px] hidden sm:inline">Console</span>
         <nav className="text-[12px] text-[#d5dbdb] hidden md:flex items-center gap-2 ml-2">
@@ -980,7 +1008,7 @@ function JobCardDetailPageBody() {
         ) : null}
       </main>
 
-      <footer className="border-t border-[var(--aws-border)] bg-white py-3 px-6 text-[11px] text-[var(--text-secondary)] flex flex-wrap justify-center gap-x-4 gap-y-1">
+      <footer className="border-t border-[var(--aws-border)] bg-white py-3 px-4 sm:px-6 text-[11px] text-[var(--text-secondary)] flex flex-wrap justify-center gap-x-4 gap-y-1">
         <a href="#" className="hover:underline">Terms of Use</a>
         <a href="#" className="hover:underline">Privacy</a>
         <span>© {new Date().getFullYear()}</span>
@@ -1018,14 +1046,19 @@ function PageHeader({
   const nextStep = curIdx >= 0 && curIdx + 1 < chain.length ? chain[curIdx + 1] : null;
 
   return (
-    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-5 mb-4">
+    // Padding scales like every Panel below it (p-3 sm:p-4 lg:p-5) — a flat
+    // p-5 burned 40 px of a 360 px phone on chrome alone.
+    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-3 sm:p-4 lg:p-5 mb-4">
       <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
         <div className="min-w-0">
           <div className="font-mono text-[12px] text-[var(--aws-link)] font-semibold mb-1" title={jcRef || jcNum}>{jcNum}</div>
-          <h1 className="text-[22px] leading-[26px] font-semibold text-[var(--text-primary)]" title={detail.fg_sku_name ?? ""}>
+          {/* break-words — a machine-generated SKU or customer string with no
+              spaces would otherwise push the card (and the page) sideways at
+              360 px; this card has no overflow guard of its own. */}
+          <h1 className="text-[18px] leading-[22px] sm:text-[22px] sm:leading-[26px] font-semibold text-[var(--text-primary)] break-words" title={detail.fg_sku_name ?? ""}>
             <span className={changedKeys.has("fg_sku_name") ? "bg-[#fbeced] rounded-sm px-1" : ""}>{detail.fg_sku_name || "—"}</span>
           </h1>
-          <p className="text-[13px] text-[var(--text-secondary)] mt-1">
+          <p className="text-[13px] text-[var(--text-secondary)] mt-1 break-words">
             <span className={changedKeys.has("customer_name") ? "bg-[#fbeced] rounded-sm px-1" : ""}>{detail.customer_name || "—"}</span>
           </p>
 
@@ -1068,9 +1101,13 @@ function PageHeader({
           ) : null}
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        {/* w-full below md: this block wraps onto its own line on a phone, and
+            a wrapped single item in a justify-between row lands flush LEFT —
+            the status chip and the ⋮ menu ended up under the chain nav on the
+            wrong side. Full width + justify-end keeps them on the right. */}
+        <div className="flex items-center gap-2 shrink-0 w-full md:w-auto justify-end">
           <span
-            className="inline-block text-[11px] font-semibold px-2 py-1 rounded-sm capitalize"
+            className="inline-block text-[11px] font-semibold px-2 py-1 rounded-sm capitalize whitespace-nowrap"
             style={{ background: style.bg, color: style.fg, border: `1px solid ${style.ring}` }}
           >
             {fmtStatus(detail.status) || "—"}
@@ -1323,7 +1360,10 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
         disabled={reloading}
         onClick={onClick}
         variant="primary"
-        className="h-9 px-4 text-[13px] font-bold tracking-wide"
+        // Full width below md: this is the lifecycle CTA the floor presses
+        // most, and a ~200 px target hugging the right edge of a phone card
+        // is the hardest thing on the screen to hit. md+ is unchanged.
+        className="h-9 px-4 text-[13px] font-bold tracking-wide w-full md:w-auto"
       >
         {label}
       </LockableButton>
@@ -1731,7 +1771,9 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-7 h-7 rounded-sm hover:bg-[var(--surface-divider)] text-[var(--text-secondary)] flex items-center justify-center"
+        // 28 px was under the 32 px tap target _ActionButton documents, and
+        // this is the only way to Close JC / Force unlock / Cancel JC.
+        className="w-9 h-9 md:w-8 md:h-8 shrink-0 rounded-sm hover:bg-[var(--surface-divider)] text-[var(--text-secondary)] flex items-center justify-center"
         aria-label="More actions"
         title="More actions"
       >
@@ -1788,11 +1830,18 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
 // plain "SFG" for a non-seam intermediate (every non-first step defaults to
 // input_kind='SFG' even on legacy multi-step chains that carry no code, so we
 // must NOT render those as "SFG ?"). Null kind falls back to "?".
+// Plain-text twin of <SeamKind> — same decision, no markup. Used for the
+// `title` on the (truncating) chain meta line so the seam code stays
+// recoverable when the line is clipped.
+function seamText(kind: string | null, code: string | null): string {
+  return code && (kind || "").toUpperCase() === "SFG" ? code : (kind || "?");
+}
+
 function SeamKind({ kind, code }: { kind: string | null; code: string | null }) {
   if (code && (kind || "").toUpperCase() === "SFG") {
-    return <span className="font-mono font-semibold text-[var(--aws-navy)]">{code}</span>;
+    return <span className="font-mono font-semibold text-[var(--aws-navy)]">{seamText(kind, code)}</span>;
   }
-  return <>{kind || "?"}</>;
+  return <>{seamText(kind, code)}</>;
 }
 
 // ── SFG inventory picker (Slice 5) ─────────────────────────────────────────
@@ -1925,61 +1974,78 @@ function StageChainTab({ chain, detail, onJump }: { chain: ChainStep[]; detail: 
         </div>
       ) : null}
       <ol className="space-y-2">
-        {chain.map((step) => (
-          <li key={step.job_card_id}>
-            <button
-              type="button"
-              disabled={step.is_current}
-              onClick={() => onJump(step.job_card_id)}
-              className={[
-                "w-full text-left rounded-md border p-3 transition",
-                step.is_current
-                  ? "border-[var(--aws-orange)] bg-[#fbeced] cursor-default ring-1 ring-[var(--aws-orange)]"
-                  : "border-[var(--aws-border)] bg-white hover:border-[var(--aws-navy)] hover:shadow-[0_1px_4px_rgba(0,28,36,0.15)]",
-              ].join(" ")}
-            >
-              <div className="flex items-center gap-3 mb-1">
-                <span
-                  className={[
-                    "inline-flex items-center justify-center w-6 h-6 rounded-full text-[11px] font-bold shrink-0",
-                    step.is_current ? "bg-[var(--aws-orange)] text-white" : "bg-[var(--surface-divider)] text-[var(--text-secondary)]",
-                  ].join(" ")}
-                >
-                  {step.step_number}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div className={["text-[14px] truncate", step.is_current ? "font-semibold text-[var(--text-primary)]" : "text-[var(--text-primary)]"].join(" ")}>
-                    {step.process_name || "—"}
+        {chain.map((step) => {
+          // Row text derived once and shared by the visible meta line and its
+          // title, so the tooltip can never drift from what is on screen.
+          const metaText = `${step.stage || "—"} · ${seamText(step.input_kind, step.input_code)} → ${seamText(step.output_kind, step.output_code)} · ${step.floor || "—"}`;
+          return (
+            <li key={step.job_card_id}>
+              <button
+                type="button"
+                disabled={step.is_current}
+                onClick={() => onJump(step.job_card_id)}
+                className={[
+                  "w-full text-left rounded-md border p-3 transition",
+                  step.is_current
+                    ? "border-[var(--aws-orange)] bg-[#fbeced] cursor-default ring-1 ring-[var(--aws-orange)]"
+                    : "border-[var(--aws-border)] bg-white hover:border-[var(--aws-navy)] hover:shadow-[0_1px_4px_rgba(0,28,36,0.15)]",
+                ].join(" ")}
+              >
+                {/* Below md the status chip drops to its own line (basis-full)
+                    so the process name and the seam codes get the whole card
+                    width instead of the ~110 px the chip used to leave them.
+                    md+ is the same single nowrap row as before. */}
+                <div className="flex flex-wrap md:flex-nowrap items-start md:items-center gap-x-3 gap-y-1 mb-1">
+                  <span
+                    className={[
+                      "inline-flex items-center justify-center w-6 h-6 rounded-full text-[11px] font-bold shrink-0",
+                      step.is_current ? "bg-[var(--aws-orange)] text-white" : "bg-[var(--surface-divider)] text-[var(--text-secondary)]",
+                    ].join(" ")}
+                  >
+                    {step.step_number}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <div
+                      className={["text-[14px] break-words md:truncate", step.is_current ? "font-semibold text-[var(--text-primary)]" : "text-[var(--text-primary)]"].join(" ")}
+                      title={step.process_name || undefined}
+                    >
+                      {step.process_name || "—"}
+                    </div>
+                    <div className="text-[12px] text-[var(--text-muted)] break-words md:truncate" title={metaText}>
+                      {step.stage || "—"} ·{" "}
+                      <SeamKind kind={step.input_kind} code={step.input_code} />
+                      {" → "}
+                      <SeamKind kind={step.output_kind} code={step.output_code} />
+                      {" · "}
+                      {step.floor || "—"}
+                    </div>
                   </div>
-                  <div className="text-[12px] text-[var(--text-muted)] truncate">
-                    {step.stage || "—"} ·{" "}
-                    <SeamKind kind={step.input_kind} code={step.input_code} />
-                    {" → "}
-                    <SeamKind kind={step.output_kind} code={step.output_code} />
-                    {" · "}
-                    {step.floor || "—"}
+                  <div className="shrink-0 basis-full md:basis-auto flex justify-end md:block">
+                    <StatusPill status={step.status} />
                   </div>
                 </div>
-                <StatusPill status={step.status} />
-              </div>
-              <dl className="grid grid-cols-3 gap-x-3 text-[11px] mt-2">
-                <Inline label="Planned" value={fmtKg(step.planned_qty_kg)} />
-                <Inline label="Carried in" value={fmtKg(step.carried_qty_kg)} />
-                <Inline label="Dispatched" value={fmtKg(step.dispatched_to_next_kg)} />
-              </dl>
-            </button>
-          </li>
-        ))}
+                <dl className="grid grid-cols-3 gap-x-3 text-[11px] mt-2">
+                  <Inline label="Planned" value={fmtKg(step.planned_qty_kg)} />
+                  <Inline label="Carried in" value={fmtKg(step.carried_qty_kg)} />
+                  <Inline label="Dispatched" value={fmtKg(step.dispatched_to_next_kg)} />
+                </dl>
+              </button>
+            </li>
+          );
+        })}
       </ol>
     </Panel>
   );
 }
 
+// Label beside value at md+, label stacked over value below it. The three
+// of these sit in a grid-cols-3 that never folds, so at 360 px each cell is
+// only ~85 px — wide enough for the label OR the value, not both on one line.
 function Inline({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0">
-      <span className="uppercase tracking-wide font-semibold text-[var(--text-muted)] text-[10px] mr-1">{label}</span>
-      <span className="text-[12px] text-[var(--text-primary)]">{value}</span>
+      <span className="block md:inline uppercase tracking-wide font-semibold text-[var(--text-muted)] text-[10px] md:mr-1">{label}</span>
+      <span className="block md:inline text-[12px] text-[var(--text-primary)] break-words" title={value}>{value}</span>
     </div>
   );
 }
@@ -1988,7 +2054,7 @@ function StatusPill({ status, small }: { status: string | null; small?: boolean 
   const style = STATUS_STYLES[status ?? ""] ?? STATUS_STYLES.unlocked;
   return (
     <span
-      className={["inline-block font-semibold rounded-sm capitalize", small ? "text-[10px] px-1.5 py-0" : "text-[11px] px-2 py-0.5"].join(" ")}
+      className={["inline-block font-semibold rounded-sm capitalize whitespace-nowrap", small ? "text-[10px] px-1.5 py-0" : "text-[11px] px-2 py-0.5"].join(" ")}
       style={{ background: style.bg, color: style.fg, border: `1px solid ${style.ring}` }}
     >
       {fmtStatus(status) || "—"}
@@ -1998,30 +2064,103 @@ function StatusPill({ status, small }: { status: string | null; small?: boolean 
 
 // ── Tab strip + panel ─────────────────────────────────────────────────────
 
+// Which sides of the tab strip still have tabs hidden past the edge.
+function stripEdges(el: HTMLElement): { left: boolean; right: boolean } {
+  return {
+    left: el.scrollLeft > 1,
+    right: el.scrollWidth - el.clientWidth - el.scrollLeft > 1,
+  };
+}
+
 function TabStrip({ value, onChange }: { value: TabKey; onChange: (t: TabKey) => void }) {
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  // Nine tabs never fit a phone, so the strip scrolls — the fix is telling the
+  // operator that it does (fade on the right edge) and making sure the tab
+  // they are on is on screen when the page renders (a deep link to Remarks
+  // used to open with the strip scrolled to 0 and the selection off-screen).
+  const [edges, setEdges] = useState({ left: false, right: false });
+
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    const active = el.querySelector<HTMLElement>('[aria-selected="true"]');
+    // block:'nearest' so pulling a far-right tab into view scrolls the strip
+    // only — never the page.
+    if (active && typeof active.scrollIntoView === "function") {
+      active.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+    // Same object back when nothing changed, so a scroll gesture doesn't
+    // re-render the strip on every frame.
+    const sync = () => setEdges((prev) => {
+      const next = stripEdges(el);
+      return prev.left === next.left && prev.right === next.right ? prev : next;
+    });
+    // Deferred past the effect body: a synchronous setState here is the
+    // cascading-render pattern react-hooks/set-state-in-effect rejects.
+    queueMicrotask(sync);
+    el.addEventListener("scroll", sync, { passive: true });
+    window.addEventListener("resize", sync);
+    return () => {
+      el.removeEventListener("scroll", sync);
+      window.removeEventListener("resize", sync);
+    };
+  }, [value]);
+
   return (
     // Adaptive across devices: the row scrolls horizontally when the tabs
     // overflow (phones) and lays out fully on wider screens. Tabs never shrink
     // so labels stay readable; the scrollbar is hidden for a clean strip and
     // touch momentum scrolling kicks in natively.
-    <div
-      role="tablist"
-      className="border-b border-[var(--aws-border)] mb-4 flex flex-nowrap gap-1 overflow-x-auto [-webkit-overflow-scrolling:touch] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-    >
-      {TABS.map((t) => {
-        const active = t.key === value;
-        return (
-          <button
-            key={t.key}
-            role="tab"
-            aria-selected={active}
-            onClick={() => onChange(t.key)}
-            className={["shrink-0 px-3 sm:px-4 py-2 text-[12px] sm:text-[13px] font-medium whitespace-nowrap border-b-2 -mb-px transition", active ? "border-[var(--aws-orange)] text-[var(--text-primary)]" : "border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]"].join(" ")}
-          >
-            {t.label}
-          </button>
-        );
-      })}
+    <div className="relative mb-4">
+      <div
+        ref={stripRef}
+        role="tablist"
+        className="border-b border-[var(--aws-border)] flex flex-nowrap gap-1 overflow-x-auto [-webkit-overflow-scrolling:touch] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      >
+        {TABS.map((t) => {
+          const active = t.key === value;
+          return (
+            <button
+              key={t.key}
+              role="tab"
+              aria-selected={active}
+              onClick={() => onChange(t.key)}
+              // Only where the strip shows a shortened label below md, so the
+              // full name is still readable on a hover-capable device.
+              title={t.short ? t.label : undefined}
+              className={["shrink-0 px-3 sm:px-4 py-2 text-[12px] sm:text-[13px] font-medium whitespace-nowrap border-b-2 -mb-px transition", active ? "border-[var(--aws-orange)] text-[var(--text-primary)]" : "border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]"].join(" ")}
+            >
+              {/* Short label below md, full label from md up. display:none
+                  keeps the hidden one out of the accessibility tree, so the
+                  tab is announced with exactly one name. */}
+              {t.short ? (
+                <>
+                  <span className="md:hidden">{t.short}</span>
+                  <span className="hidden md:inline">{t.label}</span>
+                </>
+              ) : (
+                t.label
+              )}
+            </button>
+          );
+        })}
+      </div>
+      {/* Edge fades — the only hint that more tabs exist, since the scrollbar
+          is hidden. Each side shows only while there is something past it
+          (so the last tab, reached by deep link, still says "more to the
+          left"), and only below md where the strip actually overflows. */}
+      {edges.left ? (
+        <div
+          aria-hidden="true"
+          className="md:hidden pointer-events-none absolute left-0 top-0 bottom-px w-8 bg-linear-to-r from-[var(--background)] to-transparent"
+        />
+      ) : null}
+      {edges.right ? (
+        <div
+          aria-hidden="true"
+          className="md:hidden pointer-events-none absolute right-0 top-0 bottom-px w-8 bg-linear-to-l from-[var(--background)] to-transparent"
+        />
+      ) : null}
     </div>
   );
 }
@@ -2040,13 +2179,30 @@ function TabPanel({
 }) {
   switch (tab) {
     case "chain":      return <StageChainTab chain={chain} detail={detail} onJump={onJumpJc} />;
-    case "rawmaterial": return <RawMaterialTab jcId={detail.job_card_id} />;
+    case "allocation": return (
+      <MaterialAllocationTab
+        jobCardId={detail.job_card_id}
+        warehouse={detail.factory}
+        floor={detail.floor}
+        bomLines={detail.bom_lines ?? []}
+        // The production requirement: this job card's RM (kg) and PM (pcs) indent lines.
+        indents={[
+          ...(detail.rm_indents ?? []).map((r) => ({ ...r, item_type: "RM" })),
+          ...(detail.pm_indents ?? []).map((p) => ({ ...p, item_type: "PM" })),
+        ]}
+        bomChanges={detail.bom_changes ?? null}
+        onReload={onReload}
+      />
+    );
+    case "rawmaterial": return (
+      <RawMaterialTab jcId={detail.job_card_id} manualPrint rmArticles={rmArticleOptions(detail.bom_lines ?? [])} />
+    );
     case "overview":   return <OverviewTab detail={detail} chain={chain} onReload={onReload} />;
     case "accounting": return <AccountingTab detail={detail} onReload={onReload} onJumpToBoxes={onJumpToBoxes} />;
     case "quality":    return <QualityTab detail={detail} onReload={onReload} />;
     case "signoffs":   return <SignOffsTab detail={detail} onReload={onReload} />;
     case "remarks":    return <RemarksTab detail={detail} onReload={onReload} />;
-    case "sfgboxes":   return <SfgBoxesTab detail={detail} focusBatchId={focusBatchId} onFocusConsumed={onFocusConsumed} />;
+    case "sfgboxes":   return <SfgBoxesTab detail={detail} onReload={onReload} focusBatchId={focusBatchId} onFocusConsumed={onFocusConsumed} />;
     case "amendments": return <AmendmentsTab jcId={detail.job_card_id} />;
   }
 }
@@ -2085,15 +2241,19 @@ type SfgScanResult = {
   rejected_boxes: { box_id: string; reason: string }[];
 };
 
-function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCardDetail; focusBatchId?: number | null; onFocusConsumed?: () => void }) {
+function SfgBoxesTab({ detail, onReload, focusBatchId, onFocusConsumed }: { detail: JobCardDetail; onReload: () => void; focusBatchId?: number | null; onFocusConsumed?: () => void }) {
   const jcId = detail.job_card_id;
   const isProducer = ["SFG", "WIP"].includes((detail.output_kind ?? "").toUpperCase());
   const isConsumer = (detail.input_kind ?? "").toUpperCase() === "SFG";
   // Fine-grained permission gate (UX only; server still enforces) for the
   // consumer scan-in flow.
   const canScan = useHasPermission("production", "job_cards", "material_scan", "scan");
+  // Offering the "Mark job card completed" button below. The server enforces it
+  // (and its own open-shift / open-batch / unbalanced gates) either way.
+  const canComplete = useHasPermission("production", "job_cards", "overview", "complete");
 
   const [boxes, setBoxes] = useState<SfgBoxRow[]>([]);
+  const [byBatch, setByBatch] = useState<BoxingBatch[]>([]); // per-batch box rollup from the same payload
   const [batches, setBatches] = useState<BatchRow[]>([]); // full rows — drives both the box grouping and the live accounting table
 
   const [loading, setLoading] = useState(true);   // mirrors Material-In's box fetch
@@ -2103,6 +2263,8 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
   const [scanResult, setScanResult] = useState<SfgScanResult | null>(null);
   const [scanErr, setScanErr] = useState<string | null>(null);
   const [selBatch, setSelBatch] = useState<number | null>(null); // batch picked in the Accounting selector above the scanner
+  const [completing, setCompleting] = useState(false);
+  const [completeMsg, setCompleteMsg] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
 
   const loadBoxes = useCallback(async () => {
     setLoading(true);
@@ -2110,8 +2272,13 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
     try {
       const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/wip-boxes`);
       if (!res.ok) { setLoadErr(await readApiErrorMessage(res, "Could not load boxes")); return; }
-      const data = (await res.json()) as { boxes?: SfgBoxRow[] };
-      setBoxes(data.boxes ?? []);
+      const data = (await res.json()) as { boxes?: SfgBoxRow[]; by_batch?: BoxingBatch[] };
+      const rows = data.boxes ?? [];
+      setBoxes(rows);
+      // by_batch is the server's rollup. An older server doesn't send it, and the
+      // banner must not simply vanish there — the same figures are derivable from
+      // the box rows this payload already carries.
+      setByBatch(Array.isArray(data.by_batch) ? data.by_batch : rollupBoxesByBatch(rows));
       setLoadErr(null);
     } catch (e) {
       setLoadErr(friendlyJobCardError(e));
@@ -2126,19 +2293,25 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
     queueMicrotask(() => { void loadBoxes(); });
   }, [loadBoxes]);
 
-  // Job-card batches for the produced-boxes batch dropdowns (edit + add flows).
-  useEffect(() => {
-    let cancelled = false;
-    queueMicrotask(async () => {
-      try {
-        const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/batches`);
-        if (!res.ok) return;
-        const data = (await res.json()) as { batches?: BatchRow[] };
-        if (!cancelled) setBatches(Array.isArray(data.batches) ? data.batches : []);
-      } catch { /* non-fatal */ }
-    });
-    return () => { cancelled = true; };
+  // Job-card batches for the produced-boxes batch dropdowns (edit + add flows)
+  // and for the ready-to-complete banner. Re-runnable: a print closes the last
+  // gap on a batch, so the banner has to be able to re-read the batch rows
+  // without the operator leaving the tab and coming back.
+  const loadBatches = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/batches`, { signal });
+      if (!res.ok || signal?.aborted) return;
+      const data = (await res.json()) as { batches?: BatchRow[] };
+      if (signal?.aborted) return;
+      setBatches(Array.isArray(data.batches) ? data.batches : []);
+    } catch { /* non-fatal — an abort lands here too */ }
   }, [jcId]);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    queueMicrotask(() => { void loadBatches(ctrl.signal); });
+    return () => ctrl.abort();
+  }, [loadBatches]);
 
   // Edit log → field keys ever changed, so edited box values render light red.
   // Re-read whenever boxes reload (after a save) so a fresh edit lights up.
@@ -2189,6 +2362,49 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
     () => batches.map((b) => ({ batch: b, summary: computeBatchSummary(b, detail, articles) })),
     [batches, detail, articles],
   );
+
+  // "Nothing left to box" — the last step of this job card's flow. Printing the
+  // labels is where the operator finds out; this is where they're told, and
+  // offered the button. Nothing completes on its own: the button calls PUT
+  // …/complete, which keeps every refusal it already has (open shift, open
+  // batch, unbalanced accounting) and is the only thing that decides.
+  const boxing = useMemo(
+    () => boxingState(
+      batches.map((b) => ({
+        batch_id: b.batch_id,
+        batch_number: b.batch_number,
+        status: b.status,
+        produced_qty_kg: _num(b.produced_qty_kg),
+        input_qty_kg: _num(b.input_qty_kg),
+        planned_qty_kg: _num(b.planned_qty_kg),
+      })),
+      byBatch,
+    ),
+    [batches, byBatch],
+  );
+  const hasBoxes = byBatch.some((e) => e.boxes > 0);
+
+  async function completeJobCard() {
+    if (!window.confirm("Complete Job Card\n\nAll boxes are printed and nothing is left to box. Mark this job card as completed?")) return;
+    setCompleting(true);
+    setCompleteMsg(null);
+    try {
+      const res = await apiFetch(`/api/v1/production/job-cards-v2/${jcId}/complete`, { method: "PUT" });
+      if (!res.ok) {
+        // The server's refusals ARE the answer — an open shift or an unbalanced
+        // batch is something the operator has to go and fix, so its message is
+        // shown as it stands rather than reworded or worked around.
+        setCompleteMsg({ kind: "err", msg: await readApiErrorMessage(res, `HTTP ${res.status}`) });
+        return;
+      }
+      setCompleteMsg({ kind: "ok", msg: "Job card completed." });
+      onReload();
+    } catch (e) {
+      setCompleteMsg({ kind: "err", msg: friendlyJobCardError(e) });
+    } finally {
+      setCompleting(false);
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -2263,8 +2479,17 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
       ) : null}
 
       {/* Same box-scan feature as the Raw Material tab (store / list / ✕ delete /
-          count+article+weight / duplicate guard), scanning boxes into this JC. */}
-      <BoxScanPanel jcId={jcId} scanTitle="Scan Box QR" listHeading="Scanned boxes" emptyHint="Scan a box QR to add it." issuesHeading="Boxed (per article)" />
+          duplicate guard / Manual print for a box with no sticker), scanning
+          boxes into this JC. */}
+      <BoxScanPanel
+        jcId={jcId}
+        scanTitle="Scan Box QR"
+        listHeading="Scanned boxes"
+        emptyHint="Scan a box QR to add it."
+        issuesHeading="Boxed (per article)"
+        manualPrint
+        rmArticles={rmArticleOptions(detail.bom_lines ?? [])}
+      />
 
       {!isProducer && !isConsumer && (
         <EmptyHint>This stage neither produces nor consumes SFG — no boxes apply.</EmptyHint>
@@ -2275,6 +2500,44 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
       {loadErr && !isProducer && (
         <div className="text-[12px] text-[var(--aws-error)]">{loadErr}</div>
       )}
+
+      {/* Only while the job card is still running: a completed / closed /
+          cancelled card has nothing to offer and nothing to ask for either —
+          telling its operator to go print three boxes is work nobody can do. */}
+      {isProducer && hasBoxes && detail.status === "in_progress" ? (
+        boxing.ready ? (
+          // Ready — offer the last step.
+          <div className="rounded-md border border-[#bfe3c8] bg-[#eaf6ed] p-3 text-[13px] text-[var(--text-primary)]">
+            <div className="font-semibold">All boxes are printed and nothing is left to box.</div>
+            {canComplete ? (
+              <button
+                type="button"
+                className={`${btnCls} mt-2`}
+                disabled={completing}
+                onClick={() => void completeJobCard()}
+              >
+                {completing ? "Completing…" : "Mark job card completed"}
+              </button>
+            ) : (
+              <p className="mt-1 text-[12px] text-[var(--text-secondary)]">
+                Someone with permission can now mark this job card completed.
+              </p>
+            )}
+          </div>
+        ) : (
+          // Not ready — one line saying the single next thing to do, not a list.
+          <p className="text-[12px] text-[var(--text-muted)]">{boxing.reason}</p>
+        )
+      ) : null}
+
+      {/* Outside the banner on purpose: a successful completion flips the JC to
+          'completed', which takes the banner away — and with it the confirmation
+          that anything happened. A refusal stays put for the same reason. */}
+      {isProducer && completeMsg ? (
+        <p className={`text-[12px] ${completeMsg.kind === "ok" ? "text-[var(--text-success)]" : "text-[var(--aws-error)]"}`}>
+          {completeMsg.msg}
+        </p>
+      ) : null}
 
       {isProducer && (
         <Panel title="Boxes by batch">
@@ -2297,7 +2560,11 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
                   appendable (+ Add Boxes), and printable (per-box / all / range) with
                   pagination; a blank batch shows an add-boxes prompt. Print QR from the
                   Accounting tab expands+opens that batch's add panel. */}
-              <SfgProducedBoxes jcId={jcId} boxes={boxes} batches={batches} changedKeys={changedKeys} onReload={() => void loadBoxes()} focusBatchId={focusBatchId} onFocusConsumed={onFocusConsumed} />
+              {/* Reloads BOTH boxes and batches: a print is what closes the last
+                  gap, and the banner above reads the batch rows as well as the
+                  boxes, so reloading only the boxes would hide it until the
+                  operator switched tabs and came back. */}
+              <SfgProducedBoxes jcId={jcId} boxes={boxes} batches={batches} changedKeys={changedKeys} onReload={() => { void loadBoxes(); void loadBatches(); }} focusBatchId={focusBatchId} onFocusConsumed={onFocusConsumed} />
             </>
           )}
         </Panel>
@@ -2350,14 +2617,23 @@ function SfgBoxesTab({ detail, focusBatchId, onFocusConsumed }: { detail: JobCar
 
 function Panel({ children, title, action }: { children: React.ReactNode; title?: string; action?: React.ReactNode }) {
   // Padding scales with viewport so mobile doesn't waste ~40 % of width
-  // on chrome; overflow-x-hidden is the no-horizontal-scroll guarantee
+  // on chrome; overflow-x-clip is the no-horizontal-scroll guarantee
   // — any rogue inner grid that overflows gets clipped instead of
   // forcing the page to scroll sideways.
+  //
+  // clip, not hidden: `overflow-x: hidden` makes the panel a scroll container
+  // (overflow-y resolves to auto), which silently kills `position: sticky`
+  // headers and pinned first columns inside it. `clip` clips exactly the same
+  // way without creating that scroll container.
   return (
-    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-3 sm:p-4 lg:p-5 mb-4 overflow-x-hidden">
+    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-3 sm:p-4 lg:p-5 mb-4 overflow-x-clip">
       {title || action ? (
         <div className="flex items-center justify-between mb-3 gap-2">
-          {title ? <h3 className="text-[12px] uppercase tracking-wide font-semibold text-[var(--text-secondary)] truncate">{title}</h3> : <span />}
+          {/* Wrap the title below md rather than clip it — a panel title like
+              "Create-WIP operation: Roast & Flavour/Salt" is the one thing the
+              card exists to state. md+ keeps the single-line ellipsis, with a
+              title attribute so the text stays recoverable either way. */}
+          {title ? <h3 className="min-w-0 text-[12px] uppercase tracking-wide font-semibold text-[var(--text-secondary)] break-words md:truncate" title={title}>{title}</h3> : <span />}
           {action ?? null}
         </div>
       ) : null}
@@ -2366,15 +2642,22 @@ function Panel({ children, title, action }: { children: React.ReactNode; title?:
   );
 }
 
-function KV({ label, value, mono }: { label: React.ReactNode; value: React.ReactNode; mono?: boolean }) {
+function KV({ label, value, mono, title }: { label: React.ReactNode; value: React.ReactNode; mono?: boolean; title?: string }) {
   // label accepts ReactNode so callers can render multi-line labels
   // (e.g. "Process Loss" with a smaller "incl. wastage" subline) without
-  // truncating critical context. The `truncate` on the value keeps
-  // overlong numeric strings from forcing horizontal scroll on mobile.
+  // truncating critical context.
+  //
+  // The value wraps below md and keeps the single-line ellipsis from md up:
+  // a KV cell is ~143 px on a 360 px phone, which clipped operator data
+  // ("Step 3 · Roasting and Flavouring", a joined team list) at about 21
+  // characters. `title` carries the full text whenever it is a plain string,
+  // so a truncated value is always recoverable — the same guarantee
+  // HeaderMeta already gives in the page header.
+  const hint = title ?? (typeof value === "string" ? value : undefined);
   return (
     <div className="min-w-0">
       <div className="uppercase tracking-wide font-semibold text-[var(--text-muted)] text-[10px]">{label}</div>
-      <div className={`text-[13px] text-[var(--text-primary)] truncate ${mono ? "font-mono" : ""}`}>{value}</div>
+      <div className={`text-[13px] text-[var(--text-primary)] break-words md:truncate ${mono ? "font-mono" : ""}`} title={hint}>{value}</div>
     </div>
   );
 }
@@ -2427,9 +2710,14 @@ function CreateWipChecklist({ detail, chain }: { detail: JobCardDetail; chain: C
       </p>
       <div className="space-y-1">
         {items.map((it) => (
-          <label key={it.id} className="flex items-center gap-2 text-[13px] text-[var(--text-primary)]">
+          <label key={it.id} className="flex items-start md:items-center gap-2 text-[13px] text-[var(--text-primary)]">
+            {/* items-start + mt-0.5 below md: a process name wraps to two or
+                three lines on a phone, and a centred box reads as belonging
+                to the middle of the text. w-5 h-5 is a real tap target there;
+                md+ keeps the browser default size and centring. */}
             <input
               type="checkbox"
+              className="shrink-0 w-5 h-5 mt-0.5 md:w-auto md:h-auto md:mt-0"
               checked={!!ticked[it.id]}
               onChange={(e) => setTicked((p) => ({ ...p, [it.id]: e.target.checked }))}
             />
@@ -2559,7 +2847,9 @@ function TeamPanel({ detail, onReload }: { detail: JobCardDetail; onReload: () =
           <button
             type="button"
             onClick={() => { setOpen((v) => !v); setFeedback(null); }}
-            className="h-7 px-3 rounded-[2px] text-[12px] font-semibold border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white"
+            // h-9 on a phone, h-8 from md up — 28 px was under the 32 px tap
+            // target _ActionButton documents for every other action surface.
+            className="h-9 md:h-8 px-3 shrink-0 rounded-[2px] text-[12px] font-semibold border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white"
           >
             {open ? "Cancel" : buttonLabel}
           </button>
@@ -2568,10 +2858,14 @@ function TeamPanel({ detail, onReload }: { detail: JobCardDetail; onReload: () =
     >
       <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-3 mb-3">
         <KV label="Team leader" value={detail.assigned_to_team_leader || "—"} />
-        <KV
-          label="Team members"
-          value={detail.team_members && detail.team_members.length > 0 ? detail.team_members.join(", ") : "—"}
-        />
+        {/* The member list is the one unbounded value in this grid, so below
+            md it takes the whole row and wraps; md+ keeps its single column. */}
+        <div className="col-span-2 sm:col-span-4 md:col-span-1 min-w-0">
+          <KV
+            label="Team members"
+            value={detail.team_members && detail.team_members.length > 0 ? detail.team_members.join(", ") : "—"}
+          />
+        </div>
         <KV label="Started" value={fmtDateTime(detail.start_time)} />
         <KV label="Ended" value={fmtDateTime(detail.end_time)} />
       </dl>
@@ -2614,13 +2908,16 @@ function TeamPanel({ detail, onReload }: { detail: JobCardDetail; onReload: () =
           {members.length > 0 ? (
             <div className="flex flex-wrap gap-2 mb-3">
               {members.map((m, i) => (
-                <span key={i} className="inline-flex items-center gap-1 bg-[#eaf3ff] border border-[#bbd9f3] text-[#9a393e] text-[12px] rounded-full px-2 py-0.5">
+                <span key={i} className="inline-flex items-center gap-1 max-w-full break-words bg-[#eaf3ff] border border-[#bbd9f3] text-[#9a393e] text-[12px] rounded-full px-2 py-0.5">
                   {m}
+                  {/* The × was a bare glyph with no box — about 11 px square,
+                      so a name fat-fingered into the list could not be removed
+                      on a phone at all. */}
                   <button
                     type="button"
                     onClick={() => removeMember(i)}
                     disabled={submitting}
-                    className="ml-1 leading-none hover:text-[var(--aws-error)]"
+                    className="ml-1 -mr-1 shrink-0 inline-flex items-center justify-center w-6 h-6 md:w-4 md:h-4 rounded-full leading-none hover:text-[var(--aws-error)]"
                     aria-label={`Remove ${m}`}
                   >
                     ×
@@ -2987,31 +3284,47 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   // GET /box-scans is gated on production/job_cards/material_scan:scan, which an
   // accounting-only user may not hold. A 403 is expected, not an error: the
   // column just degrades to a dash.
+  //
+  // Re-runnable, and it has to be: since the scanned figure is now the baseline
+  // each line's variance is read against, a stale one doesn't just look old — it
+  // reports the wrong variance. Called again after a save / reload below.
   const [scanIssues, setScanIssues] = useState<ArticleIssue[]>([]);
   const [scansDenied, setScansDenied] = useState(false);
+  const refetchScans = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const res = await apiFetch(
+        `/api/v1/production/job-cards-v2/${detail.job_card_id}/box-scans`,
+        { signal },
+      );
+      if (signal?.aborted) return;
+      if (res.status === 403) { setScansDenied(true); setScanIssues([]); return; }
+      if (!res.ok) return;
+      const j = (await res.json()) as { scans?: { article: string | null; net_weight: number | null }[] };
+      if (signal?.aborted) return;
+      setScansDenied(false);
+      setScanIssues(rollupByArticle(Array.isArray(j.scans) ? j.scans : []));
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
+      // Non-fatal by design — the scanned column is a reference figure, and
+      // losing it must never take the Accounting tab down with it.
+    }
+  }, [detail.job_card_id]);
   useEffect(() => {
     const ctrl = new AbortController();
-    (async () => {
-      try {
-        const res = await apiFetch(
-          `/api/v1/production/job-cards-v2/${detail.job_card_id}/box-scans`,
-          { signal: ctrl.signal },
-        );
-        if (ctrl.signal.aborted) return;
-        if (res.status === 403) { setScansDenied(true); setScanIssues([]); return; }
-        if (!res.ok) return;
-        const j = (await res.json()) as { scans?: { article: string | null; net_weight: number | null }[] };
-        if (ctrl.signal.aborted) return;
-        setScansDenied(false);
-        setScanIssues(rollupByArticle(Array.isArray(j.scans) ? j.scans : []));
-      } catch (e) {
-        if (e instanceof DOMException && e.name === "AbortError") return;
-        // Non-fatal by design — the scanned column is a reference figure, and
-        // losing it must never take the Accounting tab down with it.
-      }
-    })();
+    // Deferred past the synchronous effect body (react-hooks/set-state-in-effect),
+    // the same queueMicrotask idiom the boxes tab uses. The controller still
+    // covers it: an unmount aborts before the fetch is even issued.
+    queueMicrotask(() => { void refetchScans(ctrl.signal); });
     return () => ctrl.abort();
-  }, [detail.job_card_id]);
+  }, [refetchScans]);
+
+  // The page reload plus the scanned figures, which come from their own
+  // endpoint: a plain onReload() refreshes the JC detail and leaves every
+  // variance chip comparing against the totals from before the save.
+  const reloadAll = useCallback(() => {
+    void refetchScans();
+    onReload();
+  }, [refetchScans, onReload]);
 
   // batch_ids that actually carry recorded data (output / consumption /
   // byproduct / balance rows). Used to bias the initial batch auto-select
@@ -3147,6 +3460,10 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       closedProducedKg, closedProducedUnits,
     };
   }, [batches]);
+
+  // Batches that actually consumed something. A cancelled one never did, so it
+  // doesn't make this a multi-batch job card for the variance baseline below.
+  const liveBatchCount = batchRollup.openCount + batchRollup.closedCount;
 
   // ── R10 — diff-on-save: dirty-section mask ──────────────────────────
   // The Edit Batch flow sends ONLY the sections the operator actually
@@ -3538,13 +3855,13 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       // for the new batch_id appear) and refetchBatches updates the
       // selector + per-batch summary list.
       await refetchBatches();
-      onReload();
+      reloadAll();
     } catch (e) {
       setBatchActionMsg({ kind: "err", msg: friendlyJobCardError(e) });
     } finally {
       setBatchActionBusy(false);
     }
-  }, [detail.job_card_id, onReload, refetchBatches, newBatchLabel, isPackingStage]);
+  }, [detail.job_card_id, reloadAll, refetchBatches, newBatchLabel, isPackingStage]);
 
   // 072: rename a batch (so a batch — including legacy ones — can be given the
   // free-text name shown in the batch table). Acts on the passed row.
@@ -3666,8 +3983,8 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   // recorded. One balance qty per BOM article (returned rows; defaults to 0 on
   // save when blank). Rejection rows = off-grade byproducts + control_sample.
   const consumptionFromServer = useMemo(
-    () => consumptionStateFromDetail(detail.consumption_lines, selectedBatchId),
-    [detail.consumption_lines, selectedBatchId],
+    () => consumptionStateFromDetail(detail.consumption_lines, selectedBatchId, articles),
+    [detail.consumption_lines, selectedBatchId, articles],
   );
   // C3-MED-7 — track which keys have a saved consumption row on the
   // server so the VarianceChip can stay quiet when the operator has
@@ -3681,8 +3998,8 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     return out;
   }, [consumptionFromServer]);
   const balanceFromServer = useMemo(
-    () => balanceStateFromDetail(detail.balance_materials, selectedBatchId),
-    [detail.balance_materials, selectedBatchId],
+    () => balanceStateFromDetail(detail.balance_materials, selectedBatchId, articles),
+    [detail.balance_materials, selectedBatchId, articles],
   );
   const rejectionsFromServer = useMemo(
     () => rejectionsFromDetail(detail.byproducts, detail.balance_materials, selectedBatchId),
@@ -3698,6 +4015,11 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   const [rejections, setRejections] = useState<RejectionRow[]>(
     rejectionsFromServer.length > 0 ? rejectionsFromServer : [BLANK_REJECTION_ROW()],
   );
+  // What the inputs were last seeded with from the server — the baseline for
+  // "clearing a figure saves 0". Not the live memos: those move on every poll
+  // while the form is dirty, and would zero a figure saved elsewhere meanwhile.
+  const seededConsumptionRef = useRef<Record<string, string>>(consumptionFromServer);
+  const seededRejectionsRef = useRef<RejectionRow[]>(rejectionsFromServer);
 
   // Additives — data-keeping rows that DO NOT participate in the
   // conservation identity. Server-side rows arrive on detail.additives
@@ -3741,10 +4063,12 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     // variance values.
     if (formDirty.current) return;
     queueMicrotask(() => {
+      seededConsumptionRef.current = consumptionFromServer;
       setConsumption(consumptionFromServer);
       setBalance(balanceFromServer);
       // Keep the default-blank-row behaviour on reload too — if the
       // server has nothing for off-grade, surface a single empty row.
+      seededRejectionsRef.current = rejectionsFromServer;
       setRejections(
         rejectionsFromServer.length > 0
           ? rejectionsFromServer
@@ -4379,6 +4703,15 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       // canonical-input side — same bucket as RM, but now self-labelled.
       if ((a.item_type || "").toUpperCase() === "PM") pmCons.push(entry); else rmCons.push(entry);
     }
+    // Clearing a saved figure saves 0 (W3-CRIT-2 pattern, extended to every
+    // article): otherwise the old value stays on the server and the article can
+    // never be removed from the job card's BOM.
+    for (const k of clearedConsumptionKeys(seededConsumptionRef.current, consumption)) {
+      const a = articles.find((x) => (x.bom_line_id != null ? `b${x.bom_line_id}` : `n${x.material_sku_name}`) === k);
+      if (!a) continue;
+      const entry = { bom_line_id: a.bom_line_id, material_sku_name: a.material_sku_name, consumed_qty: 0, uom: a.uom, input_kind: a.item_type };
+      if ((a.item_type || "").toUpperCase() === "PM") pmCons.push(entry); else rmCons.push(entry);
+    }
     body.rm_consumed = rmCons;
     body.pm_consumed = pmCons;
 
@@ -4411,6 +4744,14 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
         remarks:       r.remarks || null,
         material_name: r.materialName || null,
         bom_line_id:   r.bomLineId ?? null,
+      });
+    }
+    // Off-grade rows the operator removed, zeroed or re-pointed: save their old
+    // (category, article) as 0 so they really clear.
+    for (const r of clearedRejections(seededRejectionsRef.current, rejections)) {
+      byproducts.push({
+        category: r.category, qty_kg: 0, remarks: r.remarks || null,
+        material_name: r.materialName || null, bom_line_id: r.bomLineId ?? null,
       });
     }
 
@@ -4833,7 +5174,9 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       // selector stay stale and made subsequent edits look like fresh
       // saves on a batch that already had data.
       await refetchBatches();
-      onReload();
+      // reloadAll, not onReload: the saved consumption is read against the
+      // SCANNED quantity now, so the scan rollup has to be re-read too.
+      reloadAll();
     } catch (err) {
       setFeedback({ kind: "err", msg: friendlyJobCardError(err) });
     } finally {
@@ -4887,6 +5230,41 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   // C3-MED-1 — stable banner id for inputs to point aria-describedby at.
   const bannerId = lockBannerId(detail.job_card_id);
   const describedBy = inputsDisabled && lock.isLocked ? bannerId : undefined;
+  // Material Consumption lines — derived ONCE here and rendered twice below
+  // (table at md+, cards under it). buildConsumptionRow holds the per-row
+  // computation; consQtyInput / consVariance hold the controls, so the two
+  // layouts cannot drift on what was issued, which baseline applies, or what
+  // an edit does.
+  const consumptionRows = visibleArticles.map((a) => buildConsumptionRow(a, {
+    matchedIssues: scanMatch.matched,
+    bomPrescribedByKey,
+    addedArticleKeys,
+    scansDenied,
+    multiBatch: liveBatchCount > 1,
+  }));
+  const consQtyInput = (r: ConsumptionRow, widthCls: string) => (
+    <input
+      type="number" step="any" placeholder={`Qty (${r.article.uom})`}
+      className={`${inputCls} ${widthCls}${consRed(r.article.material_sku_name) ? " bg-[#fbeced]" : ""}`}
+      value={consumption[r.key] ?? ""}
+      onChange={(e) => { markSectionDirty("consumption"); setConsumption((c) => ({ ...c, [r.key]: e.target.value })); }}
+      onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
+      disabled={inputsDisabled}
+      aria-disabled={inputsDisabled}
+      aria-label={`Quantity consumed, ${r.article.material_sku_name}`}
+      aria-describedby={describedBy}
+    />
+  );
+  const consVariance = (r: ConsumptionRow) => (
+    <VarianceChip
+      materialName={r.article.material_sku_name}
+      baseline={r.baseline}
+      actualQty={num(consumption[r.key] ?? "")}
+      uom={r.article.uom}
+      hasSavedConsumption={!!hasSavedConsumptionByKey[r.key]}
+      plannedKg={num(String(detail.planned_qty_kg ?? 0))}
+    />
+  );
 
   return (
     <form
@@ -5241,95 +5619,95 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
               : "No material from this BOM is consumed at this stage."}
           </EmptyHint>
         ) : (
-          /* Tabular: the scanned figure only means something read against the
-             quantity beside it, and a div-grid cannot express that pairing to a
-             screen reader. Wrapped in overflow-x-auto — the Issued column makes
-             this too wide for a phone otherwise. */
-          <div className="mb-4 overflow-x-auto">
-            <table className="w-full text-[13px] border-collapse">
-              <caption className="sr-only">
-                Material consumption for this stage: scanned quantity issued, and the quantity consumed.
-              </caption>
-              <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wide text-[var(--text-muted)] border-b border-[#e5e7eb]">
-                  <th scope="col" className="py-1.5 pr-3 font-medium">Material</th>
-                  <th scope="col" className="py-1.5 pr-3 font-medium whitespace-nowrap">Issued (scanned)</th>
-                  <th scope="col" className="py-1.5 pr-3 font-medium whitespace-nowrap">Qty consumed</th>
-                  <th scope="col" className="py-1.5 pr-3 font-medium">UoM</th>
-                  <th scope="col" className="py-1.5 font-medium">Variance</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleArticles.map((a) => {
-                  const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
-                  const isPm = isPmArticle(a);
-                  const issue = isPm ? undefined : scanMatch.matched.get(a.material_sku_name.trim());
-                  return (
-                    <tr key={key} className="border-b border-[#f1f1f1] align-top">
+          /* Two layouts, ONE data source (consumptionRows above).
+
+             md and up keeps the table: the scanned figure only means something
+             read against the quantity beside it, and a div-grid cannot express
+             that pairing to a screen reader.
+
+             Below md the same five columns forced sideways scrolling on a
+             phone, so each material becomes a card instead. `hidden md:block`
+             / `md:hidden` keep exactly one of the two in the DOM's
+             accessibility tree, so the quantity inputs are never announced —
+             or tabbed through — twice. */
+          <div className="mb-4">
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-[13px] border-collapse">
+                <caption className="sr-only">
+                  Material consumption for this stage: scanned quantity issued, and the quantity consumed.
+                </caption>
+                <thead>
+                  <tr className="text-left text-[11px] uppercase tracking-wide text-[var(--text-muted)] border-b border-[#e5e7eb]">
+                    <th scope="col" className="py-1.5 pr-3 font-medium">Material</th>
+                    <th scope="col" className="py-1.5 pr-3 font-medium whitespace-nowrap">Issued (scanned)</th>
+                    <th scope="col" className="py-1.5 pr-3 font-medium whitespace-nowrap">Qty consumed</th>
+                    <th scope="col" className="py-1.5 pr-3 font-medium">UoM</th>
+                    <th scope="col" className="py-1.5 font-medium">Variance</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {consumptionRows.map((r) => (
+                    <tr key={r.key} className="border-b border-[#f1f1f1] align-top">
                       <th scope="row" className="py-2 pr-3 font-normal text-left max-w-[260px]">
-                        <span className="block truncate text-[var(--text-primary)]" title={a.material_sku_name}>
-                          {a.material_sku_name}{" "}
-                          <span className={`text-[11px] ${a.item_type === "SFG" || a.item_type === "WIP" ? "text-[var(--text-success)] font-medium" : "text-[var(--text-muted)]"}`}>({a.item_type})</span>
-                          {addedArticleKeys.has(key) ? (
-                            <span
-                              className="ml-1.5 text-[10px] px-1 py-px rounded bg-[#eef6ff] border border-[#a7c9ec] text-[#0d5aa7] align-middle"
-                              title="Pulled into this stage from the BOM. Enter a quantity and save to keep it."
-                            >
-                              added at this stage
-                            </span>
-                          ) : null}
-                        </span>
+                        <ConsumptionMaterialLabel row={r} className="block truncate text-[var(--text-primary)]" />
                       </th>
                       <td className="py-2 pr-3 whitespace-nowrap text-[12px]">
-                        {issue ? (
-                          <span className="text-[var(--text-primary)]">
-                            {fmtKg(issue.net_weight)}
-                            <span className="text-[var(--text-muted)]"> · {issue.boxes} {issue.boxes === 1 ? "box" : "boxes"}</span>
-                          </span>
-                        ) : (
-                          <span
-                            className="text-[var(--text-muted)]"
-                            title={
-                              isPm
-                                ? "Packaging material is not box-scanned."
-                                : scansDenied
-                                  ? "You do not have production/job_cards/material_scan:scan, so scanned quantities cannot be shown."
-                                  : "No scanned box matched this material."
-                            }
-                          >
-                            —
-                          </span>
-                        )}
+                        <ConsumptionIssuedText row={r} />
                       </td>
                       <td className="py-2 pr-3">
-                        <input
-                          type="number" step="any" placeholder={`Qty (${a.uom})`}
-                          className={`${inputCls} w-[120px]${consRed(a.material_sku_name) ? " bg-[#fbeced]" : ""}`}
-                          value={consumption[key] ?? ""}
-                          onChange={(e) => { markSectionDirty("consumption"); setConsumption((c) => ({ ...c, [key]: e.target.value })); }}
-                          onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
-                          disabled={inputsDisabled}
-                          aria-disabled={inputsDisabled}
-                          aria-label={`Quantity consumed, ${a.material_sku_name}`}
-                          aria-describedby={describedBy}
-                        />
+                        {consQtyInput(r, "w-[120px]")}
                       </td>
-                      <td className="py-2 pr-3 text-[11px] text-[var(--text-muted)]">{a.uom}</td>
+                      <td className="py-2 pr-3 text-[11px] text-[var(--text-muted)]">{r.article.uom}</td>
                       <td className="py-2">
-                        <VarianceChip
-                          materialName={a.material_sku_name}
-                          bomPrescribedQty={bomPrescribedByKey[key] ?? null}
-                          actualQty={num(consumption[key] ?? "")}
-                          uom={a.uom}
-                          hasSavedConsumption={!!hasSavedConsumptionByKey[key]}
-                          plannedKg={num(String(detail.planned_qty_kg ?? 0))}
-                        />
+                        {consVariance(r)}
                       </td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Phone: one card per material, nothing off-screen sideways. The
+                list carries the accessible structure the table gets from its
+                caption and th/scope — a named list, each card labelled by the
+                material it is for. */}
+            <ul
+              role="list"
+              className="md:hidden space-y-2"
+              aria-label="Material consumption for this stage"
+            >
+              {consumptionRows.map((r, i) => (
+                <li
+                  key={r.key}
+                  role="listitem"
+                  aria-labelledby={`jc-cons-card-${i}`}
+                  className="rounded border border-[#e5e7eb] px-3 py-2.5"
+                >
+                  <ConsumptionMaterialLabel
+                    id={`jc-cons-card-${i}`}
+                    row={r}
+                    className="block text-[13px] text-[var(--text-primary)] break-words"
+                  />
+                  <div className="mt-0.5 text-[12px] text-[var(--text-muted)]">
+                    Issued <ConsumptionIssuedText row={r} />
+                  </div>
+                  <label className="block mt-2">
+                    <span className="block text-[11px] uppercase tracking-wide text-[var(--text-muted)] mb-0.5">
+                      {/* Visible text is a prefix of the input's aria-label
+                          ("Quantity consumed, <material>") so speech input
+                          matches what is on screen — WCAG 2.5.3. The unit is
+                          aria-hidden; the accessible name must stay identical
+                          to the table's. */}
+                      Quantity consumed<span aria-hidden="true"> ({r.article.uom})</span>
+                    </span>
+                    {consQtyInput(r, "w-full")}
+                  </label>
+                  {/* empty:hidden — VarianceChip renders nothing on an untouched
+                      line, and a bare margin would leave a gap under the input. */}
+                  <div className="mt-1.5 empty:hidden">{consVariance(r)}</div>
+                </li>
+              ))}
+            </ul>
 
             {/* Scanned, but nothing on this BOM claims it. Listed rather than
                 dropped: a mistyped or free-text article would otherwise leave
@@ -5902,7 +6280,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
         totalSummary={totalSummary}
         selectedBatchId={selectedBatchId}
         detail={detail}
-        onReload={onReload}
+        onReload={reloadAll}
       />
 
       <FormFooter
@@ -6579,7 +6957,11 @@ function lossPctChip(
   );
 }
 
-// VarianceChip — small inline chip per consumption row showing BOM vs actual.
+// VarianceChip — small two-line block per consumption row showing the baseline vs
+// actual. The baseline is what was SCANNED onto the floor for this material
+// when there is a scanned kg figure, and the BOM-prescribed quantity otherwise
+// (lib/scanRollup's varianceBaseline picks); the chip names whichever it used,
+// so "+2 kg" is never ambiguous about what it is 2 kg over.
 // Colour bands (asymmetric on purpose — see framework spec C3-H4):
 //   |variance%| ≤ 5  → neutral grey  (within expected operating noise)
 //   diff > 0 & ≤ 15  → amber          (over-consumed, worth a look)
@@ -6592,10 +6974,11 @@ function lossPctChip(
 // elsewhere (see memory: consumption-variance-staging). Qty-only — no
 // currency. The tooltip below explains the asymmetric colour choice.
 function VarianceChip({
-  materialName, bomPrescribedQty, actualQty, uom, hasSavedConsumption, plannedKg,
+  materialName, baseline, actualQty, uom, hasSavedConsumption, plannedKg,
 }: {
   materialName: string;
-  bomPrescribedQty: number | null;
+  /** What to compare against, and where it came from (scanned / BOM). */
+  baseline: VarianceBaseline;
   actualQty: number;
   uom: string;
   /** True when the server already has a consumption_lines row for this
@@ -6608,6 +6991,13 @@ function VarianceChip({
    *  than "no BOM variance available" (C3-MED-8). */
   plannedKg: number;
 }) {
+  const scanned = baseline.source === "scanned";
+  // A scanned baseline is a weighed figure, so it's shown at scale precision
+  // (3 dp, as everywhere else boxes are weighed); a BOM baseline is a
+  // calculated one and keeps the 2 dp it has always had.
+  const dp = scanned ? 3 : 2;
+  const label = scanned ? "Scanned" : "BOM";
+  const baselineQty = baseline.qty;
   // C3-MED-8 — distinguish the two reasons the chip can't show variance:
   //   (a) planned_qty_kg on the JC is missing / zero (BOM math has no
   //       multiplier)
@@ -6615,7 +7005,9 @@ function VarianceChip({
   // The previous unified message hid an actionable signal — a missing
   // planned_qty is fixable from the SO / plan, but a missing BOM
   // quantity_per_unit needs a BOM amendment.
-  if (bomPrescribedQty == null || !Number.isFinite(bomPrescribedQty) || bomPrescribedQty <= 0) {
+  // (Only ever reached with a BOM baseline: a scanned one is a positive
+  // number by construction.)
+  if (baselineQty == null || !Number.isFinite(baselineQty) || baselineQty <= 0) {
     const hint = plannedKg <= 0
       ? "planned qty missing"
       : "no BOM variance available";
@@ -6632,12 +7024,12 @@ function VarianceChip({
     if (!hasSavedConsumption) return null;
     return (
       <span className="inline-block text-[10px] text-[var(--text-muted)] italic">
-        BOM {bomPrescribedQty.toFixed(2)} {uom} · actual —
+        {label} {baselineQty.toFixed(dp)} {uom} · actual —
       </span>
     );
   }
-  const diff = actualQty - bomPrescribedQty;
-  const pct = (diff / bomPrescribedQty) * 100;
+  const diff = actualQty - baselineQty;
+  const pct = (diff / baselineQty) * 100;
   const sign = diff > 0 ? "+" : "";
   const absPct = Math.abs(pct);
 
@@ -6657,22 +7049,121 @@ function VarianceChip({
   const asymmetryNote = diff < 0
     ? " · under-consumption is informational only (no colour band)"
     : "";
-
+  // Two stacked lines instead of a rounded-full pill: the pill wrapped into a
+  // tall blob the moment the column narrowed, and the headline figure — how
+  // far off, and by how much — was buried at the end of it. Now the headline
+  // leads, on one unbreakable line, with the two quantities that produced it
+  // sitting quietly underneath. Same colour bands, same tooltip, same
+  // precision; only the shape changed.
   return (
     <span
-      title={`${materialName} · BOM ${bomPrescribedQty.toFixed(2)} ${uom} · Actual ${actualQty.toFixed(2)} ${uom}${asymmetryNote}`}
+      title={`${materialName} · ${label} ${baselineQty.toFixed(dp)} ${uom} · Actual ${actualQty.toFixed(dp)} ${uom}${asymmetryNote}`}
       className={[
-        "inline-block text-[10px] sm:text-[11px] rounded-full border px-2 py-0.5 leading-tight whitespace-normal",
+        "inline-block max-w-full align-top rounded border px-1.5 py-1 leading-tight",
         cls,
       ].join(" ")}
     >
-      <span className="font-semibold">BOM</span> {bomPrescribedQty.toFixed(2)} {uom}
-      <span className="mx-1 text-[var(--text-muted)]">·</span>
-      <span className="font-semibold">Actual</span> {actualQty.toFixed(2)} {uom}
-      <span className="mx-1 text-[var(--text-muted)]">·</span>
-      <span className="font-semibold">{sign}{diff.toFixed(2)} {uom}</span>
-      <span className="ml-1">({sign}{pct.toFixed(1)}%)</span>
+      <span className="block text-[11px] font-semibold tabular-nums whitespace-nowrap">
+        {sign}{diff.toFixed(dp)} {uom} ({sign}{pct.toFixed(1)}%)
+      </span>
+      <span className="block text-[10px] tabular-nums">
+        {label} {baselineQty.toFixed(dp)} → {actualQty.toFixed(dp)} {uom}
+      </span>
     </span>
+  );
+}
+
+// ── Material Consumption: one row model, two layouts ────────────────────────
+// Accounting renders every consumed material twice — a table row at md and up,
+// a card below it — because five columns and a phone do not fit. Everything
+// both layouts read is derived here, once. Split this and the card and the
+// table start disagreeing about what was issued or which baseline the variance
+// is read against, which is precisely the bug nobody would notice.
+type ConsumptionRow = {
+  article: BatchSummaryArticle;
+  /** Stable per-line key: the BOM line when there is one, else the name. */
+  key: string;
+  isPm: boolean;
+  /** The scan rollup for this material, when a scanned box matched it. */
+  issue: ArticleIssue | undefined;
+  baseline: VarianceBaseline;
+  /** Pulled into this stage on this card — earns the "added at this stage" badge. */
+  isAdded: boolean;
+  /** Why the Issued figure reads "—" (tooltip on the dash). */
+  noIssueTitle: string;
+  /** Colour for the "(TYPE)" suffix; SFG/WIP is the line carried in. */
+  typeCls: string;
+};
+
+function buildConsumptionRow(
+  a: BatchSummaryArticle,
+  ctx: {
+    matchedIssues: Map<string, ArticleIssue>;
+    bomPrescribedByKey: Record<string, number | null>;
+    addedArticleKeys: Set<string>;
+    scansDenied: boolean;
+    multiBatch: boolean;
+  },
+): ConsumptionRow {
+  const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
+  const isPm = (a.item_type || "").toUpperCase() === "PM";
+  const issue = isPm ? undefined : ctx.matchedIssues.get(a.material_sku_name.trim());
+  // What the variance is read against: what was scanned onto the floor when
+  // there is a scanned kg figure, the BOM's prescribed quantity otherwise. See
+  // lib/scanRollup's varianceBaseline — this changes the COMPARISON only; every
+  // balance figure on this tab still runs off the typed quantities. The scan
+  // rollup is per job card while the grid is per batch, so a job card with more
+  // than one live batch keeps the BOM baseline.
+  const baseline = varianceBaseline(
+    issue?.net_weight, ctx.bomPrescribedByKey[key] ?? null, a.uom, ctx.multiBatch,
+  );
+  return {
+    article: a,
+    key,
+    isPm,
+    issue,
+    baseline,
+    isAdded: ctx.addedArticleKeys.has(key),
+    noIssueTitle: isPm
+      ? "Packaging material is not box-scanned."
+      : ctx.scansDenied
+        ? "You do not have production/job_cards/material_scan:scan, so scanned quantities cannot be shown."
+        : "No scanned box matched this material.",
+    typeCls: a.item_type === "SFG" || a.item_type === "WIP"
+      ? "text-[var(--text-success)] font-medium"
+      : "text-[var(--text-muted)]",
+  };
+}
+
+/** Material name, its "(TYPE)" suffix and the "added at this stage" badge —
+ *  the table's row header and the card's heading render this same thing. */
+function ConsumptionMaterialLabel({ row, className, id }: { row: ConsumptionRow; className?: string; id?: string }) {
+  const a = row.article;
+  return (
+    <span id={id} className={className} title={a.material_sku_name}>
+      {a.material_sku_name}{" "}
+      <span className={`text-[11px] ${row.typeCls}`}>({a.item_type})</span>
+      {row.isAdded ? (
+        <span
+          className="ml-1.5 text-[10px] px-1 py-px rounded bg-[#eef6ff] border border-[#a7c9ec] text-[#0d5aa7] align-middle"
+          title="Pulled into this stage from the BOM. Enter a quantity and save to keep it."
+        >
+          added at this stage
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+/** The scanned figure for one material, or the dash that explains itself. */
+function ConsumptionIssuedText({ row }: { row: ConsumptionRow }) {
+  return row.issue ? (
+    <span className="text-[var(--text-primary)]">
+      {fmtKg(row.issue.net_weight)}
+      <span className="text-[var(--text-muted)]"> · {row.issue.boxes} {row.issue.boxes === 1 ? "box" : "boxes"}</span>
+    </span>
+  ) : (
+    <span className="text-[var(--text-muted)]" title={row.noIssueTitle}>—</span>
   );
 }
 

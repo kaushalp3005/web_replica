@@ -45,11 +45,23 @@ function isColdStorageWarehouse(w: string | null | undefined): boolean {
   return COLD_STORAGE_WAREHOUSES.some((c) => normaliseWarehouseCode(c) === target);
 }
 
-type BoxField = "gross_weight" | "net_weight" | "lot_number" | "count";
-type BoxRow = { idKey: string | number; box_number: number; gross_weight: string; net_weight: string; lot_number: string; count: string };
+// The box table, its print controls and SecField are exported for Stores →
+// Production Indents' manual sticker print, which reuses this box format.
+export type BoxField = "gross_weight" | "net_weight" | "lot_number" | "count";
+export type BoxRow = { idKey: string | number; box_number: number; gross_weight: string; net_weight: string; lot_number: string; count: string };
+
+// The box table's editable columns, defined once: the same list drives the table
+// cells (md and up) and the labelled card fields (below md), so a box can never
+// lose a field on a phone.
+const BOX_FIELDS: { field: BoxField; label: string; type: string; step?: string; placeholder?: string; width: string }[] = [
+  { field: "gross_weight", label: "Gross Wt (kg)", type: "number", step: "0.001", placeholder: "0.000", width: "w-28" },
+  { field: "net_weight", label: "Net Wt (kg)", type: "number", step: "0.001", placeholder: "0.000", width: "w-28" },
+  { field: "lot_number", label: "LOT", type: "text", width: "w-32" },
+  { field: "count", label: "Count", type: "number", step: "1", placeholder: "0", width: "w-20" },
+];
 
 // ── Print helpers ─────────────────────────────────────────────────────────────
-function PrinterIcon({ size = 12 }: { size?: number }) {
+export function PrinterIcon({ size = 12 }: { size?: number }) {
   return (
     <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
       <polyline points="6 9 6 2 18 2 18 9" />
@@ -61,7 +73,7 @@ function PrinterIcon({ size = 12 }: { size?: number }) {
 
 // Print-all: hands the resolver to the parent, which saves first, then resolves
 // (fetching the just-saved boxes) and prints.
-function PrintAllButton({ count, resolve, onPrint }: { count: number; resolve: PrintResolver; onPrint: (resolve: PrintResolver) => void }) {
+export function PrintAllButton({ count, resolve, onPrint }: { count: number; resolve: PrintResolver; onPrint: (resolve: PrintResolver) => void }) {
   return (
     <button
       type="button"
@@ -78,7 +90,7 @@ function PrintAllButton({ count, resolve, onPrint }: { count: number; resolve: P
 // Print a box-number sub-range (From #–To #). Ports the Electron print-range-group.
 // `resolve(from, to)` returns the PrintBoxes for the range (fetched for existing
 // sections; filtered locally for draft sections).
-function PrintRangeControl({
+export function PrintRangeControl({
   minBox,
   maxBox,
   resolve,
@@ -142,7 +154,9 @@ function PrintRangeControl({
         <PrinterIcon /> Range
       </button>
       {open ? (
-        <div className="absolute right-0 top-full mt-1 z-50 w-56 bg-white border border-[var(--aws-border-strong)] rounded-[2px] shadow-lg p-2.5">
+        // max-w keeps the popover inside the viewport on a phone, whatever the
+        // button it hangs off is doing; it is well under w-56 from sm up.
+        <div className="absolute right-0 top-full mt-1 z-50 w-56 max-w-[calc(100vw-2rem)] bg-white border border-[var(--aws-border-strong)] rounded-[2px] shadow-lg p-2.5">
           <div className="text-[11px] text-[var(--text-secondary)] mb-1.5">
             Print boxes #{minBox}–#{maxBox}
           </div>
@@ -687,7 +701,7 @@ function NewSectionCard({
 }
 
 // ── Small labelled field ──────────────────────────────────────────────────────
-function SecField({
+export function SecField({
   label,
   value,
   onChange,
@@ -720,51 +734,97 @@ function SecField({
 }
 
 // ── Shared editable box table ─────────────────────────────────────────────────
-function BoxTable({ rows, onField, onPrintRow, greenIds }: { rows: BoxRow[]; onField: (idKey: string | number, field: BoxField, value: string) => void; onPrintRow?: (row: BoxRow) => void; greenIds?: Set<string> }) {
+// Two layouts over ONE set of rows: the table from md up (unchanged), and a card
+// per box below it, so a phone never drags the six columns sideways. Each row's
+// state and its controls are built once below and rendered by both, so the two
+// always carry the same values, handlers and tooltips.
+export function BoxTable({ rows, onField, onPrintRow, greenIds }: { rows: BoxRow[]; onField: (idKey: string | number, field: BoxField, value: string) => void; onPrintRow?: (row: BoxRow) => void; greenIds?: Set<string> }) {
   const inputCls = "w-full h-6 px-1 text-[12px] font-mono rounded-[2px] border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e]";
   const th = "px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap";
+  // A card's field label reads as its table column header does.
+  const cardLabel = "flex flex-col gap-0.5 text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]";
+
+  const views = rows.map((r) => ({
+    row: r,
+    green: greenIds?.has(String(r.idKey)) ?? false,
+    fields: BOX_FIELDS.map((f) => ({
+      field: f.field,
+      label: f.label,
+      width: f.width,
+      input: (
+        <input
+          type={f.type}
+          step={f.step}
+          value={r[f.field]}
+          placeholder={f.placeholder}
+          onChange={(e) => onField(r.idKey, f.field, e.target.value)}
+          className={inputCls}
+        />
+      ),
+    })),
+    printButton: onPrintRow ? (
+      <button
+        type="button"
+        title="Print this box"
+        aria-label="Print box"
+        onClick={() => onPrintRow(r)}
+        className="p-1 rounded hover:bg-[#eaf0fb] text-[var(--text-secondary)] hover:text-[#2c5fa8]"
+      >
+        <PrinterIcon size={11} />
+      </button>
+    ) : null,
+  }));
+
   return (
-    <div className="overflow-x-auto rounded-[2px] border border-[var(--aws-border)] bg-white">
-      <table className="w-full text-[12px] border-collapse">
-        <thead className="bg-[var(--surface-subtle)]">
-          <tr className="border-b border-[var(--aws-border)]">
-            {onPrintRow ? <th className={[th, "w-8"].join(" ")} aria-label="Print" /> : null}
-            <th className={th}>Box #</th>
-            <th className={th}>Gross Wt (kg)</th>
-            <th className={th}>Net Wt (kg)</th>
-            <th className={th}>LOT</th>
-            <th className={th}>Count</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr
-              key={r.idKey}
-              title={greenIds?.has(String(r.idKey)) ? "Saved & printed" : undefined}
-              className={["border-b border-[var(--aws-border)] last:border-b-0", greenIds?.has(String(r.idKey)) ? "bg-[#eaf6ed]" : ""].join(" ")}
-            >
-              {onPrintRow ? (
-                <td className="px-1.5 py-1">
-                  <button
-                    type="button"
-                    title="Print this box"
-                    aria-label="Print box"
-                    onClick={() => onPrintRow(r)}
-                    className="p-1 rounded hover:bg-[#eaf0fb] text-[var(--text-secondary)] hover:text-[#2c5fa8]"
-                  >
-                    <PrinterIcon size={11} />
-                  </button>
-                </td>
-              ) : null}
-              <td className="px-2 py-1 font-mono text-[var(--text-muted)] whitespace-nowrap">{r.box_number}</td>
-              <td className="px-2 py-1 w-28"><input type="number" step="0.001" value={r.gross_weight} placeholder="0.000" onChange={(e) => onField(r.idKey, "gross_weight", e.target.value)} className={inputCls} /></td>
-              <td className="px-2 py-1 w-28"><input type="number" step="0.001" value={r.net_weight} placeholder="0.000" onChange={(e) => onField(r.idKey, "net_weight", e.target.value)} className={inputCls} /></td>
-              <td className="px-2 py-1 w-32"><input type="text" value={r.lot_number} onChange={(e) => onField(r.idKey, "lot_number", e.target.value)} className={inputCls} /></td>
-              <td className="px-2 py-1 w-20"><input type="number" step="1" value={r.count} placeholder="0" onChange={(e) => onField(r.idKey, "count", e.target.value)} className={inputCls} /></td>
+    <div>
+      <div className="hidden md:block overflow-x-auto rounded-[2px] border border-[var(--aws-border)] bg-white">
+        <table className="w-full text-[12px] border-collapse">
+          <thead className="bg-[var(--surface-subtle)]">
+            <tr className="border-b border-[var(--aws-border)]">
+              {onPrintRow ? <th className={[th, "w-8"].join(" ")} aria-label="Print" /> : null}
+              <th className={th}>Box #</th>
+              {BOX_FIELDS.map((f) => <th key={f.field} className={th}>{f.label}</th>)}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {views.map((v) => (
+              <tr
+                key={v.row.idKey}
+                title={v.green ? "Saved & printed" : undefined}
+                className={["border-b border-[var(--aws-border)] last:border-b-0", v.green ? "bg-[#eaf6ed]" : ""].join(" ")}
+              >
+                {v.printButton ? <td className="px-1.5 py-1">{v.printButton}</td> : null}
+                <td className="px-2 py-1 font-mono text-[var(--text-muted)] whitespace-nowrap">{v.row.box_number}</td>
+                {v.fields.map((f) => <td key={f.field} className={`px-2 py-1 ${f.width}`}>{f.input}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Below md: one card per box, same controls as the row above. */}
+      <ul className="md:hidden space-y-2">
+        {views.map((v) => (
+          <li
+            key={v.row.idKey}
+            title={v.green ? "Saved & printed" : undefined}
+            className={["border border-[var(--aws-border)] rounded-[2px] p-2.5", v.green ? "bg-[#eaf6ed]" : "bg-white"].join(" ")}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <span className="font-mono text-[12px] font-semibold text-[var(--text-primary)]">Box #{v.row.box_number}</span>
+              {v.printButton}
+            </div>
+            <div className="mt-1.5 grid grid-cols-2 gap-2">
+              {v.fields.map((f) => (
+                <label key={f.field} className={cardLabel}>
+                  {f.label}
+                  {f.input}
+                </label>
+              ))}
+            </div>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

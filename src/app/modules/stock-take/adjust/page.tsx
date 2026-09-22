@@ -25,7 +25,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { BackLink } from "@/components/BackLink";
 import { useRequireAuth, useUserInitial, useHasPermission } from "@/lib/user";
-import { lookupSku, type SkuLookupResponse } from "@/lib/so";
+import { NewArticleDialog } from "@/components/stock-take/NewArticleDialog";
 import {
   createStockTransaction,
   fetchLatestStock,
@@ -36,6 +36,7 @@ import {
   listStockTransactions,
   verifyAdjustments,
   verifyTransactions,
+  warehouseLabel,
   type LatestStockResponse,
   type StockTakeItem,
   type StockOperation,
@@ -64,14 +65,6 @@ const SEARCH_DEBOUNCE_MS = 250;
 const FIELD =
   "h-9 w-full px-3 text-[14px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] disabled:bg-[#f5f5f5] disabled:text-[var(--text-secondary)]";
 const LABEL = "block text-[12px] font-medium text-[var(--text-primary)] mb-1";
-
-/** all_sku.particulars has NO UNIQUE constraint and 23 names are genuinely
- *  duplicated (same text, different sku_id — a re-imported block), so every list
- *  built from the catalogue must be deduped before it becomes React keys.
- *  Rendering them raw produced "two children with the same key" for each one.
- *  Selection is unaffected: choose() resolves by particulars and the server
- *  already picks a single sku_id for an ambiguous name. */
-const uniq = (xs?: string[]): string[] => Array.from(new Set(xs ?? []));
 
 /** What the dialog is acting on — an existing row, or a brand-new article. */
 interface Target {
@@ -467,7 +460,9 @@ function StockAdjustScreen() {
                             setLocation(next.length === 1 ? next[0] : "");
                           }}>
                     <option value="">Select…</option>
-                    {scope.warehouses.map((w) => <option key={w} value={w}>{w}</option>)}
+                    {scope.warehouses.map((w) => (
+                      <option key={w} value={w}>{warehouseLabel(w, scope.warehouse_labels)}</option>
+                    ))}
                   </select>
                 </div>
                 <div>
@@ -499,8 +494,13 @@ function StockAdjustScreen() {
                 {!warehouse
                   ? `Your profile covers ${scope.warehouses.length} warehouse${scope.warehouses.length === 1 ? "" : "s"} — choose one to see its floors.`
                   : scope.floors_unrestricted
-                    ? `No floor restriction on your profile, so all ${floorOptions.length} floor${floorOptions.length === 1 ? "" : "s"} of ${warehouse} are listed.`
-                    : `From your profile access — ${floorOptions.length} floor${floorOptions.length === 1 ? "" : "s"} assigned to you in ${warehouse}.`}
+                    ? `No floor restriction on your profile, so all ${floorOptions.length} floor${floorOptions.length === 1 ? "" : "s"} of ${warehouseLabel(warehouse, scope.warehouse_labels)} are listed.`
+                    : floorOptions.length === 0
+                      // Stock Take shows a granted cold store or godown in full,
+                      // but posting there still needs one of its floors on the
+                      // profile, which the admin screen cannot grant today.
+                      ? `You can view ${warehouseLabel(warehouse, scope.warehouse_labels)} on Stock Take, but posting adjustments there needs one of its floors on your profile. Ask an administrator.`
+                      : `From your profile access — ${floorOptions.length} floor${floorOptions.length === 1 ? "" : "s"} assigned to you in ${warehouseLabel(warehouse, scope.warehouse_labels)}.`}
               </p>
             </section>
 
@@ -759,7 +759,8 @@ function StockAdjustScreen() {
       {showNew && (
         <NewArticleDialog
           onCancel={() => setShowNew(false)}
-          onPick={(t) => {
+          onPick={(a) => {
+            const t: Target = { ...a, available_kg: null };
             setShowNew(false);
             setOperation("ADDITION");
             // Show the dialog immediately, then fill in the existing balance when
@@ -944,205 +945,6 @@ function AdjustDialog({ target, operation, warehouse, location, onCancel, onPost
                   className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[14px] font-medium disabled:opacity-40 hover:bg-[var(--aws-orange-hover)]">
             {busy ? "Posting…" : isSub ? "Post subtraction" : "Post addition"}
           </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** For stock the floor holds that has never been counted here.
- *
- *  Search and Browse mirror the legacy RTVLineEditor over /api/v1/so/sku-lookup;
- *  the third path is free entry, which RTV has no equivalent for. All four
- *  descriptors are required — the Stock Take app's own custom-item path sends
- *  blanks and its backend stamps GENERAL/OTHER over them, losing what the
- *  operator chose. */
-function NewArticleDialog({ onCancel, onPick }: {
-  onCancel: () => void; onPick: (t: Target) => void;
-}) {
-  const [tab, setTab] = useState<"search" | "browse" | "free">("search");
-  const [q, setQ] = useState("");
-  const [hits, setHits] = useState<string[]>([]);
-  const [opts, setOpts] = useState<NonNullable<SkuLookupResponse["options"]>>({});
-  const [itemType, setItemType] = useState("");
-  const [group, setGroup] = useState("");
-  const [sub, setSub] = useState("");
-  const [free, setFree] = useState({ name: "", type: "", cat: "", sub: "" });
-  const [err, setErr] = useState<string | null>(null);
-  // Off grade is a SEPARATE LINE for the same article, not a property of it:
-  // identity is the name plus the stock type, and 233 articles already exist as
-  // both. So this picks which of the two lines the posting lands on.
-  const [offGrade, setOffGrade] = useState(false);
-  const stockType = offGrade ? "Off Grade/Rejection" : "Fresh Stock";
-
-  useEffect(() => {
-    if (tab !== "search" || q.trim().length < 2) return;
-    const c = new AbortController();
-    const t = setTimeout(() => {
-      lookupSku({ search: q.trim() }, c.signal).then(
-        (r) => { setHits(r.options?.particulars ?? []); setErr(null); },
-        (e: Error) => { if (!c.signal.aborted) setErr(e.message); },
-      );
-    }, 300);
-    return () => { clearTimeout(t); c.abort(); };
-  }, [q, tab]);
-
-  useEffect(() => {
-    const c = new AbortController();
-    lookupSku(
-      { item_type: itemType || undefined, item_group: group || undefined, sub_group: sub || undefined },
-      c.signal,
-    ).then((r) => setOpts(r.options ?? {}), () => {});
-    return () => c.abort();
-  }, [itemType, group, sub]);
-
-  // Derived rather than cleared in the effect — a short query shows nothing
-  // without a setState in the guard (react-hooks/set-state-in-effect).
-  const visibleHits = q.trim().length >= 2 ? uniq(hits) : [];
-
-  async function choose(name: string) {
-    const r = await lookupSku({ particulars: name });
-    const s = r.selected_item;
-    if (!s) return;
-    onPick({
-      item_name: String(s.particulars ?? "").trim(),
-      material_type: String(s.item_type ?? ""),
-      item_category: String(s.item_group ?? ""),
-      item_subcategory: String(s.sub_group ?? ""),
-      stock_type: stockType,
-      sku_id: s.sku_id != null ? Number(s.sku_id) : null,
-      is_new_article: false,
-      available_kg: null,
-    });
-  }
-
-  const freeOk = free.name.trim() && free.type.trim() && free.cat.trim() && free.sub.trim();
-
-  return (
-    <div className="fixed inset-0 bg-black/45 flex items-center justify-center p-4 z-50"
-         onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
-      <div className="bg-white rounded-md w-full max-w-[560px] p-5" role="dialog" aria-modal="true">
-        <h3 className="text-[16px] font-semibold text-[var(--text-primary)] mb-1">Add an article not in this list</h3>
-        <p className="text-[12px] text-[var(--text-secondary)] mb-3">
-          For stock on your floor that has never been counted here.
-        </p>
-
-        <label className="flex items-center gap-2 mb-3 text-[13px] text-[var(--text-primary)] cursor-pointer select-none">
-          <input type="checkbox" checked={offGrade} onChange={(e) => setOffGrade(e.target.checked)}
-                 className="h-4 w-4 accent-[#a8500a]" />
-          <span>Off grade / rejection</span>
-          <span className="text-[11px] text-[var(--text-secondary)]">
-            — records against the article&rsquo;s off-grade line, keeping the same name
-          </span>
-        </label>
-
-        <div className="inline-flex rounded-[2px] border border-[var(--aws-border-strong)] overflow-hidden mb-3">
-          {(["search", "browse", "free"] as const).map((t) => (
-            <button key={t} onClick={() => setTab(t)}
-                    className={`px-3 h-8 text-[13px] ${tab === t ? "bg-[var(--aws-navy)] text-white" : "bg-white hover:bg-[#fafafa]"}`}>
-              {t === "search" ? "Search" : t === "browse" ? "Browse" : "Not in catalogue"}
-            </button>
-          ))}
-        </div>
-
-        {err && <p className="mb-2 text-[12px] text-[#d13212]">{err}</p>}
-
-        {tab === "search" && (
-          <>
-            <input className={FIELD} value={q} onChange={(e) => setQ(e.target.value)}
-                   placeholder="Type at least 2 characters" aria-label="Search articles" />
-            {visibleHits.length > 0 && (
-              <ul className="mt-2 max-h-56 overflow-y-auto border border-[var(--aws-border)] rounded-[2px] divide-y divide-[var(--aws-border)]">
-                {visibleHits.slice(0, 50).map((n) => (
-                  <li key={n}>
-                    <button onClick={() => choose(n)} className="w-full text-left px-3 py-2 text-[13px] hover:bg-[#fafafa]">{n}</button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </>
-        )}
-
-        {tab === "browse" && (
-          <>
-            <div className="grid grid-cols-3 gap-2">
-              <div>
-                <label className={LABEL}>Material type</label>
-                <select className={FIELD} value={itemType}
-                        onChange={(e) => { setItemType(e.target.value); setGroup(""); setSub(""); }}>
-                  <option value="">All</option>
-                  {uniq(opts.item_types).map((o) => <option key={o} value={o}>{o}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className={LABEL}>Category</label>
-                <select className={FIELD} value={group}
-                        onChange={(e) => { setGroup(e.target.value); setSub(""); }}>
-                  <option value="">All</option>
-                  {uniq(opts.item_groups).map((o) => <option key={o} value={o}>{o}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className={LABEL}>Sub category</label>
-                <select className={FIELD} value={sub} onChange={(e) => setSub(e.target.value)}>
-                  <option value="">All</option>
-                  {uniq(opts.sub_groups).map((o) => <option key={o} value={o}>{o}</option>)}
-                </select>
-              </div>
-            </div>
-            <div className="mt-3">
-              <label className={LABEL}>Article</label>
-              <select className={FIELD} value="" onChange={(e) => { if (e.target.value) void choose(e.target.value); }}>
-                <option value="">Select an article…</option>
-                {uniq(opts.particulars).map((p) => <option key={p} value={p}>{p}</option>)}
-              </select>
-            </div>
-          </>
-        )}
-
-        {tab === "free" && (
-          <>
-            <div className="mb-2">
-              <label className={LABEL}>Article name</label>
-              <input className={FIELD} value={free.name} onChange={(e) => setFree({ ...free, name: e.target.value })} />
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              <div>
-                <label className={LABEL}>Material type</label>
-                <input className={FIELD} list="dl-type" value={free.type}
-                       onChange={(e) => setFree({ ...free, type: e.target.value })} />
-                <datalist id="dl-type">{uniq(opts.item_types).map((o) => <option key={o} value={o} />)}</datalist>
-              </div>
-              <div>
-                <label className={LABEL}>Category</label>
-                <input className={FIELD} list="dl-cat" value={free.cat}
-                       onChange={(e) => setFree({ ...free, cat: e.target.value })} />
-                <datalist id="dl-cat">{uniq(opts.item_groups).map((o) => <option key={o} value={o} />)}</datalist>
-              </div>
-              <div>
-                <label className={LABEL}>Sub category</label>
-                <input className={FIELD} list="dl-sub" value={free.sub}
-                       onChange={(e) => setFree({ ...free, sub: e.target.value })} />
-                <datalist id="dl-sub">{uniq(opts.sub_groups).map((o) => <option key={o} value={o} />)}</datalist>
-              </div>
-            </div>
-            <p className="text-[11px] text-[var(--text-muted)] mt-2">All four are required and stored exactly as entered.</p>
-          </>
-        )}
-
-        <div className="flex gap-2 justify-end mt-4">
-          <button onClick={onCancel} className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[14px]">Cancel</button>
-          {tab === "free" && (
-            <button disabled={!freeOk}
-                    onClick={() => onPick({
-                      item_name: free.name.trim(), material_type: free.type.trim(),
-                      item_category: free.cat.trim(), item_subcategory: free.sub.trim(),
-                      stock_type: stockType, sku_id: null, is_new_article: true, available_kg: null,
-                    })}
-                    className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[14px] font-medium disabled:opacity-40">
-              Continue
-            </button>
-          )}
         </div>
       </div>
     </div>

@@ -16,14 +16,14 @@ import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { BackLink } from "@/components/BackLink";
 import { useRequireAuth, useUserInitial } from "@/lib/user";
-import { userStore } from "@/lib/auth";
+import { userStore, type MeResponse } from "@/lib/auth";
 import {
   AdminRole,
   AdminUser,
   CreateUserPayload,
   ENTITY_OPTIONS,
   EditUserPayload,
-  WAREHOUSE_OPTIONS,
+  GRANTABLE_WAREHOUSE_OPTIONS,
   adminResetPassword,
   createRole,
   createUser,
@@ -54,7 +54,10 @@ export default function AdminPage() {
   const authed = useRequireAuth(router.replace);
   const initial = useUserInitial();
 
-  const [me, setMe] = useState(() => (typeof window !== "undefined" ? userStore.load() : null));
+  // Start null on server AND client. Reading localStorage in a lazy initializer
+  // made the first client render see is_admin=true while SSR saw null, so the
+  // admin / no-access branch below rendered different markup and hydration failed.
+  const [me, setMe] = useState<MeResponse | null>(null);
   useEffect(() => {
     queueMicrotask(() => setMe(userStore.load()));
   }, [authed]);
@@ -134,7 +137,9 @@ export default function AdminPage() {
           Manage users, roles, and the permission catalog. All actions require admin privileges.
         </p>
 
-        {!isAdmin ? (
+        {/* Nothing until mounted: `me` is still null on the first paint, so
+            rendering the no-access notice here would flash it at real admins. */}
+        {!mounted ? null : !isAdmin ? (
           <section className="bg-white border border-[var(--aws-border)] rounded-md p-6 text-[13px] text-[var(--text-secondary)]">
             You don&rsquo;t have admin access. Ask an administrator to grant you the admin role, or
             switch to a different account.
@@ -697,7 +702,7 @@ function UserModal({
 
         <Field label="Factory / Warehouse (empty = all)">
           <ChipGroup
-            options={WAREHOUSE_OPTIONS}
+            options={GRANTABLE_WAREHOUSE_OPTIONS}
             selected={warehouses}
             onToggle={(v) => toggle(warehouses, setWarehouses, v)}
           />

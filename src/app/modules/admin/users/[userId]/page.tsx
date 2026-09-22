@@ -17,11 +17,11 @@ import { useParams, useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { BackLink } from "@/components/BackLink";
 import { useRequireAuth, useUserInitial, initialFromName } from "@/lib/user";
-import { userStore } from "@/lib/auth";
+import { userStore, type MeResponse } from "@/lib/auth";
 import {
   AdminUser,
   ENTITY_OPTIONS,
-  WAREHOUSE_OPTIONS,
+  GRANTABLE_WAREHOUSE_OPTIONS,
   adminResetPassword,
   deactivateUser,
   editUser,
@@ -45,7 +45,9 @@ export default function UserDetailPage() {
   const params = useParams<{ userId: string }>();
   const userId = params?.userId ?? "";
 
-  const [me, setMe] = useState(() => (typeof window !== "undefined" ? userStore.load() : null));
+  // Start null on server AND client — a localStorage read in a lazy initializer
+  // makes the first client render disagree with SSR (hydration mismatch).
+  const [me, setMe] = useState<MeResponse | null>(null);
   useEffect(() => {
     queueMicrotask(() => setMe(userStore.load()));
   }, [authed]);
@@ -151,7 +153,8 @@ export default function UserDetailPage() {
           <BackLink parentHref="/modules/admin" label="admin" />
         </div>
 
-        {!isAdmin ? (
+        {/* Nothing until mounted: `me` is still null on the first paint. */}
+        {!mounted ? null : !isAdmin ? (
           <section className="bg-white border border-[var(--aws-border)] rounded-md p-6 text-[13px] text-[var(--text-secondary)]">
             Admin access required.
           </section>
@@ -375,7 +378,7 @@ function ScopePane({
       </p>
 
       <ScopeChips label="Entities" options={ENTITY_OPTIONS} selected={entities} onToggle={(v) => toggle(entities, setEntities, v)} />
-      <ScopeChips label="Warehouses" options={WAREHOUSE_OPTIONS} selected={warehouses} onToggle={(v) => toggle(warehouses, setWarehouses, v)} />
+      <ScopeChips label="Warehouses" options={GRANTABLE_WAREHOUSE_OPTIONS} selected={warehouses} onToggle={(v) => toggle(warehouses, setWarehouses, v)} />
       <div className="mt-3">
         <div className="text-[12px] font-semibold mb-1">Floors</div>
         {available.length === 0 ? (

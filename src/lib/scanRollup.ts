@@ -86,3 +86,49 @@ export function matchIssues(
   }
   return { matched, unmatched };
 }
+
+/** The quantity a consumption line's variance is read against, and where it came from. */
+export type VarianceBaseline = {
+  qty: number | null;
+  source: "scanned" | "bom";
+};
+
+/** Spellings of a kilogram we accept on a BOM line's uom. bom_line.uom is
+ *  free-form text, so this mirrors the server's set (floor_requisition/rules
+ *  _KG) rather than guessing. */
+const KG_UOMS = new Set(["", "kg", "kgs", "kilogram", "kilograms"]);
+
+/**
+ * Which quantity Accounting compares the typed consumption against.
+ *
+ * What was physically scanned onto the floor beats what the BOM prescribed: the
+ * operator can see the scanned figure, the BOM figure is a calculation, and
+ * "you consumed more than arrived" is the variance worth reading.
+ *
+ * Only for kilogram lines, though. A scan carries net_weight in kg and nothing
+ * else, so on a per-piece line (PM, PCS) the scanned kg and the typed pieces are
+ * different quantities and comparing them would invent a variance. Those keep
+ * the BOM baseline. A blank uom is treated as kg — that is the default
+ * everywhere else on the job card.
+ *
+ * And only on a job card with a single live batch. The rollup covers the whole
+ * card (see the header: a scan cannot be attributed to an accounting batch)
+ * while the consumption grid shows one batch at a time, so on a two-batch card
+ * that scanned 200 kg and consumed 100 kg per batch the chip would read
+ * "Scanned 200 · Actual 100 · -50%" on both. `multiBatch` keeps those lines on
+ * the BOM baseline, which is per batch and comparable.
+ */
+export function varianceBaseline(
+  scannedKg: number | null | undefined,
+  bomQty: number | null | undefined,
+  uom: string | null | undefined,
+  multiBatch: boolean = false,
+): VarianceBaseline {
+  const scanned = Number(scannedKg);
+  if (!multiBatch && scannedKg != null && Number.isFinite(scanned) && scanned > 0
+      && KG_UOMS.has((uom ?? "").trim().toLowerCase())) {
+    return { qty: scanned, source: "scanned" };
+  }
+  const bom = Number(bomQty);
+  return { qty: bomQty != null && Number.isFinite(bom) ? bom : null, source: "bom" };
+}
