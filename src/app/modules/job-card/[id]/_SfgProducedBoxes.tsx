@@ -536,15 +536,15 @@ function BatchGroupCard({
 
       {open && total > 0 ? (
         <>
-          {/* Nine columns: a table from md up, where Box ID stays pinned to the
-              left as the rest scrolls, and a card per box below it. */}
+          {/* Nine columns: a table from md up (it scrolls sideways inside its own
+              box on a narrow tablet), and a card per box below it. */}
           <div className="hidden md:block overflow-x-auto rounded-[2px] border border-[var(--aws-border)] bg-white">
             <table className="w-full text-[12px] border-collapse">
               <thead className="bg-[var(--surface-subtle)]">
                 <tr className="border-b border-[var(--aws-border)]">
                   <th className={`${th} w-8`} aria-label="Print" />
                   <th className={th}>Box #</th>
-                  <th className={`${th} sticky left-0 z-10 bg-[var(--surface-subtle)]`}>Box ID</th>
+                  <th className={th}>Box ID</th>
                   <th className={th}>SFG</th>
                   <th className={th}>Gross Wt (kg)</th>
                   <th className={th}>Net Wt (kg)</th>
@@ -558,7 +558,7 @@ function BatchGroupCard({
                   <tr key={v.box.box_id} className={"border-b border-[var(--aws-border)] last:border-b-0" + (v.printed ? " bg-[#eaf6ed]" : "")}>
                     <td className="px-1.5 py-1">{v.printButton}</td>
                     <td className="px-2 py-1 font-mono text-[var(--text-muted)] whitespace-nowrap">{v.number}</td>
-                    <td className={"px-2 py-1 font-mono text-[var(--aws-link)] font-semibold whitespace-nowrap sticky left-0 z-10 " + (v.printed ? "bg-[#eaf6ed]" : "bg-white")}>{v.box.box_id}</td>
+                    <td className="px-2 py-1 font-mono text-[var(--aws-link)] font-semibold whitespace-nowrap">{v.box.box_id}</td>
                     <td className="px-2 py-1 whitespace-normal lg:whitespace-nowrap">{v.sfg}</td>
                     <td className="px-2 py-1 w-28">{v.gross}</td>
                     <td className="px-2 py-1 w-28">{v.net}</td>

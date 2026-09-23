@@ -11,7 +11,7 @@
 // Field set + categories + computed Process Loss % match the fragments line
 // for line so the operator sees the same form on web as on mobile.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import {
   consumptionStateFromDetail,
@@ -1046,9 +1046,11 @@ function PageHeader({
   const nextStep = curIdx >= 0 && curIdx + 1 < chain.length ? chain[curIdx + 1] : null;
 
   return (
-    // Padding scales like every Panel below it (p-3 sm:p-4 lg:p-5) — a flat
-    // p-5 burned 40 px of a 360 px phone on chrome alone.
-    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-3 sm:p-4 lg:p-5 mb-4">
+    // A flat p-5 burned 40 px of a 360 px phone on chrome alone. The ramp
+    // is back to p-5 at md, so md and up is unchanged — Panel’s own ramp
+    // reaches p-5 only at lg, which would have shrunk this card on a
+    // 768 px tablet.
+    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-3 sm:p-4 md:p-5 mb-4">
       <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
         <div className="min-w-0">
           <div className="font-mono text-[12px] text-[var(--aws-link)] font-semibold mb-1" title={jcRef || jcNum}>{jcNum}</div>
@@ -1363,7 +1365,7 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
         // Full width below md: this is the lifecycle CTA the floor presses
         // most, and a ~200 px target hugging the right edge of a phone card
         // is the hardest thing on the screen to hit. md+ is unchanged.
-        className="h-9 px-4 text-[13px] font-bold tracking-wide w-full md:w-auto"
+        className="h-9 px-4 text-[13px] font-bold tracking-wide w-full md:w-auto justify-center"
       >
         {label}
       </LockableButton>
@@ -1488,6 +1490,22 @@ function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
     return { produced, rm, ega };
   }, [batches]);
 
+  // Batchwise Output lines — derived ONCE and rendered twice below (table at
+  // md+, cards under it). Only one of opened/closed can ever apply (the two
+  // conditions are opposite sides of status === "open"), so the sub-line is a
+  // single string both layouts share.
+  const bandRows = batches.map((p) => ({
+    p,
+    isOpen: p.status === "open",
+    dateText: fmtBatchDate(p.batch_date),
+    istLine:
+      p.status === "open" && p.opened_at_ist
+        ? `opened ${p.opened_at_ist}`
+        : p.status !== "open" && p.closed_at_ist
+          ? `closed ${p.closed_at_ist}`
+          : null,
+  }));
+
   // Open Today's Batch eligibility — the server itself enforces the
   // heavier rules; here we surface the button when no batch is currently
   // open AND the JC is in one of the statuses the backend accepts.
@@ -1588,58 +1606,118 @@ function BatchBand({ detail, onReload }: { detail: JobCardDetail; onReload: () =
           <div className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)] mb-1">
             Batchwise Output
           </div>
-          <table className="w-full text-[12px] border-collapse">
-            <thead className="bg-[var(--surface-subtle)]">
-              <tr className="border-b border-[var(--aws-border)]">
-                <th className="px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Batch</th>
-                <th className="px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Date</th>
-                <th className="px-2 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Produced (kg)</th>
-                <th className="px-2 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden sm:table-cell">RM (kg)</th>
-                <th className="px-2 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] hidden sm:table-cell">EGA</th>
-              </tr>
-            </thead>
-            <tbody>
-              {batches.map((p) => (
-                <tr key={p.batch_id} className="border-b border-[var(--aws-border)]">
-                  <td className="px-2 py-1 font-semibold text-[var(--text-primary)]">
-                    {batchLabel(p)}
-                    {p.status === "open" ? (
-                      <span className="ml-1 text-[10px] font-normal text-[var(--text-muted)]">(open)</span>
-                    ) : null}
-                  </td>
-                  <td className="px-2 py-1 text-[var(--text-secondary)]">
-                    <div>{fmtBatchDate(p.batch_date)}</div>
-                    {/* Stage 2 IST literal — surfaced under the date so
-                        the operator sees the floor's local clock-face
-                        for the open or close event without doing TZ
-                        math.  Falls back silently when the column is
-                        empty (legacy rows pre-migration-038). */}
-                    {p.status === "open" && p.opened_at_ist ? (
-                      <div className="text-[10px] text-[var(--text-muted)]">
-                        opened {p.opened_at_ist}
-                      </div>
-                    ) : null}
-                    {p.status !== "open" && p.closed_at_ist ? (
-                      <div className="text-[10px] text-[var(--text-muted)]">
-                        closed {p.closed_at_ist}
-                      </div>
-                    ) : null}
-                  </td>
-                  <td className="px-2 py-1 text-right font-mono">{fmtNum(p.produced_qty_kg)}</td>
-                  <td className="px-2 py-1 text-right font-mono hidden sm:table-cell">{fmtNum(p.rm_consumed_kg)}</td>
-                  <td className="px-2 py-1 text-right font-mono hidden sm:table-cell">{fmtNum(p.extra_give_away_qty)}</td>
+          {/* Two layouts, ONE data source (bandRows above). md and up keeps
+              the table. Below md it becomes cards: this table had no scroll
+              container of its own, so a long free-text batch name was clipped
+              by the Panel and simply unreadable rather than scrollable. The
+              RM / EGA columns were `hidden sm:table-cell`; with the table
+              itself gone below md they always show, which is what sm:
+              already did from md up. */}
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full text-[12px] border-collapse">
+              <thead className="bg-[var(--surface-subtle)]">
+                <tr className="border-b border-[var(--aws-border)]">
+                  <th className="px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Batch</th>
+                  <th className="px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Date</th>
+                  <th className="px-2 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Produced (kg)</th>
+                  <th className="px-2 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">RM (kg)</th>
+                  <th className="px-2 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">EGA</th>
                 </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr className="border-t border-[var(--aws-border-strong)] font-semibold">
-                <td className="px-2 py-1" colSpan={2}>Total</td>
-                <td className="px-2 py-1 text-right font-mono">{fmtNum(batchTotals.produced)}</td>
-                <td className="px-2 py-1 text-right font-mono hidden sm:table-cell">{fmtNum(batchTotals.rm)}</td>
-                <td className="px-2 py-1 text-right font-mono hidden sm:table-cell">{fmtNum(batchTotals.ega)}</td>
-              </tr>
-            </tfoot>
-          </table>
+              </thead>
+              <tbody>
+                {bandRows.map((r) => (
+                  <tr key={r.p.batch_id} className="border-b border-[var(--aws-border)]">
+                    <td className="px-2 py-1 font-semibold text-[var(--text-primary)]">
+                      {batchLabel(r.p)}
+                      {r.isOpen ? (
+                        <span className="ml-1 text-[10px] font-normal text-[var(--text-muted)]">(open)</span>
+                      ) : null}
+                    </td>
+                    <td className="px-2 py-1 text-[var(--text-secondary)]">
+                      <div>{r.dateText}</div>
+                      {/* Stage 2 IST literal — surfaced under the date so
+                          the operator sees the floor's local clock-face
+                          for the open or close event without doing TZ
+                          math.  Falls back silently when the column is
+                          empty (legacy rows pre-migration-038). */}
+                      {r.istLine ? (
+                        <div className="text-[10px] text-[var(--text-muted)]">{r.istLine}</div>
+                      ) : null}
+                    </td>
+                    <td className="px-2 py-1 text-right font-mono">{fmtNum(r.p.produced_qty_kg)}</td>
+                    <td className="px-2 py-1 text-right font-mono">{fmtNum(r.p.rm_consumed_kg)}</td>
+                    <td className="px-2 py-1 text-right font-mono">{fmtNum(r.p.extra_give_away_qty)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t border-[var(--aws-border-strong)] font-semibold">
+                  <td className="px-2 py-1" colSpan={2}>Total</td>
+                  <td className="px-2 py-1 text-right font-mono">{fmtNum(batchTotals.produced)}</td>
+                  <td className="px-2 py-1 text-right font-mono">{fmtNum(batchTotals.rm)}</td>
+                  <td className="px-2 py-1 text-right font-mono">{fmtNum(batchTotals.ega)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+
+          <ul
+            role="list"
+            className="md:hidden space-y-2"
+            aria-label="Batchwise output"
+          >
+            {bandRows.map((r, i) => (
+              <li
+                key={r.p.batch_id}
+                role="listitem"
+                aria-labelledby={`jc-band-card-${i}`}
+                className="rounded-[2px] border border-[var(--aws-border)] bg-white px-3 py-2"
+              >
+                <div
+                  id={`jc-band-card-${i}`}
+                  className="text-[12px] font-semibold text-[var(--text-primary)] break-words"
+                  title={batchLabel(r.p)}
+                >
+                  {batchLabel(r.p)}
+                  {r.isOpen ? (
+                    <span className="ml-1 text-[10px] font-normal text-[var(--text-muted)]">(open)</span>
+                  ) : null}
+                </div>
+                <div className="text-[11px] text-[var(--text-secondary)]">{r.dateText}</div>
+                {r.istLine ? (
+                  <div className="text-[10px] text-[var(--text-muted)]">{r.istLine}</div>
+                ) : null}
+                <dl className="mt-1.5 grid grid-cols-3 gap-2 text-[12px]">
+                  <div>
+                    <dt className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Produced (kg)</dt>
+                    <dd className="font-mono">{fmtNum(r.p.produced_qty_kg)}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">RM (kg)</dt>
+                    <dd className="font-mono">{fmtNum(r.p.rm_consumed_kg)}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">EGA</dt>
+                    <dd className="font-mono">{fmtNum(r.p.extra_give_away_qty)}</dd>
+                  </div>
+                </dl>
+              </li>
+            ))}
+          </ul>
+          <dl className="md:hidden mt-2 grid grid-cols-3 gap-2 rounded-[2px] border border-[var(--aws-border-strong)] bg-[var(--surface-subtle)] px-3 py-2 text-[12px] font-semibold">
+            <div>
+              <dt className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)]">Total produced (kg)</dt>
+              <dd className="font-mono">{fmtNum(batchTotals.produced)}</dd>
+            </div>
+            <div>
+              <dt className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)]">Total RM (kg)</dt>
+              <dd className="font-mono">{fmtNum(batchTotals.rm)}</dd>
+            </div>
+            <div>
+              <dt className="text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)]">Total EGA</dt>
+              <dd className="font-mono">{fmtNum(batchTotals.ega)}</dd>
+            </div>
+          </dl>
         </div>
       ) : null}
 
@@ -1771,9 +1849,10 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        // 28 px was under the 32 px tap target _ActionButton documents, and
-        // this is the only way to Close JC / Force unlock / Cancel JC.
-        className="w-9 h-9 md:w-8 md:h-8 shrink-0 rounded-sm hover:bg-[var(--surface-divider)] text-[var(--text-secondary)] flex items-center justify-center"
+        // 28 px is under the 32 px tap target _ActionButton documents, and
+        // this is the only way to Close JC / Force unlock / Cancel JC, so it
+        // grows to 36 px below md. md and up is byte-identical to today.
+        className="w-7 h-7 max-md:w-9 max-md:h-9 max-md:shrink-0 rounded-sm hover:bg-[var(--surface-divider)] text-[var(--text-secondary)] flex items-center justify-center"
         aria-label="More actions"
         title="More actions"
       >
@@ -1902,19 +1981,29 @@ function SfgInventoryPicker({ sfgCode, entity, onUse }: { sfgCode: string; entit
             {batches.map((b) => {
               const expired = !!b.expiry_date && b.expiry_date < todayIso;
               return (
-                <li key={b.batch_id} className="flex items-center gap-2 rounded-md border border-[var(--aws-border)] bg-white p-2 text-[12px]">
-                  <span className="font-mono text-[11px] text-[var(--text-muted)]">{b.batch_id}</span>
-                  <span className="font-semibold">{fmtKg(b.current_qty_kg)}</span>
-                  <span className="text-[var(--text-muted)]">in {b.inward_date || "—"}</span>
-                  <span className={expired ? "text-[var(--text-danger)] font-medium" : "text-[var(--text-muted)]"}>
-                    exp {b.expiry_date || "—"}{expired ? " (expired)" : ""}
-                  </span>
-                  <span className="text-[var(--text-muted)]">{b.floor_id || "—"}</span>
+                // Six facts and a button on one unwrapping flex line: on a
+                // phone the button was the item that got pushed out, and the
+                // Panel clipped it — the only way to pull WIP stock into the
+                // consumption field was unreachable. Two grid tracks instead,
+                // so the action keeps its own column whatever the facts do,
+                // and the facts wrap inside theirs. From md up the row looks
+                // exactly as before (facts left, Use right).
+                <li key={b.batch_id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-[var(--aws-border)] bg-white p-2 text-[12px]">
+                  <div className="min-w-0 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span className="font-mono text-[11px] text-[var(--text-muted)]">{b.batch_id}</span>
+                    <span className="font-semibold">{fmtKg(b.current_qty_kg)}</span>
+                    <span className="text-[var(--text-muted)]">in {b.inward_date || "—"}</span>
+                    <span className={expired ? "text-[var(--text-danger)] font-medium" : "text-[var(--text-muted)]"}>
+                      exp {b.expiry_date || "—"}{expired ? " (expired)" : ""}
+                    </span>
+                    <span className="text-[var(--text-muted)]">{b.floor_id || "—"}</span>
+                  </div>
                   {onUse ? (
                     <button
                       type="button"
                       onClick={() => onUse(b.current_qty_kg ?? 0)}
-                      className="ml-auto rounded border border-[var(--aws-navy)] px-2 py-0.5 text-[11px] text-[var(--aws-navy)] hover:bg-[var(--surface-divider)]"
+                      aria-label={`Use ${fmtKg(b.current_qty_kg)} from batch ${b.batch_id}`}
+                      className="shrink-0 h-9 md:h-auto rounded border border-[var(--aws-navy)] px-2 py-0.5 text-[11px] text-[var(--aws-navy)] hover:bg-[var(--surface-divider)]"
                     >
                       Use
                     </button>
@@ -2125,9 +2214,6 @@ function TabStrip({ value, onChange }: { value: TabKey; onChange: (t: TabKey) =>
               role="tab"
               aria-selected={active}
               onClick={() => onChange(t.key)}
-              // Only where the strip shows a shortened label below md, so the
-              // full name is still readable on a hover-capable device.
-              title={t.short ? t.label : undefined}
               className={["shrink-0 px-3 sm:px-4 py-2 text-[12px] sm:text-[13px] font-medium whitespace-nowrap border-b-2 -mb-px transition", active ? "border-[var(--aws-orange)] text-[var(--text-primary)]" : "border-transparent text-[var(--text-secondary)] hover:text-[var(--text-primary)]"].join(" ")}
             >
               {/* Short label below md, full label from md up. display:none
@@ -2135,7 +2221,11 @@ function TabStrip({ value, onChange }: { value: TabKey; onChange: (t: TabKey) =>
                   tab is announced with exactly one name. */}
               {t.short ? (
                 <>
-                  <span className="md:hidden">{t.short}</span>
+                  {/* The tooltip sits on the short label only. At md+ the
+                      button already shows the full name, and a tooltip
+                      repeating it would make three tabs out of nine behave
+                      differently from the other six on hover. */}
+                  <span className="md:hidden" title={t.label}>{t.short}</span>
                   <span className="hidden md:inline">{t.label}</span>
                 </>
               ) : (
@@ -2343,10 +2433,28 @@ function SfgBoxesTab({ detail, onReload, focusBatchId, onFocusConsumed }: { deta
     }
   }
 
+  // max-sm:h-9 — 28 px is under the 32 px tap target _ActionButton
+  // documents, and both users of this class ("Mark job card completed",
+  // "Scan boxes") are thumb targets on the floor. A max-* variant is
+  // emitted after every plain utility, so it beats the base h-7 whatever
+  // order the class string is in; sm and up keeps today's 28 px.
   const btnCls =
-    "h-7 px-3 rounded-[2px] text-[12px] font-semibold border bg-[var(--aws-orange)] " +
+    "h-7 max-sm:h-9 px-3 rounded-[2px] text-[12px] font-semibold border bg-[var(--aws-orange)] " +
     "border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white " +
     "disabled:opacity-50 disabled:cursor-not-allowed";
+
+  // Seven columns never fold into a 360 px phone, so this summary keeps its
+  // sideways scroll and pins the Batch column instead — three columns into
+  // the scroll every figure still has to say whose batch it is. `md:static`
+  // drops the pin from md up, where the table fits, so the desktop render is
+  // exactly what it was. The separator is a box-shadow because borders on a
+  // border-collapse table belong to the table and scroll away with it, and
+  // the background is supplied per cell (a sticky cell must be opaque, and
+  // the selected row is tinted).
+  const pinCell = "sticky md:static left-0 z-10 shadow-[1px_0_0_0_var(--aws-border)] md:shadow-none";
+  // A fixed track below md so the pinned pane cannot change width mid-scroll;
+  // from md up the column sizes itself exactly as before.
+  const pinTrack = "w-[140px] min-w-[140px] max-w-[140px] md:w-auto md:min-w-0 md:max-w-none break-words";
 
   // Batch picked in the selector (defaults to the first accounting batch until
   // the operator changes it). SFG/FG name is JC-level — shared by every batch.
@@ -2420,7 +2528,7 @@ function SfgBoxesTab({ detail, onReload, focusBatchId, onFocusConsumed }: { deta
               id="jc-batch-sel"
               value={selectedBatchId ?? ""}
               onChange={(e) => setSelBatch(e.target.value === "" ? null : Number(e.target.value))}
-              className="h-8 min-w-[180px] px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
+              className="h-8 max-sm:h-9 min-w-[180px] max-sm:w-full px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[var(--aws-navy)] text-[var(--text-primary)]"
             >
               {batches.map((b) => (
                 <option key={b.batch_id} value={b.batch_id}>
@@ -2430,11 +2538,22 @@ function SfgBoxesTab({ detail, onReload, focusBatchId, onFocusConsumed }: { deta
             </select>
           </div>
 
+          {/* The hint is a sibling of the scroller, not a child: inside it,
+              it would scroll off the left edge along with the first column.
+              min-w-[620px] stops the browser crushing every column to its
+              min-content (headers broke mid-word and "3.000 kg" wrapped in
+              two) only to scroll anyway. Both it and the nowrap cells below
+              are scoped under md: from md up the table sizes itself exactly
+              as it does today, so a long name still wraps rather than
+              turning the card into a scroller. */}
+          <p className="md:hidden text-[10px] text-[var(--text-muted)]">
+            Scroll sideways for the other columns — the batch stays in place.
+          </p>
           <div className="overflow-x-auto">
-            <table className="w-full text-[13px]">
+            <table className="w-full min-w-[620px] md:min-w-0 text-[13px]">
               <thead>
                 <tr className="text-left text-[11px] uppercase tracking-wide text-[var(--text-muted)] border-b border-[var(--aws-border)]">
-                  <th className="py-1.5 pr-3 font-semibold">Batch</th>
+                  <th scope="col" className={`py-1.5 pr-3 font-semibold ${pinCell} ${pinTrack} bg-white`}>Batch</th>
                   <th className="py-1.5 pr-3 font-semibold">SFG / FG</th>
                   <th className="py-1.5 pr-3 font-semibold text-right">Input</th>
                   <th className="py-1.5 pr-3 font-semibold text-right">Output</th>
@@ -2450,17 +2569,21 @@ function SfgBoxesTab({ detail, onReload, focusBatchId, onFocusConsumed }: { deta
                   const sel = b.batch_id === selectedBatchId;
                   return (
                     <tr key={b.batch_id} className={`border-b border-[var(--aws-border)] last:border-0 ${sel ? "bg-[#fff4e6]" : ""}`}>
-                      <td className="py-1.5 pr-3 text-[var(--text-primary)]">{b.batch_label?.trim() || `Batch ${b.batch_number}`}</td>
-                      <td className="py-1.5 pr-3 text-[var(--text-primary)] break-all">{fgName}</td>
-                      <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-[var(--text-primary)]">{input > 0 ? `${input.toFixed(3)} kg` : "—"}</td>
-                      <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-[var(--text-primary)]">
+                      {/* The pinned cell carries the row tint itself — a
+                          transparent sticky cell shows the scrolled columns
+                          through it. Both values match the row, so md+ (where
+                          the pin is off) looks exactly as it did. */}
+                      <th scope="row" className={`py-1.5 pr-3 text-left font-normal text-[var(--text-primary)] ${pinCell} ${pinTrack} ${sel ? "bg-[#fff4e6]" : "bg-white"}`}>{b.batch_label?.trim() || `Batch ${b.batch_number}`}</th>
+                      <td className="py-1.5 pr-3 text-[var(--text-primary)] break-words">{fgName}</td>
+                      <td className="py-1.5 pr-3 text-right font-mono tabular-nums max-md:whitespace-nowrap text-[var(--text-primary)]">{input > 0 ? `${input.toFixed(3)} kg` : "—"}</td>
+                      <td className="py-1.5 pr-3 text-right font-mono tabular-nums max-md:whitespace-nowrap text-[var(--text-primary)]">
                         {s.fgOutKg > 0 ? `${s.fgOutKg.toFixed(3)} kg` : "—"}{units != null && Number.isFinite(units) && units > 0 ? ` · ${units}u` : ""}
                       </td>
-                      <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-[var(--text-primary)]">{s.lossKg > 0 ? `${s.lossKg.toFixed(3)} kg` : "—"}</td>
-                      <td className="py-1.5 pr-3 text-right font-mono tabular-nums text-[var(--text-primary)]">
+                      <td className="py-1.5 pr-3 text-right font-mono tabular-nums max-md:whitespace-nowrap text-[var(--text-primary)]">{s.lossKg > 0 ? `${s.lossKg.toFixed(3)} kg` : "—"}</td>
+                      <td className="py-1.5 pr-3 text-right font-mono tabular-nums max-md:whitespace-nowrap text-[var(--text-primary)]">
                         {s.balanceDiff != null ? `${s.balanceDiff > 0 ? "+" : ""}${s.balanceDiff.toFixed(3)} kg` : "—"}
                       </td>
-                      <td className="py-1.5">
+                      <td className="py-1.5 max-md:whitespace-nowrap">
                         {s.isBalanced == null ? (
                           <span className="text-[11px] text-[var(--text-muted)]">—</span>
                         ) : s.isBalanced ? (
@@ -2847,9 +2970,9 @@ function TeamPanel({ detail, onReload }: { detail: JobCardDetail; onReload: () =
           <button
             type="button"
             onClick={() => { setOpen((v) => !v); setFeedback(null); }}
-            // h-9 on a phone, h-8 from md up — 28 px was under the 32 px tap
-            // target _ActionButton documents for every other action surface.
-            className="h-9 md:h-8 px-3 shrink-0 rounded-[2px] text-[12px] font-semibold border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white"
+            // 36 px on a phone — 28 px is under the 32 px tap target
+            // _ActionButton documents. md and up is unchanged.
+            className="h-7 max-md:h-9 max-md:shrink-0 px-3 rounded-[2px] text-[12px] font-semibold border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white"
           >
             {open ? "Cancel" : buttonLabel}
           </button>
@@ -2910,14 +3033,15 @@ function TeamPanel({ detail, onReload }: { detail: JobCardDetail; onReload: () =
               {members.map((m, i) => (
                 <span key={i} className="inline-flex items-center gap-1 max-w-full break-words bg-[#eaf3ff] border border-[#bbd9f3] text-[#9a393e] text-[12px] rounded-full px-2 py-0.5">
                   {m}
-                  {/* The × was a bare glyph with no box — about 11 px square,
-                      so a name fat-fingered into the list could not be removed
-                      on a phone at all. */}
+                  {/* The × is a bare glyph with no box — about 11 px square,
+                      so a name fat-fingered into the list cannot be removed on
+                      a phone at all. Below md it gets a 24 px round box; md and
+                      up keeps the bare glyph it has today. */}
                   <button
                     type="button"
                     onClick={() => removeMember(i)}
                     disabled={submitting}
-                    className="ml-1 -mr-1 shrink-0 inline-flex items-center justify-center w-6 h-6 md:w-4 md:h-4 rounded-full leading-none hover:text-[var(--aws-error)]"
+                    className="ml-1 leading-none hover:text-[var(--aws-error)] max-md:-mr-1 max-md:shrink-0 max-md:inline-flex max-md:items-center max-md:justify-center max-md:w-6 max-md:h-6 max-md:rounded-full"
                     aria-label={`Remove ${m}`}
                   >
                     ×
@@ -2998,6 +3122,7 @@ function RemarksTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           <EmptyHint>No remarks recorded yet.</EmptyHint>
         ) : (
           <RowTable
+            label="Remarks on this job card"
             rows={rows}
             columns={[
               { key: "recorded_at",  label: "When", render: (v) => fmtDateTime(String(v ?? "")), hideBelow: "sm" },
@@ -3028,7 +3153,7 @@ function RemarksTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
             <FormSelect label="Type" value={remarkType} onChange={setRemarkType} disabled={inputsDisabled} options={REMARK_TYPES} />
           </div>
-          <FormText label="Content" value={content} onChange={setContent} disabled={inputsDisabled} />
+          <FormText label="Content" value={content} onChange={setContent} disabled={inputsDisabled} multiline />
           {/* C3-MED-6 — disable Save when lock OR submit is in flight. */}
           <FormFooter feedback={feedback} submitting={submitting} submitLabel="Add remark" disabled={inputsDisabled} />
         </form>
@@ -3123,7 +3248,10 @@ function SignOffsTab({ detail, onReload }: { detail: JobCardDetail; onReload: ()
             isSigned ? "bg-[#eaf6ed] border-[#b6dbb1]" : "bg-[var(--surface-subtle)] border-[var(--aws-border)]",
           ].join(" ")}
         >
-          <div className="flex items-center justify-between gap-3">
+          {/* items-start below md: the text block wraps to two or three lines
+              on a phone and a vertically centred button beside it reads as
+              misaligned. md+ keeps today's centring. */}
+          <div className="flex items-start md:items-center justify-between gap-3">
             <div className="min-w-0">
               {isSigned ? (
                 <>
@@ -3154,6 +3282,10 @@ function SignOffsTab({ detail, onReload }: { detail: JobCardDetail; onReload: ()
                 busyLabel="Signing…"
                 disabled={!canSign}
                 onClick={promptAndSign}
+                // ActionButton is whitespace-nowrap, so it cannot shrink
+                // below its label; shrink-0 makes that explicit and keeps
+                // the wrapping text block (min-w-0) the part that gives.
+                className="shrink-0"
               >
                 Sign
               </ActionButton>
@@ -3170,6 +3302,8 @@ function SignOffsTab({ detail, onReload }: { detail: JobCardDetail; onReload: ()
       {rows.length > 0 ? (
         <Panel title={`All sign-offs · ${rows.length}`}>
           <RowTable
+            label="All sign-offs on this job card"
+            titleKey="signed_by"
             rows={rows}
             columns={[
               { key: "role",      label: "Role" },
@@ -5255,6 +5389,67 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       aria-describedby={describedBy}
     />
   );
+  // Batch list lines — derived ONCE here and rendered twice below (table at
+  // md+, cards under it). batchRowActions holds the three controls so their
+  // onClick / disabled / title live in one place and the two layouts cannot
+  // drift on which batch is loaded or what a button does; the caller only
+  // chooses the size (28 px in the table, 36 px on a phone).
+  const batchNumCell = (v: number | string | null | undefined) =>
+    v == null || v === "" ? "—" : fmtNum(Number(v));
+  const batchListRows = [...batches]
+    .sort((a, b) => b.batch_number - a.batch_number)
+    .map((b) => ({
+      b,
+      isLoaded: b.batch_id === selectedBatchId,
+      canManage: detail.status !== "completed" || isAdmin,
+      busy: batchActionBusy || submitting || lock.isLocked || lifecycleLocked,
+      statusColor: b.status === "open"
+        ? "bg-[#eaf6ed] text-[#1d8102]"
+        : b.status === "closed" ? "bg-[#eef2f8] text-[#33507a]" : "bg-[#f4eaea] text-[#8a3d3d]",
+    }));
+  const batchStatusPill = (r: (typeof batchListRows)[number]) => (
+    <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${r.statusColor}`}>{r.b.status}</span>
+  );
+  const batchLoadedMark = (r: (typeof batchListRows)[number]) =>
+    r.isLoaded ? <span className="ml-1 text-[10px] font-normal text-[var(--aws-link)]">· loaded</span> : null;
+  const batchRowActions = (r: (typeof batchListRows)[number], sizeCls: string) => (
+    <>
+      <button
+        type="button"
+        onClick={() => changeBatch(r.b.batch_id)}
+        disabled={r.isLoaded || submitting || lock.isLocked}
+        title={r.isLoaded ? "Already loaded" : "Load this batch's data"}
+        className={`${sizeCls} text-[11px] font-semibold rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[#2c5fa8] hover:text-[#2c5fa8] disabled:opacity-50 disabled:cursor-not-allowed`}
+      >
+        {r.isLoaded ? "Loaded" : "Load"}
+      </button>
+      {/* The per-row "Close" button is gone with the rest of the Close Batch
+          flow: a batch is completed by saving its output, which is the last
+          step. Load the batch, fill the form, Save — the completion rides
+          along in the same transaction. */}
+      {r.canManage ? (
+        <button
+          type="button"
+          onClick={() => void doRenameBatch(r.b)}
+          disabled={r.busy}
+          title="Rename this batch"
+          className={`${sizeCls} text-[11px] rounded-[2px] border border-transparent text-[var(--aws-link)] hover:underline disabled:opacity-50 disabled:cursor-not-allowed`}
+        >
+          Rename
+        </button>
+      ) : null}
+      {isProducerStage ? (
+        <button
+          type="button"
+          onClick={() => onJumpToBoxes(r.b.batch_id)}
+          title="Open this batch's box section in Boxes printing"
+          className={`${sizeCls} text-[11px] font-semibold rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[#2c5fa8] hover:text-[#2c5fa8]`}
+        >
+          Print QR
+        </button>
+      ) : null}
+    </>
+  );
   const consVariance = (r: ConsumptionRow) => (
     <VarianceChip
       materialName={r.article.material_sku_name}
@@ -5353,7 +5548,14 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                 maxLength={120}
                 required
                 aria-label="Batch name for the new batch"
-                className={`${inputCls} h-7 w-[220px] text-[12px]`}
+                // w-[220px] used to sit here next to inputCls's own w-full.
+                // Tailwind resolves that by stylesheet order, where w-full
+                // comes last and wins, so the field has always been full
+                // width — the 220px was dead and is gone. max-sm:h-9 is a
+                // thumb-sized target on a phone and beats inputCls's h-8
+                // (variants are emitted after plain utilities); sm and up is
+                // untouched.
+                className={`${inputCls} h-7 max-sm:h-9 text-[12px]`}
               />
             ) : null}
             <button
@@ -5361,7 +5563,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
               onClick={() => void doOpenBatch()}
               disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked || (isPackingStage && !newBatchLabel.trim())}
               title={lifecycleLocked ? "Start the job card first" : (isPackingStage && !newBatchLabel.trim()) ? "Enter a batch name first" : undefined}
-              className="h-7 px-3 text-[11px] font-semibold rounded-[2px] border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
+              className="h-7 max-sm:h-9 px-3 text-[11px] font-semibold rounded-[2px] border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {batchActionBusy ? "…" : "Open Batch"}
             </button>
@@ -5379,86 +5581,108 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
             No batches yet — {isPackingStage ? <>enter a name and click <strong>Open Batch</strong></> : <>click <strong>Open Batch</strong></>} to create the first one.
           </div>
         ) : (
-          <div className="overflow-x-auto rounded-[2px] border border-[var(--aws-border)] bg-white mb-2">
-            <table className="w-full text-[12px] border-collapse">
-              <thead className="bg-[var(--surface-subtle)]">
-                <tr className="border-b border-[var(--aws-border)]">
-                  {["Batch", "Status", "Produced (kg)", "Input (kg)", "Process Loss (kg)", "Opened", "Closed", "Actions"].map((h) => (
-                    <th key={h} className="px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">{h}</th>
+          /* Two layouts, ONE data source (batchListRows above).
+
+             md and up keeps the eight-column table — a batch only reads
+             correctly with its figures side by side.
+
+             Below md those eight columns put Load, the control that unlocks
+             every field under it, six columns off the right edge, so each
+             batch becomes a card instead. `hidden md:block` / `md:hidden`
+             keep exactly one layout in the accessibility tree, so no button
+             is announced — or tabbed through — twice. */
+          <>
+            <div className="hidden md:block overflow-x-auto rounded-[2px] border border-[var(--aws-border)] bg-white mb-2">
+              <table className="w-full text-[12px] border-collapse">
+                <caption className="sr-only">Batches on this job card, with the figures saved against each.</caption>
+                <thead className="bg-[var(--surface-subtle)]">
+                  <tr className="border-b border-[var(--aws-border)]">
+                    {["Batch", "Status", "Produced (kg)", "Input (kg)", "Process Loss (kg)", "Opened", "Closed", "Actions"].map((h) => (
+                      <th key={h} className="px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {batchListRows.map((r) => (
+                    <tr key={r.b.batch_id} className={`border-b border-[var(--aws-border)] last:border-b-0 ${r.isLoaded ? "bg-[#eaf0fb]" : ""}`}>
+                      <td className="px-2 py-1 font-semibold text-[var(--text-primary)] whitespace-nowrap">
+                        {batchLabel(r.b)}{batchLoadedMark(r)}
+                      </td>
+                      <td className="px-2 py-1">
+                        {batchStatusPill(r)}
+                      </td>
+                      <td className="px-2 py-1 font-mono">{batchNumCell(r.b.produced_qty_kg)}</td>
+                      <td className="px-2 py-1 font-mono">{batchNumCell(r.b.input_qty_kg)}</td>
+                      <td className="px-2 py-1 font-mono">{batchNumCell(r.b.process_loss_kg)}</td>
+                      <td className="px-2 py-1 whitespace-nowrap text-[var(--text-secondary)]">{r.b.opened_at_ist || "—"}</td>
+                      <td className="px-2 py-1 whitespace-nowrap text-[var(--text-secondary)]">{r.b.closed_at_ist || "—"}</td>
+                      <td className="px-2 py-1">
+                        <div className="flex items-center gap-1.5">
+                          {batchRowActions(r, "h-7 px-2")}
+                        </div>
+                      </td>
+                    </tr>
                   ))}
-                </tr>
-              </thead>
-              <tbody>
-                {[...batches]
-                  .sort((a, b) => b.batch_number - a.batch_number)
-                  .map((b) => {
-                    const isLoaded = b.batch_id === selectedBatchId;
-                    const isOpen = b.status === "open";
-                    const canManage = detail.status !== "completed" || isAdmin;
-                    const busy = batchActionBusy || submitting || lock.isLocked || lifecycleLocked;
-                    const numCell = (v: number | string | null | undefined) =>
-                      v == null || v === "" ? "—" : fmtNum(Number(v));
-                    const statusColor = isOpen
-                      ? "bg-[#eaf6ed] text-[#1d8102]"
-                      : b.status === "closed" ? "bg-[#eef2f8] text-[#33507a]" : "bg-[#f4eaea] text-[#8a3d3d]";
-                    return (
-                      <tr key={b.batch_id} className={`border-b border-[var(--aws-border)] last:border-b-0 ${isLoaded ? "bg-[#eaf0fb]" : ""}`}>
-                        <td className="px-2 py-1 font-semibold text-[var(--text-primary)] whitespace-nowrap">
-                          {batchLabel(b)}{isLoaded ? <span className="ml-1 text-[10px] font-normal text-[var(--aws-link)]">· loaded</span> : null}
-                        </td>
-                        <td className="px-2 py-1">
-                          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${statusColor}`}>{b.status}</span>
-                        </td>
-                        <td className="px-2 py-1 font-mono">{numCell(b.produced_qty_kg)}</td>
-                        <td className="px-2 py-1 font-mono">{numCell(b.input_qty_kg)}</td>
-                        <td className="px-2 py-1 font-mono">{numCell(b.process_loss_kg)}</td>
-                        <td className="px-2 py-1 whitespace-nowrap text-[var(--text-secondary)]">{b.opened_at_ist || "—"}</td>
-                        <td className="px-2 py-1 whitespace-nowrap text-[var(--text-secondary)]">{b.closed_at_ist || "—"}</td>
-                        <td className="px-2 py-1">
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => changeBatch(b.batch_id)}
-                              disabled={isLoaded || submitting || lock.isLocked}
-                              title={isLoaded ? "Already loaded" : "Load this batch's data"}
-                              className="h-7 px-2 text-[11px] font-semibold rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[#2c5fa8] hover:text-[#2c5fa8] disabled:opacity-50 disabled:cursor-not-allowed"
-                            >
-                              {isLoaded ? "Loaded" : "Load"}
-                            </button>
-                            {/* The per-row "Close" button is gone with the rest
-                                of the Close Batch flow: a batch is completed by
-                                saving its output, which is the last step. Load
-                                the batch, fill the form, Save — the completion
-                                rides along in the same transaction. */}
-                            {canManage ? (
-                              <button
-                                type="button"
-                                onClick={() => void doRenameBatch(b)}
-                                disabled={busy}
-                                title="Rename this batch"
-                                className="h-7 px-2 text-[11px] rounded-[2px] border border-transparent text-[var(--aws-link)] hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
-                              >
-                                Rename
-                              </button>
-                            ) : null}
-                            {isProducerStage ? (
-                              <button
-                                type="button"
-                                onClick={() => onJumpToBoxes(b.batch_id)}
-                                title="Open this batch's box section in Boxes printing"
-                                className="h-7 px-2 text-[11px] font-semibold rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[#2c5fa8] hover:text-[#2c5fa8]"
-                              >
-                                Print QR
-                              </button>
-                            ) : null}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-              </tbody>
-            </table>
-          </div>
+                </tbody>
+              </table>
+            </div>
+
+            {/* Phone: one card per batch, Load first in the tab order and a
+                full-size tap target. The list carries the structure the table
+                gets from its caption and headers — a named list, each card
+                named after the batch it is for (Tailwind's preflight strips
+                list semantics, hence the explicit roles). */}
+            <ul
+              role="list"
+              className="md:hidden space-y-2 mb-2"
+              aria-label="Batches on this job card"
+            >
+              {batchListRows.map((r, i) => (
+                <li
+                  key={r.b.batch_id}
+                  role="listitem"
+                  aria-labelledby={`jc-batch-card-${i}`}
+                  className={`rounded-[2px] border border-[var(--aws-border)] px-3 py-2.5 ${r.isLoaded ? "bg-[#eaf0fb]" : "bg-white"}`}
+                >
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span
+                      id={`jc-batch-card-${i}`}
+                      className="min-w-0 text-[13px] font-semibold text-[var(--text-primary)] break-words"
+                      title={batchLabel(r.b)}
+                    >
+                      {batchLabel(r.b)}{batchLoadedMark(r)}
+                    </span>
+                    {batchStatusPill(r)}
+                  </div>
+                  <dl className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 text-[12px]">
+                    <div>
+                      <dt className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Produced (kg)</dt>
+                      <dd className="font-mono">{batchNumCell(r.b.produced_qty_kg)}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Input (kg)</dt>
+                      <dd className="font-mono">{batchNumCell(r.b.input_qty_kg)}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Process Loss (kg)</dt>
+                      <dd className="font-mono">{batchNumCell(r.b.process_loss_kg)}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Opened</dt>
+                      <dd className="text-[var(--text-secondary)] break-words">{r.b.opened_at_ist || "—"}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">Closed</dt>
+                      <dd className="text-[var(--text-secondary)] break-words">{r.b.closed_at_ist || "—"}</dd>
+                    </div>
+                  </dl>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {batchRowActions(r, "h-9 px-3")}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </>
         )}
         {batchActionMsg ? (
           <div
@@ -5839,7 +6063,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
               <input
                 type="text"
                 placeholder="Remarks (optional)"
-                className={`${inputCls} col-span-5 sm:col-span-2`}
+                className={`${inputCls} col-span-4 sm:col-span-2`}
                 value={a.remarks}
                 onChange={(e) => updateAdditive(i, { remarks: e.target.value })}
                 disabled={inputsDisabled}
@@ -5851,7 +6075,10 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                 onClick={() => removeAdditive(i)}
                 disabled={inputsDisabled}
                 aria-label="Remove additive row"
-                className="col-span-1 inline-flex items-center justify-center h-9 text-[var(--aws-error)] disabled:opacity-30"
+                // col-span-1 was an 18 px tap target flush against Remarks, so
+                // a mis-tap deleted the row. Two tracks below sm, taken back
+                // from Remarks; sm and up unchanged.
+                className="col-span-2 sm:col-span-1 inline-flex items-center justify-center h-9 text-[var(--aws-error)] disabled:opacity-30"
               >
                 ×
               </button>
@@ -5954,7 +6181,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                 />
                 <input
                   type="text" placeholder="Remarks"
-                  className={`${inputCls} col-span-5 sm:col-span-2`}
+                  className={`${inputCls} col-span-4 sm:col-span-2`}
                   value={r.remarks}
                   onChange={(e) => updateRejection(i, { remarks: e.target.value })}
                   disabled={inputsDisabled}
@@ -5967,7 +6194,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                   disabled={inputsDisabled}
                   aria-disabled={inputsDisabled}
                   aria-describedby={describedBy}
-                  className="col-span-1 h-8 text-[12px] text-[var(--aws-error)] hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="col-span-2 sm:col-span-1 h-9 md:h-8 text-[12px] text-[var(--aws-error)] hover:underline disabled:opacity-50 disabled:cursor-not-allowed"
                   title="Remove row"
                 >
                   ×
@@ -6154,7 +6381,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
               const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
               return (
                 <div key={key} className="grid grid-cols-12 gap-2 items-center">
-                  <div className="col-span-7 sm:col-span-8 text-[13px] text-[var(--text-primary)] truncate" title={a.material_sku_name}>
+                  <div className="col-span-6 sm:col-span-8 text-[13px] text-[var(--text-primary)] break-words md:truncate" title={a.material_sku_name}>
                     {a.material_sku_name} <span className={`text-[11px] ${a.item_type === "SFG" || a.item_type === "WIP" ? "text-[var(--text-success)] font-medium" : "text-[var(--text-muted)]"}`}>({a.item_type})</span>
                   </div>
                   <input
@@ -6167,7 +6394,11 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                     aria-disabled={inputsDisabled}
                     aria-describedby={describedBy}
                   />
-                  <span className="col-span-1 text-[11px] text-[var(--text-muted)]">{a.uom}</span>
+                  {/* One 12th of a 304 px panel is an 18 px track, and "ROLL"
+                      does not fit in it — the unit was overflowing and being
+                      clipped, so the operator could not tell pieces from
+                      rolls. Two tracks below sm; sm and up unchanged. */}
+                  <span className="col-span-2 sm:col-span-1 text-[11px] text-[var(--text-muted)] max-md:truncate" title={a.uom}>{a.uom}</span>
                 </div>
               );
             })}
@@ -6195,7 +6426,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                 const key = a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`;
                 return (
                   <div key={key} className="grid grid-cols-12 gap-2 items-center">
-                    <div className="col-span-7 sm:col-span-8 text-[13px] text-[var(--text-primary)] truncate" title={a.material_sku_name}>
+                    <div className="col-span-6 sm:col-span-8 text-[13px] text-[var(--text-primary)] break-words md:truncate" title={a.material_sku_name}>
                       {a.material_sku_name} <span className="text-[11px] text-[var(--text-muted)]">(PM)</span>
                     </div>
                     <input
@@ -6208,7 +6439,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                       aria-disabled={inputsDisabled}
                       aria-describedby={describedBy}
                     />
-                    <span className="col-span-1 text-[11px] text-[var(--text-muted)]">{a.uom}</span>
+                    <span className="col-span-2 sm:col-span-1 text-[11px] text-[var(--text-muted)] max-md:truncate" title={a.uom}>{a.uom}</span>
                   </div>
                 );
               })}
@@ -6433,6 +6664,22 @@ function SummaryTable({ summary, rows, additives }:
   const n = rows.length + additives.length;
   const th = "py-1.5 px-2 font-medium text-left whitespace-nowrap";
   const td = "py-1.5 px-2 whitespace-nowrap align-top";
+  // Sixteen nowrap columns will never fold into a phone, so this table keeps
+  // its sideways scroll (the rule the rest of the file follows — fold a table
+  // into cards — is waived for a summary this wide). What it gets instead is a
+  // pinned Material column: three screens into the scroll, every number needs
+  // to still say whose it is. `md:static` drops the pin again from md up, so
+  // the desktop table renders exactly as it did before. The separator is a
+  // box-shadow rather than a border because borders on a border-collapse
+  // table belong to the table, not the cell, and scroll away with it.
+  // No background here on purpose: the caller supplies it, because an
+  // additive row is #fcfcfd and a "bg-white" baked in would win over it
+  // (Tailwind resolves two background utilities by stylesheet order, where
+  // the named colour lands after the arbitrary one).
+  const pinned = "sticky md:static left-0 shadow-[1px_0_0_0_var(--aws-border)] md:shadow-none";
+  // A fixed track below md so the pinned pane cannot change width mid-scroll;
+  // from md up the column sizes itself exactly as before (max 220px).
+  const pinTrack = "w-[150px] min-w-[150px] max-w-[150px] md:w-auto md:min-w-0 md:max-w-[220px]";
   const spanCell = "py-1.5 px-2 whitespace-nowrap align-top bg-[var(--aws-bg-tint,#fbfbfb)] border-l border-[#ededed]";
   const qty = (v: number, uom: string) => (
     <span>
@@ -6446,106 +6693,113 @@ function SummaryTable({ summary, rows, additives }:
     </span>
   );
   return (
-    <div className="mb-3 overflow-x-auto">
-      <table className="w-full text-[12px] border-collapse">
-        <caption className="sr-only">
-          Accounting summary. One row per raw and packaging material; batch-level
-          figures span all rows.
-        </caption>
-        <thead>
-          <tr className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] border-b border-[var(--aws-border)]">
-            <th scope="col" className={th}>Material</th>
-            <th scope="col" className={th}>RM Consumed</th>
-            <th scope="col" className={th}>FG Output</th>
-            <th scope="col" className={th}>Process Loss</th>
-            <th scope="col" className={th}>Extra Giveaway (EGA)</th>
-            <th scope="col" className={th}>Balance Material</th>
-            <th scope="col" className={th}>Off-grade Total</th>
-            <th scope="col" className={th}>Control Sample</th>
-            <th scope="col" className={th}>Additives</th>
-            <th scope="col" className={th}>Process Loss %</th>
-            <th scope="col" className={th}>EGA Loss %</th>
-            <th scope="col" className={th}>PL+EGA Loss %</th>
-            <th scope="col" className={th}>Off-grade %</th>
-            <th scope="col" className={th}>Total Loss %</th>
-            <th scope="col" className={th}>Is Balanced</th>
-            <th scope="col" className={th}>Balance Difference</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((m, i) => (
-            <tr key={m.key} className="border-b border-[#f2f2f2]">
-              <th scope="row" className="py-1.5 px-2 font-normal text-left max-w-[220px]">
-                <span className="block truncate text-[var(--text-primary)]" title={m.name}>
-                  {m.name}{" "}
-                  <span className={`text-[10px] ${m.itemType === "SFG" || m.itemType === "WIP" ? "text-[var(--text-success)] font-medium" : "text-[var(--text-muted)]"}`}>
-                    ({m.itemType})
+    <div className="mb-3">
+      {/* The hint lives outside the scroller on purpose: inside it, it
+          would scroll off the left edge with the first column. */}
+      <p className="md:hidden mb-1 text-[10px] text-[var(--text-muted)]">
+        Scroll sideways for the other columns — the material name stays in place.
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[12px] border-collapse">
+          <caption className="sr-only">
+            Accounting summary. One row per raw and packaging material; batch-level
+            figures span all rows.
+          </caption>
+          <thead>
+            <tr className="text-[10px] uppercase tracking-wide text-[var(--text-muted)] border-b border-[var(--aws-border)]">
+              <th scope="col" className={`${th} ${pinned} ${pinTrack} z-20 bg-white`}>Material</th>
+              <th scope="col" className={th}>RM Consumed</th>
+              <th scope="col" className={th}>FG Output</th>
+              <th scope="col" className={th}>Process Loss</th>
+              <th scope="col" className={th}>Extra Giveaway (EGA)</th>
+              <th scope="col" className={th}>Balance Material</th>
+              <th scope="col" className={th}>Off-grade Total</th>
+              <th scope="col" className={th}>Control Sample</th>
+              <th scope="col" className={th}>Additives</th>
+              <th scope="col" className={th}>Process Loss %</th>
+              <th scope="col" className={th}>EGA Loss %</th>
+              <th scope="col" className={th}>PL+EGA Loss %</th>
+              <th scope="col" className={th}>Off-grade %</th>
+              <th scope="col" className={th}>Total Loss %</th>
+              <th scope="col" className={th}>Is Balanced</th>
+              <th scope="col" className={th}>Balance Difference</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((m, i) => (
+              <tr key={m.key} className="border-b border-[#f2f2f2]">
+                <th scope="row" className={`py-1.5 px-2 font-normal text-left ${pinned} ${pinTrack} z-10 bg-white`}>
+                  <span className="block truncate text-[var(--text-primary)]" title={m.name}>
+                    {m.name}{" "}
+                    <span className={`text-[10px] ${m.itemType === "SFG" || m.itemType === "WIP" ? "text-[var(--text-success)] font-medium" : "text-[var(--text-muted)]"}`}>
+                      ({m.itemType})
+                    </span>
                   </span>
-                </span>
-              </th>
-              <td className={td}>{qty(m.consumed, m.uom)}</td>
-              {i === 0 ? <td className={spanCell} rowSpan={n}>{kg(summary.fgOutKg)}</td> : null}
-              {i === 0 ? <td className={spanCell} rowSpan={n}>{kg(summary.lossKg)}</td> : null}
-              {i === 0 ? <td className={spanCell} rowSpan={n}>{kg(summary.egaKg)}</td> : null}
-              <td className={td}>{qty(m.balance, m.uom)}</td>
-              <td className={td}>{qty(m.offgrade, m.uom)}</td>
-              <td className={td}>{qty(m.ctrlSample, m.uom)}</td>
-              {/* per-row now: each additive has its own row beneath */}
-              <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
-              {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.processLossPct, 1.5)}</td> : null}
-              {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.egaLossPct, 1.0)}</td> : null}
-              {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.invisibleLossPct, 2.5)}</td> : null}
-              {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.offgradePct, 1.0)}</td> : null}
-              {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.totalLossPct, 3.0)}</td> : null}
-              {i === 0 ? (
-                <td className={spanCell} rowSpan={n}>
-                  {summary.isBalanced == null ? (
-                    <span className="text-[var(--text-muted)]">—</span>
-                  ) : (
-                    <span className={summary.isBalanced ? "text-[#1d8102] font-semibold" : "text-[#b1361e] font-semibold"}>
-                      {summary.isBalanced ? "✓ Balanced" : "✗ Not balanced"}
-                    </span>
-                  )}
+                </th>
+                <td className={td}>{qty(m.consumed, m.uom)}</td>
+                {i === 0 ? <td className={spanCell} rowSpan={n}>{kg(summary.fgOutKg)}</td> : null}
+                {i === 0 ? <td className={spanCell} rowSpan={n}>{kg(summary.lossKg)}</td> : null}
+                {i === 0 ? <td className={spanCell} rowSpan={n}>{kg(summary.egaKg)}</td> : null}
+                <td className={td}>{qty(m.balance, m.uom)}</td>
+                <td className={td}>{qty(m.offgrade, m.uom)}</td>
+                <td className={td}>{qty(m.ctrlSample, m.uom)}</td>
+                {/* per-row now: each additive has its own row beneath */}
+                <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
+                {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.processLossPct, 1.5)}</td> : null}
+                {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.egaLossPct, 1.0)}</td> : null}
+                {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.invisibleLossPct, 2.5)}</td> : null}
+                {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.offgradePct, 1.0)}</td> : null}
+                {i === 0 ? <td className={spanCell} rowSpan={n}>{lossPctChip(summary.totalLossPct, 3.0)}</td> : null}
+                {i === 0 ? (
+                  <td className={spanCell} rowSpan={n}>
+                    {summary.isBalanced == null ? (
+                      <span className="text-[var(--text-muted)]">—</span>
+                    ) : (
+                      <span className={summary.isBalanced ? "text-[#1d8102] font-semibold" : "text-[#b1361e] font-semibold"}>
+                        {summary.isBalanced ? "✓ Balanced" : "✗ Not balanced"}
+                      </span>
+                    )}
+                  </td>
+                ) : null}
+                {i === 0 ? (
+                  <td className={spanCell} rowSpan={n}>
+                    {summary.balanceDiff == null ? (
+                      <span className="text-[var(--text-muted)]">—</span>
+                    ) : (
+                      <span className={summary.isBalanced === false ? "text-[#b1361e] font-semibold" : ""}>
+                        {kg(summary.balanceDiff)}
+                        {summary.balanceDiffPct != null ? (
+                          <span className="text-[10px] text-[var(--text-muted)] ml-1">
+                            ({fmtNum(summary.balanceDiffPct)}%)
+                          </span>
+                        ) : null}
+                      </span>
+                    )}
+                  </td>
+                ) : null}
+              </tr>
+            ))}
+            {additives.map((a) => (
+              <tr key={a.key} className="border-b border-[#f2f2f2] bg-[#fcfcfd]">
+                <th scope="row" className={`py-1.5 px-2 font-normal text-left ${pinned} ${pinTrack} z-10 bg-[#fcfcfd]`}>
+                  <span className="block truncate text-[var(--text-primary)]" title={a.name}>
+                    {a.name} <span className="text-[10px] text-[var(--text-muted)]">(Additive)</span>
+                  </span>
+                </th>
+                {/* An additive is not consumed from the BOM, returned, rejected
+                    or sampled — those columns have no meaning on this row. */}
+                <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
+                <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
+                <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
+                <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
+                <td className={td} title="Data only — not part of the conservation identity.">
+                  {kg(a.qty)}
                 </td>
-              ) : null}
-              {i === 0 ? (
-                <td className={spanCell} rowSpan={n}>
-                  {summary.balanceDiff == null ? (
-                    <span className="text-[var(--text-muted)]">—</span>
-                  ) : (
-                    <span className={summary.isBalanced === false ? "text-[#b1361e] font-semibold" : ""}>
-                      {kg(summary.balanceDiff)}
-                      {summary.balanceDiffPct != null ? (
-                        <span className="text-[10px] text-[var(--text-muted)] ml-1">
-                          ({fmtNum(summary.balanceDiffPct)}%)
-                        </span>
-                      ) : null}
-                    </span>
-                  )}
-                </td>
-              ) : null}
-            </tr>
-          ))}
-          {additives.map((a) => (
-            <tr key={a.key} className="border-b border-[#f2f2f2] bg-[#fcfcfd]">
-              <th scope="row" className="py-1.5 px-2 font-normal text-left max-w-[220px]">
-                <span className="block truncate text-[var(--text-primary)]" title={a.name}>
-                  {a.name} <span className="text-[10px] text-[var(--text-muted)]">(Additive)</span>
-                </span>
-              </th>
-              {/* An additive is not consumed from the BOM, returned, rejected
-                  or sampled — those columns have no meaning on this row. */}
-              <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
-              <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
-              <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
-              <td className={td}><span className="text-[var(--text-muted)]">—</span></td>
-              <td className={td} title="Data only — not part of the conservation identity.">
-                {kg(a.qty)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       {additives.length > 0 ? (
         <p className="mt-1 text-[10px] text-[var(--text-muted)]">
           Additives are recorded for data only and sit outside the balance
@@ -6761,9 +7015,16 @@ function AccountingSummaryCard({
             open={isSelected}
             className="mb-2 border border-[var(--aws-border)] rounded-md"
           >
-            <summary className="cursor-pointer select-none px-3 py-2 text-[12px] font-semibold text-[var(--text-primary)] flex items-center gap-2 hover:bg-[var(--aws-bg-tint)]">
-              <span>{batchLabel(batch)}</span>
-              <span className="text-[10px] font-normal text-[var(--text-muted)]">
+            {/* Below md the three children wrap: the timestamps drop to
+                their own line (order-last) so the batch name and the
+                Balanced chip share the first one, instead of every child
+                shrinking to min-content at once and pushing the chip past
+                the panel edge, where it is clipped. Every class here is
+                scoped below md, so md and up keeps the single nowrap line
+                it has today — including the long-label overflow. */}
+            <summary className="cursor-pointer select-none px-3 py-3 sm:py-2 text-[12px] font-semibold text-[var(--text-primary)] flex flex-wrap md:flex-nowrap items-center gap-x-2 gap-y-1 hover:bg-[var(--aws-bg-tint)]">
+              <span className="max-md:min-w-0 max-md:break-words" title={batchLabel(batch)}>{batchLabel(batch)}</span>
+              <span className="w-full order-last sm:order-none sm:w-auto text-[10px] font-normal text-[var(--text-muted)]">
                 · {batch.status}
                 {batch.opened_at_ist ? ` · opened ${batch.opened_at_ist}` : ""}
                 {batch.closed_at_ist ? ` · closed ${batch.closed_at_ist}` : ""}
@@ -6771,7 +7032,7 @@ function AccountingSummaryCard({
               {bs.isBalanced != null ? (
                 <span
                   className={[
-                    "ml-auto text-[10px] font-semibold px-1.5 py-0.5 rounded",
+                    "ml-auto max-md:shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded",
                     bs.isBalanced
                       ? "bg-[#eaf6ed] text-[#1d8102]"
                       : "bg-[#fdf3f1] text-[#b1361e]",
@@ -6897,7 +7158,11 @@ function AdditiveOtherPicker({
       {open && opts.length > 0 ? (
         <ul
           role="listbox"
-          className="absolute z-10 top-full left-0 right-0 mt-0.5 max-h-56 overflow-y-auto bg-white border border-[var(--aws-border-strong)] rounded-[2px] shadow-lg text-[12px]"
+          // Shorter on a phone: 224px of suggestions covers the field and
+          // everything under it. The Panel around this row is overflow-x-clip
+          // (not -hidden), so overflow-y stays visible and the list is no
+          // longer cut off at the panel's bottom edge.
+          className="absolute z-10 top-full left-0 right-0 mt-0.5 max-h-40 sm:max-h-56 overflow-y-auto bg-white border border-[var(--aws-border-strong)] rounded-[2px] shadow-lg text-[12px]"
         >
           {opts.map((o, idx) => (
             <li key={o}>
@@ -7218,6 +7483,9 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
   const [addingMetal, setAddingMetal] = useState(false);
 
   // ── Weight Checks ──────────────────────────────────────────────────────
+  // Unique per mount: the sample cards below md name themselves through it,
+  // and this tab renders more than one card list.
+  const sampleUid = useId();
   const [targetWt, setTargetWt] = useState("");
   const [tolerance, setTolerance] = useState("");
   const [samples, setSamples] = useState(
@@ -7476,6 +7744,22 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
   const metalDisabled = addingMetal || lock.isLocked || lifecycleLocked || !canAddQuality;
   const qualityDisabled = savingQuality || lock.isLocked || lifecycleLocked || !canAddQuality;
 
+  // Weight-check sample controls. Defined once and rendered by BOTH the sm+
+  // table and the phone cards under it, so value / onChange / disabled /
+  // aria-label cannot drift between the two layouts. Only the checkbox size
+  // is a caller's choice — 16 px is fine beside a table row, not under a
+  // thumb. The aria-labels start with the visible caption so speech input
+  // still matches what the operator can read.
+  const sampleNet = (i: number, s: { net: string }) => (
+    <input type="number" step="any" className={inputCls} value={s.net} onChange={(e) => updateSample(i, { net: e.target.value })} onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()} disabled={qualityDisabled} aria-disabled={qualityDisabled} aria-label={`Net (g), sample ${i + 1}`} />
+  );
+  const sampleGross = (i: number, s: { gross: string }) => (
+    <input type="number" step="any" className={inputCls} value={s.gross} onChange={(e) => updateSample(i, { gross: e.target.value })} onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()} disabled={qualityDisabled} aria-disabled={qualityDisabled} aria-label={`Gross (g), sample ${i + 1}`} />
+  );
+  const sampleLeak = (i: number, s: { leak: boolean }, sizeCls: string) => (
+    <input type="checkbox" className={`accent-[var(--aws-orange)] ${sizeCls} disabled:opacity-50 disabled:cursor-not-allowed`} checked={s.leak} onChange={(e) => updateSample(i, { leak: e.target.checked })} disabled={qualityDisabled} aria-disabled={qualityDisabled} aria-label={`Leak, sample ${i + 1}`} />
+  );
+
   return (
     <>
       {/* C3 lock banner — sits above every Quality form below. Only renders
@@ -7523,6 +7807,11 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
             busyLabel="Notifying…"
             onClick={() => void notifyQc()}
             title="Notify the QC team that this job card is ready for verification."
+            // Below sm this row is flex-col, which stretches the button to
+            // the full width and leaves its label jammed against the left
+            // edge. Centring is a no-op from sm up, where the row is a
+            // flex-row and the button sizes to its label.
+            className="justify-center"
           >
             Notify QC
           </LockableButton>
@@ -7535,6 +7824,7 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           <EmptyHint>No metal-detection checks recorded yet.</EmptyHint>
         ) : (
           <RowTable
+            label="Metal detection records"
             rows={metalRecords}
             columns={[
               { key: "recorded_at",  label: "When", render: (v) => fmtDateTime(String(v ?? "")) },
@@ -7554,7 +7844,10 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-3">
           <FormSelect label="Check type" value={mdCheckType} onChange={setMdCheckType} disabled={metalDisabled} options={METAL_CHECK_TYPES} />
         </div>
-        <div className="grid grid-cols-3 gap-3 mb-3">
+        {/* Three across at every width on purpose — Fe / NFe / SS read as one
+            verdict triple and three stacked tri-state buttons is worse. Only
+            the gap tightens below sm, which buys each button ~9 px. */}
+        <div className="grid grid-cols-3 gap-2 sm:gap-3 mb-3">
           <FormCheckbox label="Fe"  value={mdFe}  onChange={setMdFe}  disabled={metalDisabled} />
           <FormCheckbox label="NFe" value={mdNfe} onChange={setMdNfe} disabled={metalDisabled} />
           <FormCheckbox label="SS"  value={mdSs}  onChange={setMdSs}  disabled={metalDisabled} />
@@ -7595,37 +7888,67 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           <FormNumber label="Tolerance (±g)" value={tolerance} onChange={setTolerance} disabled={qualityDisabled} />
         </div>
         <SubsectionLabel>Samples ({WEIGHT_SAMPLES})</SubsectionLabel>
-        {/* Mobile-friendly samples — narrow viewports hide gross column, the
-            net + leak still fit. Net carries the gross value in its title
-            attribute so it isn't lost. */}
-        <div>
+        {/* The Gross column used to be `hidden sm:table-cell` — but it holds
+            an editable input, not a display value, so on a 360–430 px phone
+            the operator could not record a gross weight at all. (The comment
+            that stood here claimed Net carried it in a title attribute; no
+            such attribute ever existed.) Nothing is hidden now: from sm up
+            the four-column table renders exactly as it did, and below sm the
+            same three controls appear as one card per sample. */}
+        <div className="hidden sm:block">
           <table className="w-full text-[12px]">
             <thead className="text-[10px] uppercase text-[var(--text-muted)]">
               <tr>
-                <th className="text-left px-2 py-1">#</th>
-                <th className="text-left px-2 py-1">Net (g)</th>
-                <th className="text-left px-2 py-1 hidden sm:table-cell">Gross (g)</th>
-                <th className="text-left px-2 py-1">Leak</th>
+                <th scope="col" className="text-left px-2 py-1">#</th>
+                <th scope="col" className="text-left px-2 py-1">Net (g)</th>
+                <th scope="col" className="text-left px-2 py-1">Gross (g)</th>
+                <th scope="col" className="text-left px-2 py-1">Leak</th>
               </tr>
             </thead>
             <tbody>
               {samples.map((s, i) => (
                 <tr key={i} className="border-b border-[var(--aws-border)]">
                   <td className="px-2 py-1 text-[var(--text-secondary)]">{i + 1}</td>
-                  <td className="px-2 py-1">
-                    <input type="number" step="any" className={inputCls} value={s.net} onChange={(e) => updateSample(i, { net: e.target.value })} onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()} disabled={qualityDisabled} aria-disabled={qualityDisabled} />
-                  </td>
-                  <td className="px-2 py-1 hidden sm:table-cell">
-                    <input type="number" step="any" className={inputCls} value={s.gross} onChange={(e) => updateSample(i, { gross: e.target.value })} onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()} disabled={qualityDisabled} aria-disabled={qualityDisabled} />
-                  </td>
-                  <td className="px-2 py-1">
-                    <input type="checkbox" className="accent-[var(--aws-orange)] w-4 h-4 disabled:opacity-50 disabled:cursor-not-allowed" checked={s.leak} onChange={(e) => updateSample(i, { leak: e.target.checked })} disabled={qualityDisabled} aria-disabled={qualityDisabled} />
-                  </td>
+                  <td className="px-2 py-1">{sampleNet(i, s)}</td>
+                  <td className="px-2 py-1">{sampleGross(i, s)}</td>
+                  <td className="px-2 py-1">{sampleLeak(i, s, "w-4 h-4")}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        {/* Phone: one card per sample, both weights side by side and a leak
+            box big enough to hit. Tailwind's preflight strips list semantics,
+            so the roles are explicit and each card is named after its
+            sample. */}
+        <ul role="list" className="sm:hidden space-y-2" aria-label={`Weight check samples (${WEIGHT_SAMPLES})`}>
+          {samples.map((s, i) => (
+            <li
+              key={i}
+              role="listitem"
+              aria-labelledby={`${sampleUid}-s${i}`}
+              className="rounded-[2px] border border-[var(--aws-border)] bg-white px-3 py-2.5"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span id={`${sampleUid}-s${i}`} className="text-[12px] font-semibold text-[var(--text-primary)]">Sample {i + 1}</span>
+                <label className="flex items-center gap-2 text-[12px] text-[var(--text-secondary)]">
+                  {sampleLeak(i, s, "w-5 h-5")}
+                  Leak
+                </label>
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <label className="block">
+                  <FormLabel>Net (g)</FormLabel>
+                  {sampleNet(i, s)}
+                </label>
+                <label className="block">
+                  <FormLabel>Gross (g)</FormLabel>
+                  {sampleGross(i, s)}
+                </label>
+              </div>
+            </li>
+          ))}
+        </ul>
       </Panel>
 
       {/* ── 4. Environment ──────────────────────────────────────────────── */}
@@ -7633,6 +7956,8 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
         {envRecords.length > 0 ? (
           <div className="mb-3">
             <RowTable
+              label="Previous environment readings"
+              titleKey="parameter_name"
               rows={envRecords}
               columns={[
                 { key: "recorded_at",    label: "When", render: (v) => fmtDateTime(String(v ?? "")), hideBelow: "sm" },
@@ -7723,7 +8048,10 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           disabled={savingQuality || !canAddQuality}
           onClick={saveQuality}
           variant="primary"
-          className="h-9 px-4 text-[13px] font-bold tracking-wide"
+          // justify-center — see FormFooter: a full-width save button on a
+          // phone is fine, a full-width bar with the label hard against its
+          // left edge is not. No effect from sm up.
+          className="h-9 px-4 text-[13px] font-bold tracking-wide justify-center"
         >
           SAVE QUALITY
         </LockableButton>
@@ -7754,7 +8082,47 @@ function FormLabel({ children }: { children: React.ReactNode }) {
 const inputCls =
   "w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] disabled:bg-[var(--surface-disabled)] disabled:text-[#879596]";
 
-function FormText({ label, value, onChange, disabled, placeholder }: { label: string; value: string; onChange: (v: string) => void; disabled?: boolean; placeholder?: string }) {
+function FormText({ label, value, onChange, disabled, placeholder, multiline }: { label: string; value: string; onChange: (v: string) => void; disabled?: boolean; placeholder?: string; multiline?: boolean }) {
+  // multiline: below md the field holds prose in a textarea — a single-line
+  // input shows about 30 characters at 360 px and scrolls what came before
+  // out of sight, so a remark cannot be re-read before it is submitted.
+  //
+  // From md up the field stays exactly what it is today: the same one-line
+  // input, 32 px tall, where Enter submits the form. The two controls carry
+  // identical value / onChange / disabled / placeholder and only one of them
+  // is ever displayed, so only one is focusable or in the accessibility
+  // tree. Each has its own <label htmlFor> because a <label> wrapping two
+  // controls labels whichever comes first — the hidden one, at md and up.
+  const uid = useId();
+  if (multiline) {
+    return (
+      <div>
+        <label htmlFor={`${uid}-area`} className="block md:hidden">
+          <FormLabel>{label}</FormLabel>
+        </label>
+        <textarea
+          id={`${uid}-area`}
+          className={`${inputCls} block md:hidden h-24 py-1.5 resize-y`}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          placeholder={placeholder}
+        />
+        <label htmlFor={`${uid}-line`} className="hidden md:block">
+          <FormLabel>{label}</FormLabel>
+        </label>
+        <input
+          id={`${uid}-line`}
+          type="text"
+          className={`${inputCls} hidden md:inline-block`}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          placeholder={placeholder}
+        />
+      </div>
+    );
+  }
   return (
     <label className="block">
       <FormLabel>{label}</FormLabel>
@@ -7850,7 +8218,12 @@ function FormFooter({
         busyLabel="Saving…"
         disabled={!!disabled}
         variant="primary"
-        className="h-9 px-4 text-[13px] font-bold tracking-wide"
+        // justify-center: below sm this row is flex-col, whose default
+        // align-items: stretch makes the button full width — and
+        // ActionButton's own inline-flex then left-aligns the label inside
+        // it. Centring is a no-op at sm+, where the button sizes to its
+        // label, so nothing above sm changes.
+        className="h-9 px-4 text-[13px] font-bold tracking-wide justify-center"
       >
         {submitLabel}
       </ActionButton>
@@ -7870,8 +8243,9 @@ type Column = {
   key: string;
   label: string;
   render?: (v: unknown, row: Record<string, unknown>) => React.ReactNode;
-  /** Drop this column below the given breakpoint — mobile-first column
-   *  hiding per the repo responsive convention (no horizontal scroll). */
+  /** Drop this column from the DESKTOP table below the given breakpoint —
+   *  a density knob for the md–lg range only. Nothing is ever hidden from a
+   *  phone: below md the table folds into cards that carry every column. */
   hideBelow?: "sm" | "md" | "lg";
 };
 
@@ -7882,35 +8256,90 @@ const COL_HIDE_CLS: Record<NonNullable<Column["hideBelow"]>, string> = {
   lg: "hidden lg:table-cell",
 };
 
-function RowTable({ rows, columns }: { rows: Array<Record<string, unknown>>; columns: Column[] }) {
+function RowTable({ rows, columns, label, titleKey }: {
+  rows: Array<Record<string, unknown>>;
+  columns: Column[];
+  /** Plain-English name for the list/table, used as the card list's
+   *  aria-label and the table's screen-reader caption. */
+  label?: string;
+  /** Column whose value heads each card. Defaults to the first column. */
+  titleKey?: string;
+}) {
+  // Table from md up, one card per row below it — the same fold the rest of
+  // this page uses. RowTable had neither a scroll wrapper nor a fold, so its
+  // nowrap `truncate` cells overflowed the Panel at 360 px and were clipped
+  // with no scrollbar: the remark text, the signer's name and the metal
+  // verdicts were unreadable and unrecoverable (a `title` needs a mouse).
+  //
+  // Both layouts render the SAME `body` cells, computed once here, so a value
+  // can never say one thing in the table and another in the card. `hideBelow`
+  // now only thins the desktop table — every card carries every column, so a
+  // phone no longer loses the date, the type or the author.
+  const uid = useId();
+  const body = rows.map((row) =>
+    columns.map((c) => {
+      const raw = row[c.key];
+      const display = c.render ? c.render(raw, row) : raw == null || raw === "" ? "—" : String(raw);
+      return { col: c, display, hint: typeof display === "string" ? display : undefined };
+    }),
+  );
+  // Heading column for the cards: the one the caller names, else the first.
+  const ti = titleKey ? Math.max(0, columns.findIndex((c) => c.key === titleKey)) : 0;
   return (
-    <div>
-      <table className="w-full text-[13px] border-collapse">
-        <thead className="bg-[var(--surface-subtle)]">
-          <tr className="border-b border-[var(--aws-border)]">
-            {columns.map((c) => (
-              <th key={c.key} className={`px-3 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-[var(--text-secondary)] ${c.hideBelow ? COL_HIDE_CLS[c.hideBelow] : ""}`}>
-                {c.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, i) => (
-            <tr key={i} className="border-b border-[var(--aws-border)]">
-              {columns.map((c) => {
-                const raw = row[c.key];
-                const display = c.render ? c.render(raw, row) : raw == null || raw === "" ? "—" : String(raw);
-                return (
-                  <td key={c.key} className={`px-3 py-2 align-top max-w-[160px] sm:max-w-[260px] truncate ${c.hideBelow ? COL_HIDE_CLS[c.hideBelow] : ""}`} title={typeof display === "string" ? display : undefined}>
+    <>
+      <div className="hidden md:block overflow-x-auto">
+        <table className="w-full text-[13px] border-collapse">
+          {label ? <caption className="sr-only">{label}</caption> : null}
+          <thead className="bg-[var(--surface-subtle)]">
+            <tr className="border-b border-[var(--aws-border)]">
+              {columns.map((c) => (
+                <th key={c.key} scope="col" className={`px-3 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-[var(--text-secondary)] ${c.hideBelow ? COL_HIDE_CLS[c.hideBelow] : ""}`}>
+                  {c.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {body.map((cells, i) => (
+              <tr key={i} className="border-b border-[var(--aws-border)]">
+                {cells.map(({ col: c, display, hint }) => (
+                  <td key={c.key} className={`px-3 py-2 align-top max-w-[160px] sm:max-w-[260px] truncate ${c.hideBelow ? COL_HIDE_CLS[c.hideBelow] : ""}`} title={hint}>
                     {display}
                   </td>
-                );
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Phone + small tablet: one card per row, every column present and
+          wrapping. Tailwind's preflight strips list semantics, so the roles
+          are explicit, and each card is named after its heading value. */}
+      <ul role="list" className="md:hidden space-y-2" aria-label={label}>
+        {body.map((cells, i) => (
+          <li
+            key={i}
+            role="listitem"
+            aria-labelledby={`${uid}-r${i}`}
+            className="rounded-[2px] border border-[var(--aws-border)] bg-white px-3 py-2.5"
+          >
+            <div id={`${uid}-r${i}`} className="text-[13px] font-semibold text-[var(--text-primary)] break-words">
+              {cells[ti] ? cells[ti].display : "—"}
+            </div>
+            <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[12px]">
+              {cells.map(({ col: c, display }, j) => (
+                j === ti ? null : (
+                  <Fragment key={c.key}>
+                    <dt className="text-[var(--text-muted)]">{c.label}</dt>
+                    <dd className="min-w-0 break-words text-[var(--text-primary)]">{display}</dd>
+                  </Fragment>
+                )
+              ))}
+            </dl>
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }

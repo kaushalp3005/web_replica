@@ -41,6 +41,11 @@ type WorkPo = PreviewPo & {
 
 type FilterKind = "all" | "new" | "duplicate" | "warning" | "unmatched";
 
+/** POs rendered per page. Lower than the listing's 50 because a preview card is
+ *  far taller — an editable header form plus a full lines table each — and a
+ *  single PO Book routinely parses to 185+ of them (25082026POBOOK.xlsx). */
+const PAGE_SIZE = 25;
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /** Mirror po-creation.js toNum — empty/null → null; non-numeric string → keep string */
@@ -143,6 +148,7 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
   );
 
   const [activeFilter, setActiveFilter] = useState<FilterKind>("all");
+  const [page, setPage] = useState(1);
   const [mode, setMode] = useState<CommitMode>("create_only");
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
@@ -151,6 +157,16 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
   // ── Derived ────────────────────────────────────────────────────────────────
 
   const visiblePos = pos.filter((po) => poMatchesFilter(po, activeFilter));
+
+  // Pagination is display-only: select-all, the commit payload and the summary
+  // counters all keep working off the full list, so a PO selected on page 1
+  // still commits while page 4 is on screen.
+  const totalPages = Math.max(1, Math.ceil(visiblePos.length / PAGE_SIZE));
+  // Clamp rather than store a corrected page — switching to a filter with
+  // fewer pages must not leave `page` pointing past the end and render blank.
+  const safePage = Math.min(page, totalPages);
+  const pagePos = visiblePos.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+
   const selectedPos = pos.filter((po) => po._selected);
   const newSel = selectedPos.filter((p) => !p.is_duplicate).length;
   const dupSel = selectedPos.filter((p) => p.is_duplicate).length;
@@ -294,7 +310,10 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
       <FilterPills
         pos={pos}
         activeFilter={activeFilter}
-        onFilter={(f) => setActiveFilter(f)}
+        onFilter={(f) => {
+          setActiveFilter(f);
+          setPage(1);
+        }}
         onSelectAll={selectAll}
         onSelectNone={selectNone}
       />
@@ -306,7 +325,7 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
         </div>
       ) : (
         <div className="space-y-2">
-          {visiblePos.map((po) => {
+          {pagePos.map((po) => {
             // Find original index in pos[] so mutations target the right item
             const originalIdx = pos.indexOf(po);
             return (
@@ -325,6 +344,15 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
           })}
         </div>
       )}
+
+      {/* ── Pagination ────────────────────────────────────────────────── */}
+      <PreviewPagination
+        page={safePage}
+        totalPages={totalPages}
+        total={visiblePos.length}
+        pageSize={PAGE_SIZE}
+        onPage={setPage}
+      />
 
       {/* ── Commit bar (sticky bottom) ────────────────────────────────── */}
       <CommitBar
@@ -673,6 +701,77 @@ function HeaderEditGrid({
     </div>
   );
 }
+
+// ── Pagination ────────────────────────────────────────────────────────────────
+// Mirrors PoPagination in _listing.tsx. That one drives a server-side query;
+// this one slices an in-memory array, so there is no loading state.
+
+function PageBtn({
+  p, label, active, disabled, onPage,
+}: {
+  p: number; label: React.ReactNode; active?: boolean; disabled?: boolean;
+  onPage: (p: number) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => !disabled && onPage(p)}
+      disabled={!!disabled}
+      className={[
+        "min-w-[28px] h-7 px-2 text-[12px] rounded-sm border",
+        active
+          ? "bg-[var(--aws-navy)] text-white border-[var(--aws-navy)]"
+          : "bg-white text-[var(--text-primary)] border-[var(--aws-border-strong)] hover:border-[var(--aws-navy)]",
+        disabled ? "opacity-50 cursor-not-allowed" : "",
+      ].join(" ")}
+      aria-label={typeof label === "number" ? `Page ${label}` : undefined}
+      aria-current={active ? "page" : undefined}
+    >
+      {label}
+    </button>
+  );
+}
+
+function PreviewPagination({
+  page, totalPages, total, pageSize, onPage,
+}: {
+  page: number; totalPages: number; total: number; pageSize: number;
+  onPage: (p: number) => void;
+}) {
+  if (total === 0 || totalPages <= 1) return null;
+  const start = (page - 1) * pageSize + 1;
+  const end = Math.min(page * pageSize, total);
+  const max = 7;
+  let from = Math.max(1, page - Math.floor(max / 2));
+  const to = Math.min(totalPages, from + max - 1);
+  if (to - from + 1 < max) from = Math.max(1, to - max + 1);
+  const pages: number[] = [];
+  for (let i = from; i <= to; i++) pages.push(i);
+
+  return (
+    <nav
+      className="mt-3 flex flex-wrap items-center justify-between gap-2"
+      aria-label="PO preview pages"
+    >
+      <span className="text-[12px] text-[var(--text-secondary)]">
+        Showing {start}–{end} of {total} PO{total === 1 ? "" : "s"}
+        {" · selections are kept across pages"}
+      </span>
+      <div className="flex items-center gap-1">
+        <PageBtn p={page - 1} label="‹" disabled={page <= 1} onPage={onPage} />
+        {from > 1 ? <PageBtn p={1} label={1} onPage={onPage} /> : null}
+        {from > 2 ? <span className="px-1 text-[var(--text-muted)]">…</span> : null}
+        {pages.map((p) => (
+          <PageBtn key={p} p={p} label={p} active={p === page} onPage={onPage} />
+        ))}
+        {to < totalPages - 1 ? <span className="px-1 text-[var(--text-muted)]">…</span> : null}
+        {to < totalPages ? <PageBtn p={totalPages} label={totalPages} onPage={onPage} /> : null}
+        <PageBtn p={page + 1} label="›" disabled={page >= totalPages} onPage={onPage} />
+      </div>
+    </nav>
+  );
+}
+
 
 // ── LinesTable ────────────────────────────────────────────────────────────────
 

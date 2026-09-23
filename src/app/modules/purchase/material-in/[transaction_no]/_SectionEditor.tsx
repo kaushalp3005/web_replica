@@ -514,7 +514,7 @@ function ExistingSectionCard({
                   onPrintRow={(r) => onPrint(async () => [toPrintBox(r, line, section.section_number)])}
                 />
                 {displayPages > 1 ? (
-                  <div className="flex items-center gap-2 text-[12px] mt-1">
+                  <div className="flex flex-wrap items-center gap-2 text-[12px] mt-1">
                     <button
                       type="button"
                       disabled={clampedDisplayPage <= 1 || loadingBoxes}
@@ -524,7 +524,7 @@ function ExistingSectionCard({
                       ‹
                     </button>
                     <span className="text-[var(--text-secondary)]">Page {clampedDisplayPage} of {displayPages}</span>
-                    <span className="text-[var(--text-muted)]">
+                    <span className="hidden sm:inline text-[var(--text-muted)]">
                       (Box {displayStart + 1}–{Math.min(displayStart + BOX_DISPLAY_SIZE, boxTotal)} of {boxTotal})
                     </span>
                     <button
@@ -685,11 +685,11 @@ function NewSectionCard({
             onPrintRow={(r) => onPrint(async () => [toPrintBox(r, line, null)])}
           />
           {totalPages > 1 ? (
-            <div className="flex items-center gap-2 text-[12px]">
+            <div className="flex flex-wrap items-center gap-2 text-[12px]">
               <button type="button" disabled={page <= 1} onClick={() => dispatch({ type: "setNewSectionPage", id: section.id, page: page - 1 })}
                 className="h-7 px-2 rounded-[2px] border border-[var(--aws-border-strong)] bg-white disabled:opacity-50 disabled:cursor-not-allowed">‹</button>
               <span className="text-[var(--text-secondary)]">Page {page} of {totalPages}</span>
-              <span className="text-[var(--text-muted)]">(Box {start + 1}–{end} of {total})</span>
+              <span className="hidden sm:inline text-[var(--text-muted)]">(Box {start + 1}–{end} of {total})</span>
               <button type="button" disabled={page >= totalPages} onClick={() => dispatch({ type: "setNewSectionPage", id: section.id, page: page + 1 })}
                 className="h-7 px-2 rounded-[2px] border border-[var(--aws-border-strong)] bg-white disabled:opacity-50 disabled:cursor-not-allowed">›</button>
             </div>
