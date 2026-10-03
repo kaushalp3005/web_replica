@@ -1,7 +1,9 @@
 "use client";
 
-// Direct Transfer OUT (doc 08) — create a dispatch with no prior request, or EDIT an
-// existing one via ?editId=. Reuses the shared form parts (_formParts) + QR scanner; adds
+// Direct Transfer OUT (doc 08) — EDIT an existing dispatch via ?editId=. Creating one with
+// no request is no longer allowed: every transfer starts from a request the store accepted
+// and an inventory manager approved (backend migration 119, which also refuses it), so the
+// create mode only explains where to go. Reuses the shared form parts (_formParts) + QR scanner; adds
 // a per-article Cold-Storage stock picker (cold-source dispatch) and the edit prefill.
 // Create → POST /transfers; Edit → PUT /transfers/{id} (stamps edited_at). On submit the
 // source stock (cold or warehouse) is deducted and boxes parked In-Transit.
@@ -399,6 +401,20 @@ function DirectTransferForm() {
   // but false on the client's first render, so gating the render on it makes the SSR HTML
   // differ from the first client render → hydration mismatch. Effects stay gated on
   // `allowed` and the hook redirects unauthenticated users.
+
+  if (!isEditMode) {
+    return (
+      <TransferChrome title="Transfer OUT">
+        <button onClick={() => router.push("/modules/transfer")}
+          className="text-[12px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] mb-3">← Transfer</button>
+        <section className="bg-white border border-[var(--aws-border)] rounded-md p-6 text-[13px] text-[var(--text-secondary)]">
+          Direct transfers are no longer used. Every transfer starts from a request: the store team of the
+          supplying warehouse accepts it, the inventory manager approves it, and then the store scans and sends
+          it from Requests → Scan &amp; send.
+        </section>
+      </TransferChrome>
+    );
+  }
 
   return (
     <TransferChrome title={isEditMode ? "Edit Transfer OUT" : "Transfer OUT"}>

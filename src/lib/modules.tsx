@@ -248,7 +248,13 @@ export const MODULES: ModuleItem[] = [
     stat: "Requests · Dispatch · Receive · In-Transit",
     route: "transfer",
     implemented: true,
-    adminOnly: true,
+    // Admins, plus inventory managers, who approve transfer requests before anything is
+    // scanned (transfer.requests.approve, backend migration 119), and their substitutes
+    // (inventory_manager_substitute, migration 120). Both are unscoped roles, so this is
+    // allowedRoles (not ROLE_MODULE_SCOPE): a scope entry would hide every other tile
+    // from a senior user given the substitute role on top of their own. The page itself
+    // still turns away anyone who is neither admin, an approver nor the store team.
+    allowedRoles: ["inventory_manager", "inventory_manager_substitute"],
     Icon: TransferIcon,
   },
   {
@@ -370,7 +376,10 @@ export const ROLE_MODULE_SCOPE: Record<string, string[]> = {
   // job card (production.floor_requisitions.{view,issue,cancel}, app/db/111), and
   // the same requests under Stores → Production Indents (table + request report).
   // That sub-route key also shows the Stores tile, overriding its adminOnly flag.
-  store_head:    ["purchase/material-in", "production/floor-requisitions", "stores/production-indents"],
+  // …plus Inter-Unit Transfer: the store team of the warehouse a request asks stock FROM
+  // accepts or holds it, and scans and sends it once an inventory manager has approved
+  // it — backend transfer.requests.accept (migration 119). The page gate checks that.
+  store_head:    ["purchase/material-in", "production/floor-requisitions", "stores/production-indents", "transfer"],
   // Scoped production roles. Keys are either a top-level module route
   // ("job-card") or a "<module>/<sub>" sub-route for finer gating WITHIN a
   // landing page — SO Creation / Planning / Plan List / Production Indents all

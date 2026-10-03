@@ -47,8 +47,32 @@ export interface TransferRequest {
   created_ts?: string | null;
   rejected_ts?: string | null;
   updated_at?: string | null;
+  // Backend migration 119: the store accepts, an inventory manager approves, then the
+  // store scans and sends. store_response "accepted" | "on_hold" is the store's answer
+  // (a store hold keeps the request Pending, with store_hold_reason).
+  store_response?: string | null;
+  store_response_by?: string | null;
+  store_response_by_email?: string | null;
+  store_response_at?: string | null;
+  store_hold_reason?: string | null;
+  approval_decided_by?: string | null;
+  approval_decided_at?: string | null;
+  approval_hold_reason?: string | null;
+  approval_held_by?: string | null;
+  approval_held_at?: string | null;
   lines: RequestLine[];
 }
+
+/** Request statuses: Pending → Accepted (store) → Approved | On Hold | Rejected
+ *  (inventory manager) → Transferred (scanned and sent). */
+export const REQUEST_STATUS = {
+  PENDING: "Pending",
+  ACCEPTED: "Accepted",
+  ON_HOLD: "On Hold",
+  APPROVED: "Approved",
+  REJECTED: "Rejected",
+  TRANSFERRED: "Transferred",
+} as const;
 
 // ── Transfers (OUT) ──────────────────────────────────────────────────────────
 export interface TransferBox {
@@ -397,6 +421,21 @@ export const TransferApi = {
       `${BASE}/inner-transfer/list${qs({ page: p.page ?? 1, per_page: p.per_page ?? 15 })}`,
       "Failed to load inner cold transfers.",
     ),
+
+  // ── Request flow (migration 119) ──
+  // The store team of the supplying warehouse accepts (→ the inventory managers are asked)
+  // or holds with a reason (stays Pending; the inventory managers are told).
+  acceptRequest: (id: number) =>
+    postJson<TransferRequest>(`${BASE}/requests/${id}/accept`, {}, "Failed to accept the request."),
+  storeHoldRequest: (id: number, reason: string) =>
+    postJson<TransferRequest>(`${BASE}/requests/${id}/store-hold`, { reason }, "Failed to put the request on hold."),
+  // An inventory manager approves (the store may then scan and send), holds or rejects.
+  approveRequest: (id: number) =>
+    postJson<TransferRequest>(`${BASE}/requests/${id}/approve`, {}, "Failed to approve the request."),
+  holdRequest: (id: number, reason: string) =>
+    postJson<TransferRequest>(`${BASE}/requests/${id}/hold`, { reason }, "Failed to put the request on hold."),
+  rejectRequest: (id: number, reason: string) =>
+    postJson<TransferRequest>(`${BASE}/requests/${id}/reject`, { reason }, "Failed to reject the request."),
 
   deleteRequest: (id: number) =>
     mutate<{ success: boolean; message: string }>(`${BASE}/requests/${id}`, "DELETE", "Failed to delete request."),

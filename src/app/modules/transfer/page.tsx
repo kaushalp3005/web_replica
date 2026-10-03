@@ -8,9 +8,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useRequireAuth, useMe, useUserScope } from "@/lib/user";
+import { useHasPermission, useRequireAuth, useMe, useUserScope } from "@/lib/user";
 import { TransferChrome } from "./_chrome";
 import {
+  REQUEST_STATUS,
   TransferApi,
   type TransferRequest,
   type TransferListItem,
@@ -154,6 +155,11 @@ const STATUS_TONE: Record<string, string> = {
   Received: "bg-emerald-100 text-emerald-800",
   Completed: "bg-emerald-100 text-emerald-800",
   Rejected: "bg-rose-100 text-rose-800",
+  // Request flow (backend migration 119)
+  Accepted: "bg-sky-100 text-sky-800",
+  Approved: "bg-emerald-100 text-emerald-800",
+  "On Hold": "bg-amber-100 text-amber-800",
+  Transferred: "bg-slate-100 text-slate-700",
 };
 function StatusBadge({ status }: { status?: string | null }) {
   const s = status || "—";
@@ -174,6 +180,12 @@ export default function TransferDashboardPage() {
   // its own warehouse(s) (and the filter is hidden entirely when there's nothing
   // to choose between — its data is already scoped server-side).
   const { isAdmin, warehouses: userWarehouses } = useUserScope();
+  // Request flow (backend migration 119): the supplying store accepts / holds a request
+  // and scans and sends it once approved; an inventory manager approves / holds / rejects
+  // it in between. Either opens the module; everyone else still needs admin.
+  const canAcceptRequests = useHasPermission("transfer", "requests", null, "accept");
+  const canApproveRequests = useHasPermission("transfer", "requests", null, "approve");
+  const canOpen = isAdmin || canAcceptRequests || canApproveRequests;
   const warehouseOptions = isAdmin ? WAREHOUSE_CODES : userWarehouses;
   const showWarehouseFilter = isAdmin || userWarehouses.length > 1;
 
@@ -188,8 +200,8 @@ export default function TransferDashboardPage() {
   const [warehouseFilter, setWarehouseFilter] = useState("all");
   // Which column the warehouse filter applies to: From, To, or both.
   const [warehouseDir, setWarehouseDir] = useState<WhDir>("all");
-  // Requests status filter — defaults to Pending; "Transferred" = accepted/done.
-  const [requestStatus, setRequestStatus] = useState<"Pending" | "Transferred" | "All">("Pending");
+  // Requests status filter — defaults to Open (not yet transferred or rejected).
+  const [requestStatus, setRequestStatus] = useState<RequestFilter>("Open");
   // Transfer-Out has 3 statuses; Transfer-In has 2. Each is an individual filter
   // (+ "all"), plus a date range. Default "all".
   const [transferStatus, setTransferStatus] = useState<"all" | "Dispatch" | "Partial" | "Received">("all");
@@ -282,30 +294,30 @@ export default function TransferDashboardPage() {
   // filtering + pagination is client-side over these (server-scoped) sets, so no
   // refetch is needed when a filter changes.
   useEffect(() => {
-    if (!mounted || !allowed || !isAdmin) return;
+    if (!mounted || !allowed || !canOpen) return;
     queueMicrotask(() => {
       loadTransfers();
       loadRequests();
       loadTransferIns();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mounted, allowed, isAdmin]);
+  }, [mounted, allowed, canOpen]);
 
   // In-transit count once on mount (P6 also refreshes it on pending-modal close).
   useEffect(() => {
-    if (!mounted || !allowed || !isAdmin) return;
+    if (!mounted || !allowed || !canOpen) return;
     queueMicrotask(() => loadInTransitCount());
-  }, [mounted, allowed, isAdmin, loadInTransitCount]);
+  }, [mounted, allowed, canOpen, loadInTransitCount]);
 
   // Lazy-load Inner Cold the first time its tab opens.
   useEffect(() => {
-    if (!mounted || !allowed || !isAdmin) return;
+    if (!mounted || !allowed || !canOpen) return;
     if (activeTab === "innercold" && innerCold.length === 0) queueMicrotask(() => loadInnerCold(1));
-  }, [activeTab, mounted, allowed, isAdmin, innerCold.length, loadInnerCold]);
+  }, [activeTab, mounted, allowed, canOpen, innerCold.length, loadInnerCold]);
 
   // ── Client-side filtered views ──
   const filteredRequests = useMemo(() => requests.filter((r) =>
-    (requestStatus === "All" || r.status === requestStatus) &&
+    requestMatchesFilter(r, requestStatus) &&
     warehouseMatchesDir(warehouseFilter, warehouseDir, [r.from_warehouse], [r.to_warehouse]) &&
     searchMatch(requestSearch, [r.request_no, r.from_warehouse, r.to_warehouse, r.request_date, r.status])
   ), [requests, requestStatus, warehouseFilter, warehouseDir, requestSearch]);
@@ -353,7 +365,10 @@ export default function TransferDashboardPage() {
   }), [transfers, grnOutIds, transferInDateFrom, transferInDateTo, warehouseFilter, warehouseDir, transferInSearch]);
 
   const pendingRequests = useMemo(
-    () => requests.filter((r) => r.status === "Pending").length, [requests]);
+    () => requests.filter((r) => r.status === REQUEST_STATUS.PENDING).length, [requests]);
+  const awaitingApproval = useMemo(
+    () => requests.filter((r) => r.status === REQUEST_STATUS.ACCEPTED || r.status === REQUEST_STATUS.ON_HOLD).length,
+    [requests]);
 
   // Client-side pagination for the filtered Transfer-Out / Transfer-In tabs and
   // the (unfiltered) All-Transfers tab. Pages are clamped so a shrinking filter
@@ -394,14 +409,49 @@ export default function TransferDashboardPage() {
     catch (e) { fail(e, "Failed to delete inner cold transfer."); }
   };
 
+  // ── Request flow (migration 119) ──
+  const askReason = (question: string): string | null => {
+    const r = typeof window === "undefined" ? null : window.prompt(`${question}\n\nReason:`);
+    if (r === null) return null;
+    if (!r.trim()) { setError("A reason is needed."); return null; }
+    return r.trim();
+  };
+  const runRequestStep = async (step: () => Promise<unknown>, fallback: string) => {
+    try { await step(); await loadRequests(); }
+    catch (e) { fail(e, fallback); }
+  };
+  const requestActions: RequestActions = {
+    canStore: canAcceptRequests, canApprove: canApproveRequests, myEmail: email,
+    onAccept: (r) => {
+      if (!confirmDelete(`Accept request ${r.request_no}? The inventory manager will be asked to approve it.`)) return;
+      runRequestStep(() => TransferApi.acceptRequest(r.id), "Failed to accept the request.");
+    },
+    onStoreHold: (r) => {
+      const reason = askReason(`Put request ${r.request_no} on hold? The inventory manager will be told why.`);
+      if (reason) runRequestStep(() => TransferApi.storeHoldRequest(r.id, reason), "Failed to put the request on hold.");
+    },
+    onApprove: (r) => {
+      if (!confirmDelete(`Approve request ${r.request_no}? The store team can then scan and send it.`)) return;
+      runRequestStep(() => TransferApi.approveRequest(r.id), "Failed to approve the request.");
+    },
+    onHold: (r) => {
+      const reason = askReason(`Put request ${r.request_no} on hold?`);
+      if (reason) runRequestStep(() => TransferApi.holdRequest(r.id, reason), "Failed to put the request on hold.");
+    },
+    onReject: (r) => {
+      const reason = askReason(`Reject request ${r.request_no}? It will be closed.`);
+      if (reason) runRequestStep(() => TransferApi.rejectRequest(r.id, reason), "Failed to reject the request.");
+    },
+  };
+
   const go = (path: string) => router.push(`/modules/transfer${path}`);
 
   // No `if (!allowed) return null` gate: useRequireAuth returns true on the server but
   // false on the client's first render, so gating the render on it causes a hydration
-  // mismatch. The `isAdmin` guard below already protects the body; effects are gated on
+  // mismatch. The `canOpen` guard below already protects the body; effects are gated on
   // `allowed` and the hook redirects unauthenticated users.
 
-  if (!isAdmin) {
+  if (!canOpen) {
     return (
       <TransferChrome title="Inter-Unit Transfer">
         <h1 className="text-[20px] font-semibold text-[var(--text-primary)] mb-3">Inter-Unit Transfer</h1>
@@ -442,8 +492,8 @@ export default function TransferDashboardPage() {
     `px-3 py-1 text-[12px] rounded border ${active ? "bg-[var(--aws-navy)] text-white border-[var(--aws-navy)]" : "border-[var(--aws-border)] hover:border-[var(--aws-navy)]"}`;
 
   const RequestStatusFilter = (
-    <div className="flex gap-1">
-      {(["Pending", "Transferred", "All"] as const).map((s) => (
+    <div className="flex flex-wrap gap-1">
+      {REQUEST_FILTERS.map((s) => (
         <button key={s} onClick={() => { setRequestStatus(s); setRequestsPage(1); }} className={segBtn(requestStatus === s)}>
           {s}
         </button>
@@ -524,9 +574,12 @@ export default function TransferDashboardPage() {
       )}
 
       {/* Stat cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 mb-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 mb-4">
         <StatCard label="Requests" value={requestsTotal} tone="text-[var(--text-primary)]" />
-        <StatCard label="Pending" value={pendingRequests} tone="text-amber-600" />
+        <StatCard label="Pending" value={pendingRequests} tone="text-amber-600"
+          onClick={() => { setActiveTab("request"); setRequestStatus(REQUEST_STATUS.PENDING); setRequestsPage(1); }} />
+        <StatCard label="Awaiting Approval" value={awaitingApproval} tone="text-sky-700"
+          onClick={() => { setActiveTab("request"); setRequestStatus(REQUEST_STATUS.ACCEPTED); setRequestsPage(1); }} />
         <StatCard label="Transfers Out" value={transfersTotal} tone="text-violet-700" />
         <StatCard label="Transfers In" value={transferInsTotal} tone="text-teal-700" />
         <StatCard label="In Transit" value={inTransitCount} tone="text-orange-600" onClick={() => setPendingOpen(true)} />
@@ -565,11 +618,11 @@ export default function TransferDashboardPage() {
                           reason={r.status} lines={requestHoverLines(r)} />
                       </td>
                       <td>{r.from_warehouse}</td><td>{r.to_warehouse}</td>
-                      <td>{r.request_date}</td><td><StatusBadge status={r.status} /></td>
+                      <td>{r.request_date}</td>
+                      <td><StatusBadge status={r.status} /><RequestNote r={r} /></td>
                       <td className="text-right whitespace-nowrap">
+                        <RequestButtons r={r} actions={requestActions} go={go} />
                         <RowBtn onClick={() => go(`/request/${r.id}`)}>View</RowBtn>
-                        <RowBtn disabled={r.status?.toLowerCase() !== "pending"}
-                          onClick={() => go(`/transferform?requestId=${r.id}`)}>Accept</RowBtn>
                         {canDelete && <RowBtn danger onClick={() => onDeleteRequest(r.id)}>Delete</RowBtn>}
                       </td>
                     </tr>
@@ -581,9 +634,10 @@ export default function TransferDashboardPage() {
                   <Card key={r.id}>
                     <CardHead title={r.request_no} status={r.status} />
                     <CardRow>{r.from_warehouse} → {r.to_warehouse} · {r.request_date}</CardRow>
+                    <RequestNote r={r} />
                     <CardActions>
+                      <RequestButtons r={r} actions={requestActions} go={go} />
                       <RowBtn onClick={() => go(`/request/${r.id}`)}>View</RowBtn>
-                      <RowBtn disabled={r.status?.toLowerCase() !== "pending"} onClick={() => go(`/transferform?requestId=${r.id}`)}>Accept</RowBtn>
                       {canDelete && <RowBtn danger onClick={() => onDeleteRequest(r.id)}>Delete</RowBtn>}
                     </CardActions>
                   </Card>
@@ -597,9 +651,7 @@ export default function TransferDashboardPage() {
             <Section
               filterBar={<>{TransferStatusFilter}
                 {DateRange(transferDateFrom, setTransferDateFrom, transferDateTo, setTransferDateTo, () => setTransfersPage(1))}
-                {SearchBox(transferOutSearch, setTransferOutSearch, "Search transfers…")}{WarehouseSelect}
-                <button onClick={() => go("/directtransferform")}
-                  className="px-3 py-1 text-[12px] rounded bg-[var(--aws-navy)] text-white">Direct Transfer Out</button></>}
+                {SearchBox(transferOutSearch, setTransferOutSearch, "Search transfers…")}{WarehouseSelect}</>}
               empty={filteredTransfers.length === 0}
               emptyMsg="No transfers found."
               pagination={<PaginationBar page={toPage} totalPages={transfersTP} total={filteredTransfers.length} onPage={setTransfersPage} />}
@@ -756,6 +808,74 @@ function innerColdHoverLines(c: InnerColdChallan): HoverLine[] {
     weightKg: l.net_weight_kg, lotFrom: l.old_lot_number, lotTo: l.new_lot_number,
     sourceUnit: l.new_storage_location,
   }));
+}
+
+// ── Request flow (backend migration 119) ─────────────────────────────────
+// Pending → Accepted (store) → Approved | On Hold | Rejected (inventory manager) →
+// Transferred (the store scans and sends). "Open" = everything still in progress.
+const REQUEST_FILTERS = ["Open", "Pending", "Accepted", "On Hold", "Approved", "Transferred", "Rejected", "All"] as const;
+type RequestFilter = (typeof REQUEST_FILTERS)[number];
+
+function requestMatchesFilter(r: TransferRequest, f: RequestFilter): boolean {
+  if (f === "All") return true;
+  if (f === "Open") return r.status !== REQUEST_STATUS.TRANSFERRED && r.status !== REQUEST_STATUS.REJECTED;
+  return r.status === f;
+}
+
+type RequestActions = {
+  canStore: boolean; canApprove: boolean; myEmail: string;
+  onAccept: (r: TransferRequest) => void; onStoreHold: (r: TransferRequest) => void;
+  onApprove: (r: TransferRequest) => void; onHold: (r: TransferRequest) => void;
+  onReject: (r: TransferRequest) => void;
+};
+
+// What this user may do with a request now. The server enforces the same rules
+// (warehouse, and nobody approves a request they raised or accepted).
+function RequestButtons({ r, actions: a, go }: { r: TransferRequest; actions: RequestActions; go: (p: string) => void }) {
+  const status = r.status;
+  if (a.canStore && status === REQUEST_STATUS.PENDING) {
+    return (
+      <>
+        <RowBtn primary onClick={() => a.onAccept(r)}>Accept</RowBtn>
+        <RowBtn onClick={() => a.onStoreHold(r)}>{r.store_response === "on_hold" ? "Update hold" : "Hold"}</RowBtn>
+      </>
+    );
+  }
+  if (a.canApprove && (status === REQUEST_STATUS.ACCEPTED || status === REQUEST_STATUS.ON_HOLD)
+      && (r.created_by || "").toLowerCase() !== a.myEmail
+      && (r.store_response_by_email || "").toLowerCase() !== a.myEmail) {
+    return (
+      <>
+        <RowBtn primary onClick={() => a.onApprove(r)}>Approve</RowBtn>
+        <RowBtn onClick={() => a.onHold(r)}>{status === REQUEST_STATUS.ON_HOLD ? "Update hold" : "Hold"}</RowBtn>
+        <RowBtn danger onClick={() => a.onReject(r)}>Reject</RowBtn>
+      </>
+    );
+  }
+  if (a.canStore && status === REQUEST_STATUS.APPROVED) {
+    return <RowBtn primary onClick={() => go(`/transferform?requestId=${r.id}`)}>Scan &amp; send</RowBtn>;
+  }
+  return null;
+}
+
+// Who moved the request to where it is, and why, under its status badge.
+function RequestNote({ r }: { r: TransferRequest }) {
+  let text: string | null = null;
+  let tone = "text-[var(--text-secondary)]";
+  if (r.status === REQUEST_STATUS.PENDING && r.store_response === "on_hold") {
+    text = `Store hold: ${r.store_hold_reason || "—"}`; tone = "text-amber-700";
+  } else if (r.status === REQUEST_STATUS.ACCEPTED) {
+    text = `Accepted by ${r.store_response_by || "store"}`;
+  } else if (r.status === REQUEST_STATUS.ON_HOLD) {
+    text = `On hold: ${r.approval_hold_reason || "—"}`; tone = "text-amber-700";
+  } else if (r.status === REQUEST_STATUS.APPROVED) {
+    text = `Approved by ${r.approval_decided_by || "inventory manager"}`; tone = "text-emerald-700";
+  } else if (r.status === REQUEST_STATUS.REJECTED) {
+    text = `Rejected: ${r.reject_reason || "—"}`; tone = "text-rose-700";
+  }
+  if (!text) return null;
+  const by = r.status === REQUEST_STATUS.ON_HOLD ? r.approval_held_by : null;
+  return <span className={`block text-[11px] mt-0.5 ${tone}`} title={by ? `By ${by}` : undefined}>{text}</span>;
 }
 
 // ── Row/section building blocks ──────────────────────────────────────────

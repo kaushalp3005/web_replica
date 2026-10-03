@@ -2,19 +2,22 @@
 
 // Request Details (doc 06) — read-only view of a single transfer request:
 // header (route/dates/status/reason), summary tiles (item count + net weight),
-// and a per-line breakdown. No approve/reject/edit/delete here — those live on
-// the dashboard. Backed by the existing GET /api/v1/transfer/requests/{id}.
+// its progress (raised → store → approval → sent, backend migration 119), and a
+// per-line breakdown. No approve/reject/edit/delete here — those live on the
+// dashboard. Backed by the existing GET /api/v1/transfer/requests/{id}.
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useRequireAuth } from "@/lib/user";
 import { TransferChrome } from "../../_chrome";
-import { TransferApi, type TransferRequest } from "@/lib/transfer";
+import { REQUEST_STATUS, TransferApi, type TransferRequest } from "@/lib/transfer";
 import { getDisplayWarehouseName } from "@/lib/transferBuildSummary";
 
 function statusBadge(status: string): { label: string; cls: string } {
   switch ((status || "").toLowerCase()) {
     case "pending": return { label: "Pending", cls: "bg-amber-100 text-amber-800" };
+    case "accepted": return { label: "Accepted", cls: "bg-sky-100 text-sky-800" };
+    case "on hold": return { label: "On Hold", cls: "bg-amber-100 text-amber-800" };
     case "approved":
     case "accept": return { label: "Approved", cls: "bg-emerald-100 text-emerald-800" };
     case "transferred": return { label: "Transferred", cls: "bg-blue-100 text-blue-800" };
@@ -122,12 +125,6 @@ export default function RequestViewPage() {
                 <Info label="Reason" value={request.reason_description} />
               </div>
             )}
-            {request.reject_reason && (
-              <div className="sm:col-span-2 lg:col-span-3">
-                <span className="block text-[11px] uppercase tracking-wide text-[var(--text-secondary)] mb-1">Reject Reason</span>
-                <div className="bg-rose-50 border border-rose-200 text-rose-700 rounded-md px-3 py-2 text-[13px]">{request.reject_reason}</div>
-              </div>
-            )}
           </div>
 
           {/* Summary tiles */}
@@ -142,6 +139,8 @@ export default function RequestViewPage() {
             </div>
           </div>
         </section>
+
+        <Progress request={request} />
 
         {/* Items */}
         {lines.length > 0 ? (
@@ -177,6 +176,86 @@ export default function RequestViewPage() {
         )}
       </div>
     </TransferChrome>
+  );
+}
+
+// ── Progress (backend migration 119) ─────────────────────────────────────
+// Raised → the From store accepts or holds → an inventory manager (or their
+// substitute) approves, holds or rejects → the store scans and sends it.
+type StepTone = "done" | "wait" | "hold" | "stop";
+type Step = { title: string; who?: string | null; at?: string | null; reason?: string | null; tone: StepTone };
+
+const STEP_DOT: Record<StepTone, string> = {
+  done: "bg-emerald-500", wait: "bg-slate-300", hold: "bg-amber-500", stop: "bg-rose-500",
+};
+const STEP_REASON: Record<StepTone, string> = {
+  done: "bg-slate-50 border-slate-200 text-[var(--text-primary)]",
+  wait: "bg-slate-50 border-slate-200 text-[var(--text-primary)]",
+  hold: "bg-amber-50 border-amber-200 text-amber-800",
+  stop: "bg-rose-50 border-rose-200 text-rose-700",
+};
+
+function progressSteps(r: TransferRequest): Step[] {
+  const S = REQUEST_STATUS;
+  const from = getDisplayWarehouseName(r.from_warehouse) || r.from_warehouse || "the supplying warehouse";
+  const steps: Step[] = [{ title: "Raised", who: r.created_by, at: r.created_ts, tone: "done" }];
+
+  if (r.store_response === "accepted") {
+    steps.push({ title: "Accepted by the store", who: r.store_response_by, at: r.store_response_at, tone: "done" });
+  } else if (r.store_response === "on_hold") {
+    steps.push({ title: "Held by the store", who: r.store_response_by, at: r.store_response_at,
+      reason: r.store_hold_reason, tone: "hold" });
+  } else if (r.status === S.PENDING) {
+    steps.push({ title: `Waiting for the ${from} store team to accept`, tone: "wait" });
+  }
+
+  if (r.approval_held_by && r.status !== S.APPROVED && r.status !== S.TRANSFERRED) {
+    steps.push({ title: "Put on hold for approval", who: r.approval_held_by, at: r.approval_held_at,
+      reason: r.approval_hold_reason, tone: "hold" });
+  }
+  if (r.status === S.APPROVED || r.status === S.TRANSFERRED) {
+    steps.push({ title: "Approved", who: r.approval_decided_by, at: r.approval_decided_at, tone: "done" });
+  } else if (r.status === S.REJECTED) {
+    steps.push({ title: "Rejected", who: r.approval_decided_by, at: r.approval_decided_at || r.rejected_ts,
+      reason: r.reject_reason, tone: "stop" });
+  } else if (r.status === S.ACCEPTED || r.status === S.ON_HOLD) {
+    steps.push({ title: "Waiting for the inventory manager (or substitute) to approve", tone: "wait" });
+  }
+
+  if (r.status === S.TRANSFERRED) {
+    steps.push({ title: "Scanned and sent", tone: "done" });
+  } else if (r.status === S.APPROVED) {
+    steps.push({ title: `Waiting for the ${from} store team to scan and send`, tone: "wait" });
+  }
+  return steps;
+}
+
+function Progress({ request }: { request: TransferRequest }) {
+  const steps = progressSteps(request);
+  return (
+    <section className="bg-white border border-[var(--aws-border)] rounded-lg p-4">
+      <h2 className="text-[13px] font-semibold text-[var(--text-primary)] mb-3">Progress</h2>
+      <ol className="space-y-3">
+        {steps.map((s, i) => (
+          <li key={i} className="flex gap-3">
+            <span className={`mt-1 h-2.5 w-2.5 flex-none rounded-full ${STEP_DOT[s.tone]}`} />
+            <div className="min-w-0">
+              <div className={`text-[13px] ${s.tone === "wait" ? "text-[var(--text-secondary)]" : "text-[var(--text-primary)] font-medium"}`}>
+                {s.title}
+              </div>
+              {(s.who || s.at) && (
+                <div className="text-[12px] text-[var(--text-secondary)]">
+                  {[s.who, s.at ? formatDateTime(s.at) : null].filter(Boolean).join(" · ")}
+                </div>
+              )}
+              {s.reason && (
+                <div className={`mt-1 border rounded-md px-3 py-1.5 text-[13px] break-words ${STEP_REASON[s.tone]}`}>{s.reason}</div>
+              )}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 

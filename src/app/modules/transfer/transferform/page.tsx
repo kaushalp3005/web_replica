@@ -6,6 +6,8 @@
 // then POSTs to /api/v1/transfer/transfers. Created as Dispatch (or Partial when
 // boxes < ordered qty); source stock is parked In-Transit and the request flips to
 // Transferred. Feedback via inline banner (no toast lib in web_replica).
+// "Scan & send": only an Approved request may be sent (the store accepted it and an
+// inventory manager approved it — backend migration 119); the server refuses the rest.
 //
 // Scope notes vs the reference 3053-line page:
 //  • line-level lot IS sent (the reference dropped it — gotcha #4); our backend
@@ -24,6 +26,7 @@ import {
   type Article, type ScannedBox, type OutScan,
 } from "../_formParts";
 import {
+  REQUEST_STATUS,
   TransferApi,
   type CategorialSearchItem,
   type TransferBoxCreateInput,
@@ -49,6 +52,9 @@ function TransferOutForm() {
   const allowed = useRequireAuth(router.replace);
   const searchParams = useSearchParams();
   const requestId = searchParams.get("requestId");
+  // The loaded request's status; only "Approved" may be scanned and sent.
+  const [requestStatus, setRequestStatus] = useState<string | null>(null);
+  const canSend = !!requestId && requestStatus === REQUEST_STATUS.APPROVED;
 
   // Seeded empty so the initial render is deterministic: genTransferNo()/todayDMY() read
   // the wall clock and would mismatch between the SSR render and client hydration
@@ -131,7 +137,10 @@ function TransferOutForm() {
         setLoadedItems(req.lines.map((l) => ({
           itemDescription: l.item_description, quantity: parseFloat(l.quantity) || 0, scannedCount: 0,
         })));
-        setBanner({ type: "success", text: `Request ${req.request_no} loaded & auto-filled.` });
+        setRequestStatus(req.status);
+        setBanner(req.status === REQUEST_STATUS.APPROVED
+          ? { type: "success", text: `Request ${req.request_no} loaded & auto-filled.` }
+          : { type: "error", text: `Request ${req.request_no} is ${req.status}. It can be scanned and sent once the store has accepted it and the inventory manager has approved it.` });
       } catch (e) {
         if (!off) setBanner({ type: "error", text: e instanceof Error ? e.message : "Failed to load request." });
       }
@@ -326,6 +335,12 @@ function TransferOutForm() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canSend) {
+      setBanner({ type: "error", text: requestId
+        ? "Only an approved request can be scanned and sent."
+        : "Open this from an approved request (Requests → Scan & send)." });
+      return;
+    }
     setBanner(null);
     const errs = validate();
     if (errs.length) {
@@ -375,6 +390,11 @@ function TransferOutForm() {
       {banner && (
         <div className={`mb-4 rounded-md p-3 text-[13px] border ${banner.type === "error" ? "bg-rose-50 border-rose-200 text-rose-700" : "bg-emerald-50 border-emerald-200 text-emerald-700"}`}>
           {banner.text}
+        </div>
+      )}
+      {!requestId && (
+        <div className="mb-4 rounded-md p-3 text-[13px] border bg-amber-50 border-amber-200 text-amber-800">
+          Every transfer starts from a request. Open this from an approved request: Requests → Scan &amp; send.
         </div>
       )}
 
@@ -549,7 +569,7 @@ function TransferOutForm() {
             <span className="text-[12px] text-[var(--text-secondary)]">Saved as <span className="font-medium text-sky-600">Dispatch</span> (or Partial if scanned boxes &lt; ordered qty).</span>
             <div className="flex items-center gap-2">
               <button type="button" onClick={() => router.back()} className="px-3 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md hover:border-[var(--aws-navy)]">Cancel</button>
-              <button type="submit" disabled={submitting} className="px-4 py-1.5 text-[13px] rounded-md bg-[var(--aws-navy)] text-white hover:opacity-90 disabled:opacity-50">
+              <button type="submit" disabled={submitting || !canSend} className="px-4 py-1.5 text-[13px] rounded-md bg-[var(--aws-navy)] text-white hover:opacity-90 disabled:opacity-50">
                 {submitting ? "Submitting…" : "Submit Transfer"}
               </button>
             </div>
