@@ -11,8 +11,9 @@
 // gross − carton), printed per box, all, or a range. Generated rows are a draft.
 // Printing checks them (lib/box-scan), saves them through /box-scans/print — the
 // server mints each box in sfg_box (item_type 'rm') and records it in jc_box_scan
-// for this job card, no Stores request involved — then prints Material-In's
-// sticker with the returned id, QR {"tx": job card no, "bi": box id}. Printed
+// for this job card, no Stores request involved — then prints a 25.4mm square
+// QR-only sticker (_qrStickerPrint) with the returned id, QR {"tx": job card no,
+// "bi": box id} — the value Material-In's sticker encodes. Printed
 // rows leave the draft and appear in the tab's list. "Box #" numbers run on past
 // every box already printed for the job card; when the server says some are taken
 // (printed out of order, or boxes minted elsewhere meanwhile) the rows still to
@@ -21,10 +22,9 @@
 
 import { useRef, useState } from "react";
 import { clamp3, computeNet, type PrintBox, type PrintResolver } from "@/app/modules/purchase/material-in/[transaction_no]/_boxEngine";
-import { printLabels } from "@/app/modules/purchase/material-in/[transaction_no]/_labelPrint";
 import { SecField, type BoxField, type BoxRow } from "@/app/modules/purchase/material-in/[transaction_no]/_SectionEditor";
 import {
-  emptySection, SectionCard, SMALL_BTN, stickerFor, type DraftRow, type Message, type Section, type StickerBox,
+  emptySection, SectionCard, SMALL_BTN, type DraftRow, type Message, type Section, type StickerBox,
 } from "@/app/modules/stores/production-indents/_ManualPrint";
 import { BTN, FIELD } from "@/components/floor-requisitions/RequisitionUi";
 import { NewArticleDialog } from "@/components/stock-take/NewArticleDialog";
@@ -32,6 +32,7 @@ import { checkBoxesForPrint, nextBoxNumber, renumberDrafts, renumberedMessage } 
 import {
   BoxPrintError, printJobCardBoxes, type JobCardBoxPrintResult, type JobCardPrintBoxLine,
 } from "@/lib/job-card-box-print";
+import { printQrStickers } from "./_qrStickerPrint";
 
 // More RM articles than this show as a select rather than a row of buttons.
 const QUICK_PICK_MAX = 6;
@@ -40,12 +41,14 @@ const PICK_BTN = "min-h-7 px-2 py-0.5 text-left text-[12px] rounded-[2px] border
 const PICK_OFF = "border-[var(--aws-border-strong)] bg-white text-[var(--text-primary)] hover:border-[var(--aws-navy)]";
 const PICK_ON = "border-[var(--aws-navy)] bg-[var(--aws-navy)] text-white font-semibold";
 
-/** Material-In's stickers for boxes printed on this job card: QR {"tx": job card no, "bi": box id}. */
+/** 25.4mm square QR-only stickers for boxes printed on this job card: QR {"tx": job card
+ *  no, "bi": box id}, built exactly as Material-In's sticker builds it (scanners parse it). */
 export function printJobCardStickers(
   jc: { entity: string | null; job_card_number: string | null },
   boxes: StickerBox[],
 ): Promise<void> {
-  return printLabels({ entity: jc.entity ?? "", transaction_no: jc.job_card_number ?? "", boxes: boxes.map(stickerFor) });
+  const tx = jc.job_card_number ?? "";
+  return printQrStickers(boxes.filter((b) => b.box_code).map((b) => JSON.stringify({ tx, bi: b.box_code })));
 }
 
 export function RmManualPrint({

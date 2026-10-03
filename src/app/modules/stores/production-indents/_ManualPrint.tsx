@@ -53,8 +53,7 @@ export type StickerBox = Pick<
   RequisitionBox, "box_code" | "box_number" | "net_weight" | "gross_weight" | "lot_number" | "count" | "article"
 >;
 
-/** Material-In's sticker for a stored box: QR {"tx": request no, "bi": box id}.
- *  The job card's Raw Material tab prints its own boxes with it too. */
+/** Material-In's sticker for a stored box: QR {"tx": request no, "bi": box id}. */
 export function stickerFor(b: StickerBox): PrintBox {
   return {
     box_id: b.box_code,

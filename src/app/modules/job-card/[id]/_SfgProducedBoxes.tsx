@@ -8,7 +8,7 @@
 //   • an "+ Add Boxes" panel (Count → Generate → Save New Boxes → POST /wip-boxes)
 //     that appends more boxes to that batch (the backend counter continues);
 //   • Print all + Print range (From#–To#) + per-box print, via the client-side
-//     QR sticker printer;
+//     QR sticker printer (_qrStickerPrint: 25.4mm square, the QR and nothing else);
 //   • pagination (10 boxes/page).
 // The parent already fetches ALL boxes, so grouping + pagination are client-side.
 
@@ -16,7 +16,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
 import { friendlyApiError } from "@/lib/apiErrors";
 import { useHasPermission } from "@/lib/user";
-import { printSfgBoxLabels } from "./_sfgBoxLabelPrint";
+import { printQrStickers } from "./_qrStickerPrint";
 
 const DISPLAY = 10; // boxes shown per page in a group
 
@@ -306,20 +306,8 @@ function BatchGroupCard({
   // PRINTED only here. Locked (received/consumed) boxes just print, no save.
   async function saveAndPrint(boxesToPrint: ProducedBox[]) {
     if (boxesToPrint.length === 0) return;
-    // Label data (QR + printable details) from each box's EFFECTIVE values
-    // (edit overlay via buildItem), so a just-edited box prints its new values.
-    const labels = boxesToPrint.map((b) => {
-      const it = buildItem(b, false);
-      return {
-        box_id: b.box_id,
-        batch: it.batch_code ?? group.label ?? null,
-        article: b.fg_sku_name ?? null,
-        sfg: b.sfg_code ?? null,
-        net: it.net_weight,
-        gross: it.gross_weight,
-        count: it.units,
-      };
-    });
+    // The sticker is the QR of the bare box_id only (_qrStickerPrint, 25.4mm square).
+    const labels = boxesToPrint.map((b) => b.box_id);
     const payload = boxesToPrint
       .filter(isEditable)
       .map((b) => buildItem(b, true))
@@ -334,7 +322,7 @@ function BatchGroupCard({
         });
         if (!res.ok) { setMsg({ kind: "err", text: await readApiErrorMessage(res, "Save before print failed") }); return; }
       }
-      await printSfgBoxLabels(labels);
+      await printQrStickers(labels);
       if (payload.length > 0) {
         // Drop the saved boxes' edit overlay so the reloaded server values show.
         const saved = new Set(payload.map((p) => p.box_id));
