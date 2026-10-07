@@ -32,6 +32,8 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+.env.local
+.env*local
 # .env and .env.example are intentionally NOT committed — kept local only.
 
 # vercel
@@ -50,3 +52,8 @@ next-env.d.ts
 
 # build artifacts (may embed .env) — never commit
 *.zip
+
+# Debtors Collection DPD data (customer balances), written by
+# `npm run dpd:import`. This repo is public — never commit it, and don't deploy
+# it: anything under public/ is served to anyone, logged in or not.
+/public/debtors-data/

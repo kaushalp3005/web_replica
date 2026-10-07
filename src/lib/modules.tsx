@@ -175,6 +175,19 @@ function StoresIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+function DebtorsCollectionIcon(props: SVGProps<SVGSVGElement>) {
+  // A rupee dropping into an in-tray — money owed, coming in. Deliberately
+  // unlike Purchase's cart (money going out) and the box-shaped inventory tiles.
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M8.5 2.5h7M8.5 5.5h7" />
+      <path d="M13.5 13l-5-4.5h2c4 0 4-6 0-6" />
+      <path d="M3 15h4.5l1.5 2h6l1.5-2H21" />
+      <path d="M3 15v4a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4" />
+    </svg>
+  );
+}
+
 export const MODULES: ModuleItem[] = [
   {
     title: "Purchase",
@@ -339,6 +352,22 @@ export const MODULES: ModuleItem[] = [
     // not the route.
     allowedRoles: ["stock_take"],
     Icon: StockTakeIcon,
+  },
+  {
+    title: "Debtors Collection",
+    description:
+      "DPD view of what customers owe — CD-CF and APMC + Non-APMC outstanding split into age buckets, with CD / CF, sales person, type and broker breakdowns, and Call now from contact numbers.",
+    badge: "Finance",
+    stat: "DPD · CD-CF · APMC + Non-APMC",
+    route: "debtors-collection",
+    implemented: true,
+    // Admin-only for now. There is no backend for this module yet — the DPD
+    // figures are Excel exports converted to JSON (scripts/import-dpd.mjs,
+    // src/lib/debtors.ts) — so there is no server permission to mirror, and
+    // this flag plus the page's own admin check are the whole gate. When the
+    // API lands, gate it server-side and decide which roles work collections.
+    adminOnly: true,
+    Icon: DebtorsCollectionIcon,
   },
   {
     title: "Admin",
