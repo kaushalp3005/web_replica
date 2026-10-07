@@ -28,6 +28,7 @@ import {
 } from "@/lib/so";
 import { fetchFulfillmentsBySoLines, fmtKg, fmtUnits, syncFulfillmentNow, type FulfillmentRow } from "@/lib/fulfillment";
 import { usePlanBuilder, SelectedArticlesPanel } from "@/lib/planBuilder";
+import { CreatedPlansPanel } from "@/lib/createdPlansPanel";
 import {
   loadSoListCache,
   saveSoListCache,
@@ -35,6 +36,7 @@ import {
 } from "@/lib/so-list-cache";
 import { BackLink } from "@/components/BackLink";
 import { SoChrome } from "./_chrome";
+import { firstRowPerLine, selectAllClick, selectAllState, selectableLineIds } from "./selectAll";
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 300;
@@ -427,6 +429,63 @@ export default function SoCreationPage() {
       });
     } catch (e) {
       setSyncMsg({ kind: "err", text: `Couldn't resolve article: ${friendlyApiError(e)}` });
+    }
+  }
+
+  // Select (or clear) every article of one SO from its row, expanded or not —
+  // the list already ships each SO's lines. When the whole SO is selected the
+  // click clears it; otherwise it adds the articles not yet selected, resolved
+  // in ONE batched lookup instead of one per article. Articles not yet synced
+  // into fulfillment are left unticked and counted in a single message.
+  async function onToggleAllLines(row: SoRow) {
+    const ids = selectableLineIds(normaliseLines(row.lines).map((e) => e.line));
+    const click = selectAllClick(ids, selectedLineIds);
+    if (click.action === "clear") {
+      for (const id of click.ids) {
+        const fid = lineToFulfillment.get(id);
+        if (fid != null) pb.deselect(fid);
+      }
+      setLineToFulfillment((m) => {
+        const nm = new Map(m);
+        for (const id of click.ids) nm.delete(id);
+        return nm;
+      });
+      setSelectedLineIds((s) => {
+        const n = new Set(s);
+        for (const id of click.ids) n.delete(id);
+        return n;
+      });
+      return;
+    }
+    if (click.ids.length === 0) return;
+    try {
+      const resp = await fetchFulfillmentsBySoLines(
+        click.ids,
+        company ? company.toLowerCase() : undefined,
+      );
+      const byLine = firstRowPerLine(resp.results);
+      const found = click.ids.filter((id) => byLine.has(id));
+      for (const id of found) pb.selectRow(byLine.get(id)!);
+      setLineToFulfillment((m) => {
+        const nm = new Map(m);
+        for (const id of found) nm.set(id, byLine.get(id)!.fulfillment_id);
+        return nm;
+      });
+      setSelectedLineIds((s) => {
+        const n = new Set(s);
+        for (const id of found) n.add(id);
+        return n;
+      });
+      const unsynced = click.ids.length - found.length;
+      if (unsynced > 0) {
+        const so = row.so_number ? ` in ${row.so_number}` : "";
+        setSyncMsg({
+          kind: "err",
+          text: `Run Sync first — ${unsynced} of ${click.ids.length} article${click.ids.length === 1 ? "" : "s"}${so} ${unsynced === 1 ? "isn't" : "aren't"} in fulfillment yet.`,
+        });
+      }
+    } catch (e) {
+      setSyncMsg({ kind: "err", text: `Couldn't resolve articles: ${friendlyApiError(e)}` });
     }
   }
 
@@ -945,6 +1004,9 @@ export default function SoCreationPage() {
         showSteps={false}
       />
 
+      {/* After Create Plan the selection clears and the new plans show here. */}
+      <CreatedPlansPanel planIds={pb.createdPlanIds} onDismiss={pb.dismissCreatedPlans} />
+
       {(data?.sales_orders?.length ?? 0) > 0 ? (
         <div className="mb-3 flex items-center justify-between">
           <span className="text-[11px] text-[var(--text-muted)]">
@@ -975,6 +1037,7 @@ export default function SoCreationPage() {
         canEdit={canEditSO}
         selectedLineIds={selectedLineIds}
         onToggleLine={onToggleLine}
+        onToggleAllLines={onToggleAllLines}
         syncVersion={syncVersion}
         onEditHeader={(soId) => router.push(`/modules/production/so-creation/manual-update/${soId}?section=header`)}
         onEditLines={(soId) => router.push(`/modules/production/so-creation/manual-update/${soId}?section=lines`)}
@@ -1663,7 +1726,7 @@ function AdvancedFilterPanel({
 function SoTable({
   rows, loading, error, sortBy, sortOrder, onSort,
   expanded, onToggle, seesCost, canEdit,
-  selectedLineIds, onToggleLine, syncVersion,
+  selectedLineIds, onToggleLine, onToggleAllLines, syncVersion,
   onEditHeader, onEditLines,
 }: {
   rows: SoRow[];
@@ -1687,6 +1750,8 @@ function SoTable({
   // every LineCard so the checkbox state feeds the plan-builder panel.
   selectedLineIds: Set<number>;
   onToggleLine: (soLineId: number, line: SoLine) => void;
+  // Select / clear every article of one SO from its (possibly collapsed) row.
+  onToggleAllLines: (row: SoRow) => Promise<void>;
   // Bumped on every Sync so each expanded SO's pending-qty effect re-fetches.
   syncVersion: number;
   onEditHeader: (soId: number) => void;
@@ -1726,6 +1791,7 @@ function SoTable({
               canEdit={canEdit}
               selectedLineIds={selectedLineIds}
               onToggleLine={onToggleLine}
+              onToggleAllLines={onToggleAllLines}
               syncVersion={syncVersion}
               onEditHeader={() => row.so_id != null && onEditHeader(row.so_id)}
               onEditLines={() => row.so_id != null && onEditLines(row.so_id)}
@@ -1779,6 +1845,7 @@ function SoTable({
                     canEdit={canEdit}
                     selectedLineIds={selectedLineIds}
                     onToggleLine={onToggleLine}
+                    onToggleAllLines={onToggleAllLines}
                     syncVersion={syncVersion}
                     onEditHeader={() => row.so_id != null && onEditHeader(row.so_id)}
                     onEditLines={() => row.so_id != null && onEditLines(row.so_id)}
@@ -1802,7 +1869,7 @@ function SoTable({
 
 function SoMobileCard({
   row, isOpen, onToggle, seesCost, canEdit,
-  selectedLineIds, onToggleLine, syncVersion,
+  selectedLineIds, onToggleLine, onToggleAllLines, syncVersion,
   onEditHeader, onEditLines,
 }: {
   row: SoRow;
@@ -1812,6 +1879,7 @@ function SoMobileCard({
   canEdit: boolean;
   selectedLineIds: Set<number>;
   onToggleLine: (soLineId: number, line: SoLine) => void;
+  onToggleAllLines: (row: SoRow) => Promise<void>;
   syncVersion: number;
   onEditHeader: () => void;
   onEditLines: () => void;
@@ -1849,7 +1917,10 @@ function SoMobileCard({
             <span className="text-[11px] text-[var(--text-muted)]">
               {row.company || "—"} · {row.total_lines ?? row.line_count ?? row.lines?.length ?? 0} line{(row.total_lines ?? 0) === 1 ? "" : "s"}
             </span>
-            <div className="shrink-0"><GstSegBar row={row} /></div>
+            <div className="shrink-0 flex items-center gap-3">
+              <GstSegBar row={row} />
+              <SoSelectAll row={row} selectedLineIds={selectedLineIds} onToggleAll={onToggleAllLines} />
+            </div>
           </div>
         </div>
         {canEdit ? (
@@ -1921,7 +1992,7 @@ function Th({
 
 function SoTableRow({
   row, isOpen, onToggle, seesCost, canEdit,
-  selectedLineIds, onToggleLine, syncVersion,
+  selectedLineIds, onToggleLine, onToggleAllLines, syncVersion,
   onEditHeader, onEditLines,
 }: {
   row: SoRow;
@@ -1931,6 +2002,7 @@ function SoTableRow({
   canEdit: boolean;
   selectedLineIds: Set<number>;
   onToggleLine: (soLineId: number, line: SoLine) => void;
+  onToggleAllLines: (row: SoRow) => Promise<void>;
   syncVersion: number;
   onEditHeader: () => void;
   onEditLines: () => void;
@@ -1970,7 +2042,12 @@ function SoTableRow({
         </td>
         <td className="px-3 py-2 whitespace-nowrap">{row.company || "—"}</td>
         <td className="px-3 py-2 whitespace-nowrap">{row.total_lines ?? row.line_count ?? row.lines?.length ?? 0}</td>
-        <td className="px-3 py-2"><GstSegBar row={row} /></td>
+        <td className="px-3 py-2">
+          <div className="flex items-center gap-4">
+            <GstSegBar row={row} />
+            <SoSelectAll row={row} selectedLineIds={selectedLineIds} onToggleAll={onToggleAllLines} />
+          </div>
+        </td>
         <td className="px-3 py-2 relative">
           {canEdit ? (
           <>
@@ -2053,6 +2130,46 @@ function GstSegBar({ row }: { row: SoRow }) {
       </div>
       <span className="text-[10px] text-[var(--text-muted)] tabular-nums">{label}</span>
     </div>
+  );
+}
+
+// "Select all" beside the GST bar: ticks every article of this SO without
+// expanding it — the list already ships the SO's lines. Shows a dash when only
+// some are ticked (a click adds the rest); clicking a fully ticked SO clears it.
+function SoSelectAll({ row, selectedLineIds, onToggleAll }: {
+  row: SoRow;
+  selectedLineIds: Set<number>;
+  onToggleAll: (row: SoRow) => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const ids = selectableLineIds(normaliseLines(row.lines).map((e) => e.line));
+  if (ids.length === 0) return null;
+  const state = selectAllState(ids, selectedLineIds);
+  const picked = ids.filter((id) => selectedLineIds.has(id)).length;
+  async function onChange() {
+    setBusy(true);
+    try {
+      await onToggleAll(row);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <label
+      className="inline-flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)] whitespace-nowrap cursor-pointer select-none"
+      title={state === "all" ? "Clear all articles of this SO" : "Select all articles of this SO"}
+    >
+      <input
+        type="checkbox"
+        ref={(el) => { if (el) el.indeterminate = state === "some"; }}
+        checked={state === "all"}
+        disabled={busy}
+        onChange={onChange}
+        className="accent-[var(--aws-orange)] w-4 h-4 shrink-0 cursor-pointer disabled:cursor-wait disabled:opacity-40"
+        aria-label={`Select all articles of ${row.so_number || "this SO"}`}
+      />
+      {busy ? "Selecting…" : state === "some" ? `Select all (${picked}/${ids.length})` : "Select all"}
+    </label>
   );
 }
 

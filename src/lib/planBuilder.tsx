@@ -19,7 +19,7 @@
 // adopt this module in a later step. Keeping the two in sync until then is
 // deliberate: extracting without touching planning avoids regressions.
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
   type FulfillmentRow,
   type CreateBomLineInput,
@@ -34,6 +34,10 @@ import {
 import { PROCESS_OPTIONS, canonProcess, stageFromProcess } from "@/lib/processCatalog";
 import { userHasAnyWarehouse } from "@/lib/warehouseScope";
 import { lookupSku } from "@/lib/so";
+import {
+  cellText, commonFactory, earliestDate, factorySummary, groupBySo, onlyFactory, parseQtyInput,
+} from "@/lib/selectedGroups";
+import { GRID_HEAD_ROW, GRID_TABLE, GRID_TD, GRID_TH, GRID_WRAP } from "@/lib/gridTable";
 import { friendlyApiError } from "@/lib/apiErrors";
 import type { UserScope } from "@/lib/user";
 
@@ -171,6 +175,10 @@ export interface UsePlanBuilder {
   /** Resolves to true when a plan was created (selection cleared), false on a
    *  validation early-return or API failure — lets callers mirror the clear. */
   onCreatePlan: () => Promise<boolean>;
+  /** The plans the last Create Plan made, newest set only — the page shows them
+   *  where the selection was. Empty until a plan is created or after dismissing. */
+  createdPlanIds: number[];
+  dismissCreatedPlans: () => void;
 }
 
 export function usePlanBuilder(opts: {
@@ -193,6 +201,8 @@ export function usePlanBuilder(opts: {
   const [selectedRowsCache, setSelectedRowsCache] = useState<Map<number, FulfillmentRow>>(new Map());
   const [expandedCardId, setExpandedCardId] = useState<number | null>(null);
   const [creatingPlan, setCreatingPlan] = useState(false);
+  const [createdPlanIds, setCreatedPlanIds] = useState<number[]>([]);
+  const dismissCreatedPlans = useCallback(() => setCreatedPlanIds([]), []);
 
   const isSelected = useCallback((id: number) => selectedIds.has(id), [selectedIds]);
 
@@ -472,6 +482,20 @@ export function usePlanBuilder(opts: {
       return nm;
     });
   }, [scope]);
+
+  // An account with access to exactly one factory: that factory is every
+  // card's factory without asking. Fills any selected card that has none —
+  // including cards selected (or restored from the page cache) before the
+  // user's scope loaded, and a card whose override was reset. With several
+  // factories nothing is guessed; the SO row's dropdown sets them.
+  useEffect(() => {
+    const only = onlyFactory(factoryOpts);
+    if (!only) return;
+    const missing = Array.from(selectedIds).filter((id) => !cardCfg.get(id)?.factory);
+    if (missing.length === 0) return;
+    // Deferred past the effect body (react-hooks/set-state-in-effect), as elsewhere here.
+    queueMicrotask(() => { for (const id of missing) setCardFactory(id, only); });
+  }, [factoryOpts, selectedIds, cardCfg, setCardFactory]);
 
   // Fetch the BOM's process_routes ONCE per card and snapshot them as
   // editable PlanSteps. Cached via stepsLoaded so re-expanding the card
@@ -771,6 +795,7 @@ export function usePlanBuilder(opts: {
         }
       }
 
+      if (createdIds.length) setCreatedPlanIds(createdIds);
       if (failures.length === 0) {
         onToast(
           createdIds.length === 1
@@ -823,20 +848,27 @@ export function usePlanBuilder(opts: {
     refreshCardSteps,
     createCardBom,
     onCreatePlan,
+    createdPlanIds,
+    dismissCreatedPlans,
   };
 }
 
 // ── Selected articles panel ──────────────────────────────────────────────
 //
 // Sits between the filter toolbar and the table when there's at least one
-// row checked. Each selected article gets a compact card; tapping a card
-// expands its qty / deadline editor. Edits flow back through the parent's
-// cardCfg map and are read by onCreatePlan when the operator hits Create
-// Plan in the header.
+// row checked. A table with one row per SO — its number, customer, article
+// count, total qty, earliest deadline and factory status; expanding an SO lists
+// its articles, and tapping an article opens its qty / deadline / factory
+// editor beneath it. Edits flow back through the parent's cardCfg map and are
+// read by onCreatePlan when the operator hits Create Plan in the header.
 //
-// Responsive layout — single column on phones, 2 cols at sm, 3 at lg. The
-// expanded card spans the full row width via grid `col-span-full` so the
-// form has room to breathe without forcing the others narrower.
+// The table scrolls sideways on narrow screens rather than squeezing columns.
+
+// Table look — the Stock Take module's tables (lib/gridTable.ts): every cell
+// bordered, a light header band, centred. Fixed layout so long names truncate.
+const SEL_TABLE = `${GRID_TABLE} min-w-[960px] table-fixed`;
+const SEL_TH = GRID_TH;
+const SEL_TD = GRID_TD;
 
 export function SelectedArticlesPanel({
   selectedIds, rowsCache, cardCfg, expandedCardId, scope, factoryOpts,
@@ -880,11 +912,23 @@ export function SelectedArticlesPanel({
     .map((id) => rowsCache.get(id))
     .filter((r): r is FulfillmentRow => !!r);
 
+  // SO groups start collapsed: the operator sees one row per SO with its
+  // article count, and expands the ones they want to work on.
+  const [openSos, setOpenSos] = useState<Set<string>>(() => new Set());
+  function toggleSo(key: string) {
+    setOpenSos((s) => {
+      const n = new Set(s);
+      if (n.has(key)) n.delete(key); else n.add(key);
+      return n;
+    });
+  }
+
   if (selectedRows.length === 0) return null;
+  const groups = groupBySo(selectedRows);
 
   return (
     <section className="mb-3" aria-label="Selected articles">
-      <div className="flex items-center justify-between gap-2 mb-1.5">
+      <div className="flex items-center justify-between gap-2 mb-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className="inline-flex items-center justify-center w-5 h-5 rounded-sm bg-[var(--aws-orange)] text-white text-[10px] font-bold shrink-0">
             {selectedIds.size}
@@ -892,10 +936,13 @@ export function SelectedArticlesPanel({
           <span className="text-[11px] uppercase tracking-wide font-bold text-[var(--text-secondary)]">
             Selected for plan
           </span>
+          <span className="text-[11px] text-[var(--text-muted)] whitespace-nowrap">
+            · {groups.length} SO{groups.length === 1 ? "" : "s"}
+          </span>
           <span className="text-[11px] text-[var(--text-muted)] hidden md:inline truncate">
             {showSteps
-              ? "· tap a card to customise qty, deadline, factory, or floor"
-              : "· tap a card to customise qty, deadline, or factory"}
+              ? "· expand an SO, then tap an article to customise qty, deadline, factory, or floor"
+              : "· expand an SO, then tap an article to customise qty, deadline, or factory"}
           </span>
         </div>
         <button
@@ -906,33 +953,192 @@ export function SelectedArticlesPanel({
           Clear
         </button>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5">
-        {selectedRows.map((r) => (
-          <SelectedCard
-            key={r.fulfillment_id}
-            row={r}
-            cfg={cardCfg.get(r.fulfillment_id) ?? {}}
-            isExpanded={expandedCardId === r.fulfillment_id}
-            scope={scope}
-            factoryOpts={factoryOpts}
-            onToggleExpand={() => onToggleExpand(r.fulfillment_id)}
-            onPatch={(patch) => onPatch(r.fulfillment_id, patch)}
-            onReset={() => onReset(r.fulfillment_id)}
-            onRemove={() => onRemove(r.fulfillment_id)}
-            onSetFactory={(f) => onSetFactory(r.fulfillment_id, f)}
-            onSetStepFloor={(idx, floor) => onSetStepFloor(r.fulfillment_id, idx, floor)}
-            onSetStepProcess={(idx, name) => onSetStepProcess(r.fulfillment_id, idx, name)}
-            onMoveStep={(from, to) => onMoveStep(r.fulfillment_id, from, to)}
-            onMergeSteps={(idxs) => onMergeSteps(r.fulfillment_id, idxs)}
-            onAddStep={() => onAddStep(r.fulfillment_id)}
-            onRemoveStep={(idx) => onRemoveStep(r.fulfillment_id, idx)}
-            onRefreshSteps={() => onRefreshSteps(r.fulfillment_id)}
-            onCreateBom={(lines) => onCreateBom(r.fulfillment_id, lines)}
-            showSteps={showSteps}
-          />
-        ))}
+      <div className={GRID_WRAP}>
+      <div className="overflow-x-auto">
+        <table className={SEL_TABLE}>
+          <colgroup>
+            <col style={{ width: 40 }} />
+            <col style={{ width: 170 }} />
+            <col />
+            <col style={{ width: 72 }} />
+            <col style={{ width: 108 }} />
+            <col style={{ width: 100 }} />
+            <col style={{ width: 142 }} />
+            <col style={{ width: 132 }} />
+            <col style={{ width: 66 }} />
+          </colgroup>
+          <thead>
+            <tr className={GRID_HEAD_ROW}>
+              <th className={SEL_TH} aria-label="Expand" />
+              <th className={SEL_TH}>SO Number</th>
+              <th className={SEL_TH}>Customer / Article</th>
+              <th className={SEL_TH}>Articles</th>
+              <th className={SEL_TH}>Qty (kg)</th>
+              <th className={SEL_TH}>Pcs</th>
+              <th className={SEL_TH}>Deadline</th>
+              <th className={SEL_TH}>Factory</th>
+              <th className={SEL_TH} aria-label="Remove" />
+            </tr>
+          </thead>
+          <tbody>
+            {groups.map((g) => {
+              const open = openSos.has(g.key);
+              const cfgs = g.rows.map((r) => cardCfg.get(r.fulfillment_id) ?? {});
+              const totalKg = g.rows.reduce((s, r, i) => s + (cfgs[i].qty_kg ?? toNum(r.pending_qty_kg)), 0);
+              const totalUnits = g.rows.reduce((s, r, i) => s + (cfgs[i].qty_units ?? toNum(r.pending_qty_units)), 0);
+              const deadline = earliestDate(g.rows.map((r, i) =>
+                cfgs[i].deadline_date || (r.delivery_deadline ? String(r.delivery_deadline) : "")));
+              const fac = factorySummary(cfgs.map((c) => c.factory));
+              return (
+                <Fragment key={g.key}>
+                  <tr
+                    className="cursor-pointer bg-white hover:bg-[#fafafa]"
+                    onClick={() => toggleSo(g.key)}
+                  >
+                    <td className={SEL_TD}>
+                      <span
+                        aria-hidden
+                        className="inline-flex items-center justify-center w-5 h-5 text-[var(--text-secondary)]"
+                      >
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth={2}
+                          style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s" }}>
+                          <polyline points="9 18 15 12 9 6" />
+                        </svg>
+                      </span>
+                    </td>
+                    <td className={`${SEL_TD} truncate`}>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); toggleSo(g.key); }}
+                        aria-expanded={open}
+                        className="font-mono font-semibold text-[var(--aws-link)] hover:underline truncate max-w-full"
+                        title={g.soNumber ?? "No SO number"}
+                      >
+                        {g.soNumber ?? "No SO number"}
+                      </button>
+                    </td>
+                    <td className={`${SEL_TD} truncate text-[var(--text-primary)]`} title={g.customer ?? ""}>
+                      {g.customer || "—"}
+                    </td>
+                    <td className={SEL_TD}>
+                      <span className="inline-flex items-center justify-center min-w-[22px] h-5 px-1.5 rounded-full bg-[var(--surface-divider)] text-[11px] font-bold text-[var(--text-primary)] tabular-nums">
+                        {g.rows.length}
+                      </span>
+                    </td>
+                    <td className={`${SEL_TD} font-semibold tabular-nums`}>{fmtKg(totalKg)}</td>
+                    <td className={`${SEL_TD} text-[var(--text-muted)] tabular-nums`}>
+                      {totalUnits > 0 ? fmtUnits(totalUnits) : "—"}
+                    </td>
+                    <td className={SEL_TD}><DeadlineChip deadline={deadline} /></td>
+                    {/* Several factories on the account: pick one here and every
+                        article of this SO goes to it. One factory is filled in
+                        automatically (usePlanBuilder), so it only needs showing. */}
+                    <td className={SEL_TD} onClick={(e) => e.stopPropagation()}>
+                      {factoryOpts.length > 1 ? (
+                        <select
+                          value={commonFactory(cfgs.map((c) => c.factory))}
+                          onChange={(e) => {
+                            const f = e.target.value as FactoryCode | "";
+                            if (!f) return;
+                            for (const r of g.rows) onSetFactory(r.fulfillment_id, f);
+                          }}
+                          aria-label={`Factory for all articles of ${g.soNumber ?? "this SO"}`}
+                          title="Applies to every article of this SO"
+                          className={[
+                            "h-7 w-full px-1.5 text-[12px] font-semibold rounded-[2px] bg-white border outline-none",
+                            "focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]",
+                            fac.tone === "set" ? "border-[#bbd9f3] text-[var(--aws-link)]" : "border-[#e6bcbe] text-[#9a393e]",
+                          ].join(" ")}
+                        >
+                          <option value="" disabled>{fac.tone === "none" ? "Pick…" : fac.label}</option>
+                          {factoryOpts.map((f) => (
+                            <option key={f} value={f}>{f}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className={[
+                          "px-1.5 py-0 rounded-sm border text-[11px] font-semibold whitespace-nowrap",
+                          fac.tone === "set" ? "border-[#bbd9f3] bg-[#eaf3ff] text-[var(--aws-link)]"
+                          : fac.tone === "partial" ? "border-[#e6bcbe] bg-[#fbeced] text-[#9a393e]"
+                          : "border-[var(--aws-border)] bg-white text-[var(--text-muted)]",
+                        ].join(" ")}>
+                          {fac.label}
+                        </span>
+                      )}
+                    </td>
+                    <td className={`${SEL_TD} px-1`}>
+                      <RemoveButton
+                        label={`Remove ${g.soNumber ?? "these"} articles`}
+                        onClick={(e) => { e.stopPropagation(); for (const r of g.rows) onRemove(r.fulfillment_id); }}
+                      />
+                    </td>
+                  </tr>
+                  {open ? g.rows.map((r, i) => (
+                    <SelectedCard
+                      key={r.fulfillment_id}
+                      row={r}
+                      cfg={cfgs[i]}
+                      isExpanded={expandedCardId === r.fulfillment_id}
+                      scope={scope}
+                      factoryOpts={factoryOpts}
+                      onToggleExpand={() => onToggleExpand(r.fulfillment_id)}
+                      onPatch={(patch) => onPatch(r.fulfillment_id, patch)}
+                      onReset={() => onReset(r.fulfillment_id)}
+                      onRemove={() => onRemove(r.fulfillment_id)}
+                      onSetFactory={(f) => onSetFactory(r.fulfillment_id, f)}
+                      onSetStepFloor={(idx, floor) => onSetStepFloor(r.fulfillment_id, idx, floor)}
+                      onSetStepProcess={(idx, name) => onSetStepProcess(r.fulfillment_id, idx, name)}
+                      onMoveStep={(from, to) => onMoveStep(r.fulfillment_id, from, to)}
+                      onMergeSteps={(idxs) => onMergeSteps(r.fulfillment_id, idxs)}
+                      onAddStep={() => onAddStep(r.fulfillment_id)}
+                      onRemoveStep={(idx) => onRemoveStep(r.fulfillment_id, idx)}
+                      onRefreshSteps={() => onRefreshSteps(r.fulfillment_id)}
+                      onCreateBom={(lines) => onCreateBom(r.fulfillment_id, lines)}
+                      showSteps={showSteps}
+                    />
+                  )) : null}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
       </div>
     </section>
+  );
+}
+
+const PANEL_COLUMNS = 9;
+
+function DeadlineChip({ deadline }: { deadline: string }) {
+  if (!deadline) return <span className="text-[var(--text-muted)]">—</span>;
+  const tone = deadlineTone(deadline);
+  return (
+    <span className={[
+      "px-1.5 py-0 rounded-sm border text-[11px] font-medium whitespace-nowrap",
+      tone === "overdue" ? "text-[#b1361e] bg-[#fdf3f1] border-[#f0c7be]"
+      : tone === "soon"  ? "text-[#9a393e] bg-[#fbeced] border-[#e6bcbe]"
+                         : "text-[var(--text-secondary)] bg-white border-[var(--aws-border)]",
+    ].join(" ")}>
+      {fmtDeadline(deadline)}
+    </span>
+  );
+}
+
+function RemoveButton({ label, onClick }: { label: string; onClick: (e: MouseEvent) => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className="inline-flex w-8 h-8 sm:w-6 sm:h-6 items-center justify-center rounded-sm text-[var(--text-muted)] hover:text-[var(--aws-error)] hover:bg-[var(--surface-subtle)]"
+    >
+      <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <line x1="18" y1="6" x2="6" y2="18" />
+        <line x1="6" y1="6" x2="18" y2="18" />
+      </svg>
+    </button>
   );
 }
 
@@ -966,9 +1172,6 @@ function SelectedCard({
   const defaultUnits = toNum(row.pending_qty_units);
   const defaultDeadline = row.delivery_deadline ? String(row.delivery_deadline).slice(0, 10) : "";
 
-  const qtyKg = cfg.qty_kg ?? defaultKg;
-  const qtyUnits = cfg.qty_units ?? defaultUnits;
-  const deadline = cfg.deadline_date ?? defaultDeadline;
   const factory = cfg.factory;
   const steps = cfg.steps ?? [];
   const allowedFloors = useMemo(() => allowedFloorsFor(scope, factory), [scope, factory]);
@@ -990,11 +1193,12 @@ function SelectedCard({
   // 14,883 pcs" → 0.158 kg/pc on a SKU whose actual pack is 200 g)
   // would propagate the error into every plan made off that row.
   // The all_sku `uom` column is the pack weight in kg (0.200 for a
-  // 200 g pack) and is the only authoritative source. Fetched on
-  // expand so we don't pay one round-trip per row at initial render.
+  // 200 g pack) and is the only authoritative source. Fetched the first
+  // time a qty cell is focused, so showing the table costs no round-trips.
+  const [uomWanted, setUomWanted] = useState(false);
   const [skuUomFromMaster, setSkuUomFromMaster] = useState<number | null>(null);
   useEffect(() => {
-    if (!isExpanded || !row.fg_sku_name) return;
+    if (!uomWanted || !row.fg_sku_name) return;
     const ctrl = new AbortController();
     void (async () => {
       try {
@@ -1016,7 +1220,7 @@ function SelectedCard({
       }
     })();
     return () => ctrl.abort();
-  }, [isExpanded, row.fg_sku_name]);
+  }, [uomWanted, row.fg_sku_name]);
 
   // Strict: only the all_sku master drives interlinking. If the
   // master fetch hasn't completed (or the SKU isn't in the table)
@@ -1024,7 +1228,7 @@ function SelectedCard({
   const skuUomKg: number | null = skuUomFromMaster;
 
   // Both setters clamp to the available pending qty (item 6). The typed field
-  // is already clamped by NumberField's `max`, but the DERIVED field needs its
+  // is already clamped by its cell's `max`, but the DERIVED field needs its
   // own clamp: skuUomKg is the master pack-weight, which can differ from the
   // line's own pending kg/pcs ratio, so e.g. (max pcs × master uom) can land
   // above the available kg. Clamp the computed counterpart too so neither
@@ -1061,190 +1265,147 @@ function SelectedCard({
   const customised =
     cfg.qty_kg != null || cfg.qty_units != null ||
     (cfg.deadline_date != null && cfg.deadline_date !== "") ||
-    cfg.factory != null ||
+    // The account's only factory is filled in automatically — not an operator change.
+    (cfg.factory != null && cfg.factory !== onlyFactory(factoryOpts)) ||
     flooredCount > 0;
 
   const sku = row.fg_sku_name || "—";
 
   return (
-    <div
-      className={[
-        "relative bg-white border rounded-md transition-colors",
-        // Left accent strip when customised — quieter than the full crimson border.
-        customised && !isExpanded
-          ? "border-[var(--aws-border)] border-l-[3px] border-l-[var(--aws-orange)]"
-          : isExpanded
-            ? "border-[var(--aws-orange)] shadow-[0_2px_8px_rgba(154,57,62,0.08)] sm:col-span-2 lg:col-span-3"
-            : "border-[var(--aws-border)] hover:border-[var(--aws-navy)]",
-      ].join(" ")}
-    >
-      {/* ── Compact header row ─────────────────────────────────────── */}
-      <div className="flex items-center gap-1.5 p-2">
-        <button
-          type="button"
-          onClick={onToggleExpand}
-          aria-expanded={isExpanded}
-          aria-label={isExpanded ? "Collapse" : "Expand"}
-          className="shrink-0 inline-flex items-center justify-center w-6 h-6 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-subtle)] rounded-sm"
-        >
-          <svg
-            viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth={2}
-            style={{ transform: isExpanded ? "rotate(90deg)" : "none", transition: "transform .15s" }}
+    <>
+      {/* ── Article row (under its SO): qty, pcs, deadline and factory are
+          edited right here; expanding the row shows only its BOM. ─────── */}
+      <tr className={isExpanded ? "bg-[#fbf4f4]" : "bg-[var(--surface-subtle)] hover:bg-white"}>
+        <td className={[
+          SEL_TD,
+          // Orange left edge marks an article whose qty / deadline / factory was changed.
+          customised ? "shadow-[inset_3px_0_0_var(--aws-orange)]" : "",
+        ].join(" ")}>
+          <button
+            type="button"
+            onClick={onToggleExpand}
+            aria-expanded={isExpanded}
+            aria-label={isExpanded ? `Hide BOM of ${sku}` : `Show BOM of ${sku}`}
+            title={isExpanded ? "Hide BOM" : "Show BOM"}
+            className="inline-flex items-center justify-center w-5 h-5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white rounded-sm"
           >
-            <polyline points="9 18 15 12 9 6" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          onClick={onToggleExpand}
-          className="flex-1 min-w-0 text-left"
-        >
-          <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)] truncate">
-            <span className="truncate" title={row.customer_name ?? ""}>{row.customer_name || "—"}</span>
-            {row.so_number ? (
-              <>
-                <span className="opacity-50">·</span>
-                <span className="font-mono normal-case tracking-normal text-[var(--aws-link)]">{row.so_number}</span>
-              </>
-            ) : null}
-          </div>
-          <div className="text-[13px] font-semibold text-[var(--text-primary)] truncate leading-tight" title={sku}>
+            <svg
+              viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2}
+              style={{ transform: isExpanded ? "rotate(90deg)" : "none", transition: "transform .15s" }}
+            >
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+          </button>
+        </td>
+        <td colSpan={3} className={`${SEL_TD} truncate`}>
+          <button
+            type="button"
+            onClick={onToggleExpand}
+            className="text-[12px] font-semibold text-[var(--text-primary)] hover:underline truncate max-w-full"
+            title={`${sku} — ${isExpanded ? "hide" : "show"} BOM`}
+          >
             {sku}
-          </div>
-          <div className="flex items-center flex-wrap gap-x-2 gap-y-0.5 mt-1 text-[11px]">
-            <span className="font-semibold text-[var(--text-primary)]">
-              {fmtKg(qtyKg)} kg
+          </button>
+        </td>
+        <td className={SEL_TD}>
+          <CellNumber
+            label={`Quantity (kg), ${sku}`}
+            value={cfg.qty_kg}
+            fallback={defaultKg > 0 ? defaultKg : null}
+            max={defaultKg > 0 ? defaultKg : null}
+            available={defaultKg > 0 ? `Available: ${defaultKg.toFixed(3)} kg` : undefined}
+            onFocus={() => setUomWanted(true)}
+            onChange={patchQtyKg}
+          />
+        </td>
+        <td className={SEL_TD}>
+          <CellNumber
+            label={`Pack count (pcs), ${sku}`}
+            value={cfg.qty_units}
+            fallback={defaultUnits > 0 ? Math.round(defaultUnits) : null}
+            max={defaultUnits > 0 ? defaultUnits : null}
+            available={defaultUnits > 0 ? `Available: ${Math.round(defaultUnits)} pcs` : undefined}
+            onFocus={() => setUomWanted(true)}
+            onChange={patchQtyUnits}
+          />
+        </td>
+        <td className={SEL_TD}>
+          <input
+            type="date"
+            value={cfg.deadline_date ?? defaultDeadline}
+            onChange={(e) => onPatch({ deadline_date: e.target.value || undefined })}
+            aria-label={`Deadline, ${sku}`}
+            className={CELL_INPUT}
+          />
+        </td>
+        <td className={SEL_TD}>
+          {factoryOpts.length === 0 ? (
+            <span
+              className="text-[11px] font-semibold text-[var(--aws-error)]"
+              title={
+                scope.warehouses.length > 0
+                  ? `No factories are assigned to your account. It has ${scope.warehouses.join(", ")}, but planning expects one of ` +
+                    (Object.keys(FACTORY_TO_WAREHOUSE) as FactoryCode[]).map((c) => `${c} / ${FACTORY_TO_WAREHOUSE[c]}`).join(", ") +
+                    ". Ask an admin to align your allowed_warehouses with one of those exact values."
+                  : "No factories are assigned to your account. Ask an admin to grant warehouse access."
+              }
+            >
+              No access
             </span>
-            {qtyUnits > 0 ? (
-              <span className="text-[var(--text-muted)]">{fmtUnits(qtyUnits)} pcs</span>
-            ) : null}
-            {deadline ? (
-              <span className={[
-                "px-1.5 py-0 rounded-sm border font-medium",
-                deadlineTone(deadline) === "overdue" ? "text-[#b1361e] bg-[#fdf3f1] border-[#f0c7be]"
-                : deadlineTone(deadline) === "soon"    ? "text-[#9a393e] bg-[#fbeced] border-[#e6bcbe]"
-                                                       : "text-[var(--text-secondary)] bg-white border-[var(--aws-border)]",
-              ].join(" ")}>
-                {fmtDeadline(deadline)}
-              </span>
-            ) : null}
-            {factory ? (
-              <span className="px-1.5 py-0 rounded-sm border border-[#bbd9f3] bg-[#eaf3ff] text-[var(--aws-link)] font-semibold">
-                {factory}
-              </span>
-            ) : null}
-            {cfg.stepsLoaded && steps.length > 0 ? (
-              <span
-                className={[
-                  "px-1.5 py-0 rounded-sm border font-medium",
-                  flooredCount === steps.length
-                    ? "text-[#1d8102] bg-[#eaf6ed] border-[#b6dbb1]"
-                    : "text-[var(--text-secondary)] bg-[var(--surface-subtle)] border-[var(--aws-border)]",
-                ].join(" ")}
-              >
-                {flooredCount}/{steps.length} floors
-              </span>
-            ) : null}
-          </div>
-        </button>
-        <button
-          type="button"
-          onClick={onRemove}
-          aria-label="Remove from selection"
-          title="Remove"
-          className="shrink-0 w-9 h-9 sm:w-6 sm:h-6 flex items-center justify-center rounded-sm text-[var(--text-muted)] hover:text-[var(--aws-error)] hover:bg-[var(--surface-subtle)]"
-        >
-          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <line x1="18" y1="6" x2="6" y2="18" />
-            <line x1="6" y1="6" x2="18" y2="18" />
-          </svg>
-        </button>
-      </div>
+          ) : (
+            <select
+              value={factory ?? ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                onSetFactory(v === "" ? undefined : (v as FactoryCode));
+              }}
+              aria-label={`Factory, ${sku}`}
+              className={[CELL_INPUT, factory ? "" : "text-[var(--aws-error)] border-[#e6bcbe]"].join(" ")}
+            >
+              <option value="">Pick…</option>
+              {factoryOpts.map((f) => (
+                <option key={f} value={f}>{f} ({FACTORY_TO_WAREHOUSE[f]})</option>
+              ))}
+            </select>
+          )}
+          {showSteps && cfg.stepsLoaded && steps.length > 0 ? (
+            <span
+              className={[
+                "inline-block mt-1 px-1.5 py-0 rounded-sm border text-[11px] font-medium",
+                flooredCount === steps.length
+                  ? "text-[#1d8102] bg-[#eaf6ed] border-[#b6dbb1]"
+                  : "text-[var(--text-secondary)] bg-[var(--surface-subtle)] border-[var(--aws-border)]",
+              ].join(" ")}
+            >
+              {flooredCount}/{steps.length} floors
+            </span>
+          ) : null}
+        </td>
+        <td className={`${SEL_TD} px-1 whitespace-nowrap`}>
+          {customised ? (
+            <button
+              type="button"
+              onClick={onReset}
+              aria-label={`Reset ${sku} to its defaults`}
+              title="Reset to default"
+              className="inline-flex w-8 h-8 sm:w-6 sm:h-6 items-center justify-center rounded-sm text-[var(--text-muted)] hover:text-[var(--aws-navy)] hover:bg-[var(--surface-subtle)]"
+            >
+              <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <polyline points="1 4 1 10 7 10" />
+                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+              </svg>
+            </button>
+          ) : null}
+          <RemoveButton label="Remove from selection" onClick={onRemove} />
+        </td>
+      </tr>
 
-      {/* ── Expanded editor ──────────────────────────────────────── */}
+      {/* ── Expanded: the article's BOM ─────────────────────────────── */}
       {isExpanded ? (
-        <div className="border-t border-[var(--aws-border)] p-3 bg-white rounded-b-md">
-          {/* Row 1: quantity + deadline */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
-            <NumberField
-              label="Pack count (pcs)"
-              value={cfg.qty_units ?? ""}
-              placeholder={defaultUnits > 0 ? String(Math.round(defaultUnits)) : "—"}
-              onChange={patchQtyUnits}
-              max={defaultUnits > 0 ? defaultUnits : null}
-              hint={
-                defaultUnits > 0
-                  ? `Available: ${Math.round(defaultUnits)} pcs`
-                  : undefined
-              }
-            />
-            <NumberField
-              label="Quantity (kg)"
-              value={cfg.qty_kg ?? ""}
-              placeholder={defaultKg > 0 ? String(defaultKg) : "—"}
-              onChange={patchQtyKg}
-              max={defaultKg > 0 ? defaultKg : null}
-              hint={
-                defaultKg > 0
-                  ? `Available: ${defaultKg.toFixed(3)} kg`
-                  : undefined
-              }
-            />
-            <label className="block">
-              <span className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">Deadline</span>
-              <input
-                type="date"
-                value={cfg.deadline_date ?? defaultDeadline}
-                onChange={(e) => onPatch({ deadline_date: e.target.value || undefined })}
-                className="w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
-              />
-            </label>
-          </div>
-
-          {/* Row 2: factory selector */}
-          <div className="mb-3">
-            <label className="block">
-              <span className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">
-                Factory <span className="text-[var(--aws-error)]">*</span>
-              </span>
-              <select
-                value={factory ?? ""}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  onSetFactory(v === "" ? undefined : (v as FactoryCode));
-                }}
-                className="w-full sm:w-[220px] h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
-              >
-                <option value="">— Pick factory —</option>
-                {factoryOpts.map((f) => (
-                  <option key={f} value={f}>
-                    {f} ({FACTORY_TO_WAREHOUSE[f]})
-                  </option>
-                ))}
-              </select>
-            </label>
-            {factoryOpts.length === 0 ? (
-              <p className="mt-1 text-[11px] text-[var(--aws-error)]">
-                No factories are assigned to your account.{" "}
-                {scope.warehouses.length > 0 ? (
-                  <>
-                    Your account has <span className="font-mono">{scope.warehouses.join(", ")}</span>
-                    , but planning expects one of{" "}
-                    <span className="font-mono">
-                      {(Object.keys(FACTORY_TO_WAREHOUSE) as FactoryCode[])
-                        .map((c) => `${c} / ${FACTORY_TO_WAREHOUSE[c]}`)
-                        .join(", ")}
-                    </span>
-                    . Ask an admin to align your <span className="font-mono">allowed_warehouses</span> with one of those exact values.
-                  </>
-                ) : (
-                  <>Ask an admin to grant warehouse access.</>
-                )}
-              </p>
-            ) : null}
-          </div>
-
-          {/* Row 3: process steps (the editable process route). Hidden when
+        <tr>
+        <td colSpan={PANEL_COLUMNS} className="border border-[var(--aws-border)] p-0 text-left">
+        <div className="border-t-2 border-[var(--aws-orange)] p-3 bg-white">
+          {/* Process steps (the editable process route). Hidden when
               showSteps is false — the SO-Creation plan-builder derives routing
               from the SFG stage, not a hand-edited route, so this section is
               omitted there. Loads lazily from the BOM via ensureStepsLoaded()
@@ -1267,7 +1428,7 @@ function SelectedCard({
             />
           ) : null}
 
-          {/* Row 3b: BOM materials (read-only). Mirrors StepsSection's load
+          {/* BOM materials (read-only). Mirrors StepsSection's load
               gating so the operator sees a single source of truth for both
               process route AND material list while configuring the plan. */}
           <BomMaterialsSection
@@ -1280,28 +1441,11 @@ function SelectedCard({
             onCreateBom={onCreateBom}
           />
 
-          {/* Row 4: actions */}
-          <div className="flex flex-wrap gap-2 justify-end mt-3">
-            {customised ? (
-              <button
-                type="button"
-                onClick={onReset}
-                className="h-7 px-3 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)]"
-              >
-                Reset to default
-              </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={onToggleExpand}
-              className="h-7 px-3 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)]"
-            >
-              Done
-            </button>
-          </div>
         </div>
+        </td>
+        </tr>
       ) : null}
-    </div>
+    </>
   );
 }
 
@@ -1924,73 +2068,64 @@ function BomMaterialsSection({
   );
 }
 
-// Small numeric input that flips undefined ↔ number through a string field.
-// Empty string clears the override (returns undefined to parent).
-function NumberField({
-  label, value, placeholder, onChange, max, hint,
+// Compact inputs for the selected-articles table cells.
+const CELL_INPUT =
+  "w-full h-7 px-1.5 text-[12px] text-center rounded-[2px] bg-white border border-[var(--aws-border-strong)] " +
+  "outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]";
+
+/** A qty cell. Shows the WHOLE pending qty by default, the operator's figure
+ *  once typed. Focusing selects the number so typing replaces it; a value above
+ *  `max` (what is still pending) is capped there. While editing, the cell keeps
+ *  exactly what was typed — a cell left blank goes back to the whole qty. */
+function CellNumber({
+  label, value, fallback, max, available, onChange, onFocus,
 }: {
   label: string;
-  value: number | string;
-  placeholder?: string;
-  onChange: (n: number | undefined) => void;
-  /** Optional upper bound — values above max are clamped on input.
-   *  Useful for binding "available qty" limits on the planning card. */
+  /** The operator's own figure; undefined = use `fallback`. */
+  value: number | undefined;
+  /** The whole pending qty / pcs — what the cell holds until changed. */
+  fallback: number | null;
   max?: number | null;
-  /** Optional helper text rendered below the field; goes red when value
-   *  exceeds max (only meaningful when max is set). */
-  hint?: string;
+  /** "Available: …" — shown as the cell's tooltip. */
+  available?: string;
+  onChange: (n: number | undefined) => void;
+  onFocus?: () => void;
 }) {
-  const display = value === undefined || value === null ? "" : String(value);
-  const numericValue =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" && value !== ""
-        ? parseFloat(value)
-        : NaN;
-  const overMax =
-    max != null && max > 0 && Number.isFinite(numericValue) && numericValue > max;
+  // Non-null only while the cell is focused: the text as typed.
+  const [draft, setDraft] = useState<string | null>(null);
+  const shown = cellText(draft, value, fallback);
   return (
-    <label className="block">
-      <span className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">{label}</span>
-      <input
-        type="number"
-        min={0}
-        max={max != null && max > 0 ? max : undefined}
-        step="any"
-        inputMode="decimal"
-        value={display}
-        placeholder={placeholder}
-        // Mouse-wheel over a focused number input silently increments the
-        // value — blur on wheel so an accidental scroll can't corrupt the
-        // pack count / qty. The .no-spinner class hides the up/down arrows.
-        onWheel={(e) => e.currentTarget.blur()}
-        onChange={(e) => {
-          const raw = e.target.value;
-          if (raw === "") { onChange(undefined); return; }
-          const n = parseFloat(raw);
-          if (!Number.isFinite(n)) { onChange(undefined); return; }
-          // Clamp to max when supplied — bound to the SO line's available
-          // pending qty so operators can't over-plan (item 6).
-          const clamped = max != null && max > 0 && n > max ? max : n;
-          onChange(clamped);
-        }}
-        className={[
-          "no-spinner w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border outline-none focus:shadow-[0_0_0_1px_#9a393e]",
-          overMax
-            ? "border-[var(--aws-error)] focus:border-[var(--aws-error)]"
-            : "border-[var(--aws-border-strong)] focus:border-[#9a393e]",
-        ].join(" ")}
-      />
-      {hint ? (
-        <span
-          className={[
-            "block mt-1 text-[10px]",
-            overMax ? "text-[var(--aws-error)] font-semibold" : "text-[var(--text-muted)]",
-          ].join(" ")}
-        >
-          {hint}
-        </span>
-      ) : null}
-    </label>
+    <input
+      type="number"
+      min={0}
+      max={max != null && max > 0 ? max : undefined}
+      step="any"
+      inputMode="decimal"
+      value={shown}
+      placeholder="—"
+      aria-label={label}
+      title={available}
+      onFocus={(e) => {
+        setDraft(shown);
+        e.currentTarget.select();
+        onFocus?.();
+      }}
+      onChange={(e) => {
+        const raw = e.target.value;
+        if (raw === "") { setDraft(""); return; }          // blank: decided on blur
+        const n = parseQtyInput(raw, max);
+        // Over what is pending: show the capped figure straight away.
+        setDraft(n != null && n < parseFloat(raw) ? String(n) : raw);
+        onChange(n);
+      }}
+      onBlur={() => {
+        if (draft === "") onChange(undefined);             // left blank: back to the whole qty
+        setDraft(null);
+      }}
+      // Mouse-wheel over a focused number input silently changes the value —
+      // blur on wheel so an accidental scroll can't corrupt the qty.
+      onWheel={(e) => e.currentTarget.blur()}
+      className={`no-spinner tabular-nums ${CELL_INPUT}`}
+    />
   );
 }
