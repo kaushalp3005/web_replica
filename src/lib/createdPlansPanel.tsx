@@ -1,51 +1,115 @@
 "use client";
 
 // "Plans created" — shown where the "Selected for plan" table was, once Create
-// Plan succeeds. One row per new plan in the Plan List's columns (plan, factory,
-// type, dates, status, lines, volume, units, created, open); expanding a plan
-// lists its articles with their process route. Stock Take table look.
+// Plan succeeds. One row per new plan in the Plan List's columns (select, plan,
+// factory, type, dates, status, lines, volume, units, created) with the Plan
+// List's actions: Create / Edit Job Card, Open and Dispatch on each plan, and
+// Merge process across the ticked plans. Expanding a plan lists its articles
+// with their process route in the Plan List's process picker (process, floor,
+// SFG; saved to the plan). Stock Take table look.
 
 import { Fragment, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { friendlyApiError } from "@/lib/apiErrors";
-import { floorsLabel, planTotals, stepsText } from "@/lib/createdPlans";
+import { pickPlanRow, planRowFromDetail, planTotals } from "@/lib/createdPlans";
 import { GRID_HEAD_ROW, GRID_ROW, GRID_TABLE, GRID_TD, GRID_TH, GRID_WRAP } from "@/lib/gridTable";
+import { DispatchModal, MergeActionBar, MergeProcessModal, RowActions } from "@/lib/planActions";
+import { CreateJobCardModal, submitJobCardWizard } from "@/lib/planJobCardModal";
+import { PlanLineProcesses, routeKey } from "@/lib/planLineProcesses";
+import { planRowFlags } from "@/lib/planRowActions";
 import {
   type PlanDetail,
-  fmtDateRange, fmtPlanDate, fmtPlanKg, fmtPlanUnits, getPlan,
+  type PlanLineRow,
+  type PlanRow,
+  fmtDateRange, fmtPlanDate, fmtPlanKg, fmtPlanUnits, getPlan, listPlans,
 } from "@/lib/plans";
 
 const PLAN_PAGE = "/modules/production/plan-list";
-const COLUMNS = 11;
+const COLUMNS = 12;
 
-type Loaded = { id: number; plan: PlanDetail | null; error: string | null };
+// One new plan. Its Plan List row (lines_summary with each line's job cards and
+// carded qty, plus the totals) drives the columns and the buttons; its detail
+// (lines with their steps) feeds the expanded articles table. With neither, the
+// row says why.
+type Loaded = { id: number; row: PlanRow | null; detail: PlanDetail | null; error: string | null };
+
+async function loadPlan(id: number, signal: AbortSignal): Promise<Loaded> {
+  // The list endpoint has no plan-id filter; search=<id> matches the plan id
+  // (among other text) and pickPlanRow keeps the exact one.
+  const [listed, detailed] = await Promise.allSettled([
+    listPlans({ search: String(id), page_size: 50 }, signal),
+    getPlan(id, signal),
+  ]);
+  const detail = detailed.status === "fulfilled" ? detailed.value : null;
+  const listRow = listed.status === "fulfilled" ? pickPlanRow(listed.value.results, id) : null;
+  // No list row (say it's outside the search page) — the detail stands in.
+  const row = listRow ?? (detail ? planRowFromDetail(detail) : null);
+  if (row) return { id, row, detail, error: null };
+  // Only reachable when the detail failed too.
+  return { id, row: null, detail: null, error: friendlyApiError(detailed.status === "rejected" ? detailed.reason : null) };
+}
+
+// The list row's article summary in the detail's line shape, for the expanded
+// table when only the list row loaded (no deadline or process route then).
+function summaryLines(row: PlanRow): PlanLineRow[] {
+  return (row.lines_summary ?? []).map((l) => ({
+    plan_line_id: l.plan_line_id ?? undefined,
+    fg_sku_name: l.fg_sku_name,
+    customer_name: l.customer_name,
+    planned_qty_kg: l.planned_qty_kg,
+    planned_qty_units: l.planned_qty_units,
+    area: l.area,
+    job_card_count: l.job_card_count,
+  }));
+}
 
 export function CreatedPlansPanel({ planIds, onDismiss }: {
   planIds: number[];
   onDismiss: () => void;
 }) {
+  if (planIds.length === 0) return null;
+  // Keyed by the plan ids, so a new Create Plan starts the panel afresh: no
+  // ticked plans, expanded rows, message or open dialog carried over.
+  const key = planIds.join(",");
+  return <PlansCreated key={key} planIds={planIds} onDismiss={onDismiss} />;
+}
+
+function PlansCreated({ planIds, onDismiss }: {
+  planIds: number[];
+  onDismiss: () => void;
+}) {
+  const router = useRouter();
   const [loaded, setLoaded] = useState<Loaded[] | null>(null);
   const [open, setOpen] = useState<Set<number>>(() => new Set());
-  const key = planIds.join(",");
+  // Plans ticked for Merge process — the Plan List's selection.
+  const [selected, setSelected] = useState<Set<number>>(() => new Set());
+  const [toast, setToast] = useState<string | null>(null);
+  // Bumped after a job-card create / edit or a merge so the rows read their job
+  // cards again (Create / Edit buttons, lines and totals follow).
+  const [reloadKey, setReloadKey] = useState(0);
+  const [jcPlan, setJcPlan] = useState<PlanRow | null>(null);
+  const [jcIntent, setJcIntent] = useState<"create" | "edit">("create");
+  const [dispatchPlan, setDispatchPlan] = useState<PlanRow | null>(null);
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const idsKey = planIds.join(",");
 
   // Read each new plan back; one that fails to load still gets a row saying so.
+  // A reload keeps the current rows on screen until the fresh ones arrive.
   // Async-IIFE + AbortController — the codebase's fetch-in-effect shape.
   useEffect(() => {
-    if (!key) return;
-    const ids = key.split(",").map(Number);
+    const ids = idsKey.split(",").map(Number);
     const ctrl = new AbortController();
     void (async () => {
-      setLoaded(null);
-      const settled = await Promise.allSettled(ids.map((id) => getPlan(id, ctrl.signal)));
-      if (ctrl.signal.aborted) return;
-      setLoaded(settled.map((r, i) => (r.status === "fulfilled"
-        ? { id: ids[i], plan: r.value, error: null }
-        : { id: ids[i], plan: null, error: friendlyApiError(r.reason) })));
+      const next = await Promise.all(ids.map((id) => loadPlan(id, ctrl.signal)));
+      if (!ctrl.signal.aborted) setLoaded(next);
     })();
     return () => ctrl.abort();
-  }, [key]);
+  }, [idsKey, reloadKey]);
 
-  if (planIds.length === 0) return null;
+  function reload() {
+    setReloadKey((k) => k + 1);
+  }
 
   function toggle(id: number) {
     setOpen((s) => {
@@ -53,6 +117,18 @@ export function CreatedPlansPanel({ planIds, onDismiss }: {
       if (n.has(id)) n.delete(id); else n.add(id);
       return n;
     });
+  }
+
+  function toggleSelect(id: number) {
+    setSelected((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  }
+
+  function clearSelection() {
+    setSelected(new Set());
   }
 
   return (
@@ -66,7 +142,7 @@ export function CreatedPlansPanel({ planIds, onDismiss }: {
             Plan{planIds.length === 1 ? "" : "s"} created
           </span>
           <span className="text-[11px] text-[var(--text-muted)] hidden md:inline truncate">
-            · open a plan to approve it or create its job cards
+            · create job cards, merge processes or dispatch here, or open a plan to approve it
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -86,11 +162,29 @@ export function CreatedPlansPanel({ planIds, onDismiss }: {
         </div>
       </div>
 
+      {selected.size >= 1 ? (
+        <MergeActionBar
+          count={selected.size}
+          onClear={clearSelection}
+          onMerge={() => setMergeOpen(true)}
+        />
+      ) : null}
+
+      {toast ? (
+        <div className="mb-3 px-3 py-2 rounded-sm border border-[var(--aws-border)] bg-[#f1faff] text-[12px] text-[var(--text-primary)] flex items-center justify-between gap-2">
+          <span>{toast}</span>
+          <button type="button" onClick={() => setToast(null)} className="text-[var(--aws-link)] hover:underline">
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+
       <div className={GRID_WRAP}>
         <div className="overflow-x-auto">
-          <table className={`${GRID_TABLE} min-w-[980px]`}>
+          <table className={`${GRID_TABLE} min-w-[1200px]`}>
             <thead>
               <tr className={GRID_HEAD_ROW}>
+                <th className={GRID_TH} aria-label="Select to merge" />
                 <th className={GRID_TH} aria-label="Expand" />
                 <th className={GRID_TH}>Plan</th>
                 <th className={GRID_TH}>Factory</th>
@@ -101,7 +195,7 @@ export function CreatedPlansPanel({ planIds, onDismiss }: {
                 <th className={GRID_TH}>Volume (kg)</th>
                 <th className={GRID_TH}>Units</th>
                 <th className={GRID_TH}>Created</th>
-                <th className={GRID_TH} aria-label="Open" />
+                <th className={GRID_TH}>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -111,13 +205,14 @@ export function CreatedPlansPanel({ planIds, onDismiss }: {
                     Loading the new plan{planIds.length === 1 ? "" : "s"}…
                   </td>
                 </tr>
-              ) : loaded.map(({ id, plan, error }) => {
-                if (!plan) {
+              ) : loaded.map(({ id, row, detail, error }) => {
+                if (!row) {
                   return (
                     <tr key={id}>
                       <td className={GRID_TD} />
+                      <td className={GRID_TD} />
                       <td className={`${GRID_TD} font-medium`}>Plan #{id}</td>
-                      <td colSpan={COLUMNS - 3} className={`${GRID_TD} text-[var(--aws-error)] text-[12px]`}>
+                      <td colSpan={COLUMNS - 4} className={`${GRID_TD} text-[var(--aws-error)] text-[12px]`}>
                         Created, but couldn&apos;t load its details: {error}
                       </td>
                       <td className={GRID_TD}><OpenLink id={id} /></td>
@@ -125,12 +220,34 @@ export function CreatedPlansPanel({ planIds, onDismiss }: {
                   );
                 }
                 const isOpen = open.has(id);
-                const lines = plan.lines ?? [];
-                // The plan detail carries no totals — add them up from its lines.
-                const totals = planTotals(plan);
+                // The expanded articles: the detail's lines (with their process
+                // route), else the list row's article summary.
+                const lines = detail?.lines ?? summaryLines(row);
+                // The list row's totals; a row built from the detail has none,
+                // so they're added up from its lines.
+                const totals = planTotals({ ...row, lines });
+                const { anyCarded, anyRemaining } = planRowFlags(row);
+                // A draft plan's routes can be changed here; that needs its
+                // saved steps, so only once its detail has loaded.
+                const editable = detail != null && (row.status || "draft").toLowerCase() === "draft";
                 return (
                   <Fragment key={id}>
-                    <tr className={`${GRID_ROW} cursor-pointer`} onClick={() => toggle(id)}>
+                    <tr
+                      className={`${GRID_ROW} cursor-pointer`}
+                      onClick={(e) => {
+                        if ((e.target as HTMLElement).closest("button, input, a")) return;
+                        toggle(id);
+                      }}
+                    >
+                      <td className={GRID_TD} onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={selected.has(id)}
+                          onChange={() => toggleSelect(id)}
+                          aria-label={`Select ${row.plan_name || `Plan #${row.plan_id}`} to merge`}
+                          className="accent-[var(--aws-orange)] cursor-pointer align-middle"
+                        />
+                      </td>
                       <td className={GRID_TD}>
                         <button
                           type="button"
@@ -146,24 +263,32 @@ export function CreatedPlansPanel({ planIds, onDismiss }: {
                         </button>
                       </td>
                       <td className={`${GRID_TD} font-medium text-[var(--text-primary)]`}>
-                        {plan.plan_name || `Plan #${id}`}
+                        {row.plan_name || `Plan #${id}`}
                       </td>
-                      <td className={`${GRID_TD} whitespace-nowrap text-[var(--text-secondary)]`}>{plan.warehouse || "—"}</td>
-                      <td className={GRID_TD}><TypeBadge type={plan.plan_type} /></td>
+                      <td className={`${GRID_TD} whitespace-nowrap text-[var(--text-secondary)]`}>{row.warehouse || "—"}</td>
+                      <td className={GRID_TD}><TypeBadge type={row.plan_type} /></td>
                       <td className={`${GRID_TD} whitespace-nowrap text-[var(--text-secondary)]`}>
-                        {fmtDateRange(plan.date_from, plan.date_to)}
+                        {fmtDateRange(row.date_from, row.date_to)}
                       </td>
-                      <td className={GRID_TD}><StatusBadge status={plan.status} /></td>
-                      <td className={`${GRID_TD} tabular-nums`}>{plan.line_count ?? lines.length}</td>
+                      <td className={GRID_TD}><StatusBadge status={row.status} /></td>
+                      <td className={`${GRID_TD} tabular-nums`}>{row.line_count ?? lines.length}</td>
                       <td className={`${GRID_TD} tabular-nums font-semibold`}>{fmtPlanKg(totals.kg)}</td>
                       <td className={`${GRID_TD} tabular-nums text-[var(--text-secondary)]`}>
                         {totals.units > 0 ? fmtPlanUnits(totals.units) : "—"}
                       </td>
                       <td className={`${GRID_TD} whitespace-nowrap text-[12px] text-[var(--text-secondary)]`}>
-                        {plan.created_by ? <span className="block font-medium">{plan.created_by}</span> : null}
-                        {fmtPlanDate(plan.created_at)}
+                        {row.created_by ? <span className="block font-medium">{row.created_by}</span> : null}
+                        {fmtPlanDate(row.created_at)}
                       </td>
-                      <td className={GRID_TD} onClick={(e) => e.stopPropagation()}><OpenLink id={id} /></td>
+                      <td className={`${GRID_TD} whitespace-nowrap`} onClick={(e) => e.stopPropagation()}>
+                        <RowActions
+                          anyCarded={anyCarded}
+                          anyRemaining={anyRemaining}
+                          onOpen={() => router.push(`${PLAN_PAGE}/${id}`)}
+                          onCreateJobCard={(intent) => { setJcIntent(intent); setJcPlan(row); }}
+                          onDispatch={() => setDispatchPlan(row)}
+                        />
+                      </td>
                     </tr>
                     {isOpen ? (
                       <tr>
@@ -194,11 +319,16 @@ export function CreatedPlansPanel({ planIds, onDismiss }: {
                                           {l.planned_qty_units != null ? fmtPlanUnits(l.planned_qty_units) : "—"}
                                         </td>
                                         <td className={`${GRID_TD} whitespace-nowrap`}>{fmtPlanDate(l.deadline_date)}</td>
-                                        <td className={`${GRID_TD} text-[12px]`}>
-                                          <span className="text-[var(--text-primary)]">{stepsText(l.steps)}</span>
-                                          {floorsLabel(l.steps) ? (
-                                            <span className="block text-[11px] text-[var(--text-muted)]">{floorsLabel(l.steps)}</span>
-                                          ) : null}
+                                        <td className={`${GRID_TD} text-[12px] text-left align-top min-w-[440px]`}>
+                                          <PlanLineProcesses
+                                            key={routeKey(l, i)}
+                                            line={l}
+                                            warehouse={row.warehouse}
+                                            entity={row.entity}
+                                            editable={editable}
+                                            onSaved={(m) => { setToast(m); reload(); }}
+                                            onMessage={setToast}
+                                          />
                                         </td>
                                       </tr>
                                     ))}
@@ -217,18 +347,61 @@ export function CreatedPlansPanel({ planIds, onDismiss }: {
           </table>
         </div>
       </div>
+
+      {jcPlan ? (
+        <CreateJobCardModal
+          plan={jcPlan}
+          intent={jcIntent}
+          onClose={() => setJcPlan(null)}
+          onContinue={async (p) => {
+            // As on the Plan List: "Pick an article first." returns before the
+            // last message is cleared.
+            if (p.planLineId != null) setToast(null);
+            const r = await submitJobCardWizard(jcPlan, p);
+            setToast(r.message);
+            if (r.ok) reload();
+            return r.ok;
+          }}
+        />
+      ) : null}
+
+      {dispatchPlan ? (
+        <DispatchModal
+          plan={dispatchPlan}
+          onClose={() => setDispatchPlan(null)}
+          onToast={setToast}
+        />
+      ) : null}
+
+      {mergeOpen ? (
+        <MergeProcessModal
+          planIds={[...selected]}
+          onClose={() => setMergeOpen(false)}
+          onDone={(msg) => {
+            setToast(msg);
+            setMergeOpen(false);
+            clearSelection();
+            reload();
+          }}
+        />
+      ) : null}
     </section>
   );
 }
 
+// The Plan List's "Open" for a plan whose details couldn't be loaded.
 function OpenLink({ id }: { id: number }) {
   return (
     <Link
       href={`${PLAN_PAGE}/${id}`}
-      title={`Open plan ${id}`}
-      className="h-7 px-2.5 inline-flex items-center gap-1 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[12px] text-[var(--aws-orange)] hover:border-[var(--aws-orange)] whitespace-nowrap"
+      title="Open approval workspace"
+      className="h-7 px-2.5 text-[11px] rounded-[2px] border border-[var(--aws-border)] bg-white text-[var(--aws-link)] hover:border-[var(--aws-navy)] inline-flex items-center gap-1"
     >
-      Open →
+      Open
+      <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
+        <line x1="5" y1="12" x2="19" y2="12" />
+        <polyline points="12 5 19 12 12 19" />
+      </svg>
     </Link>
   );
 }
