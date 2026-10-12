@@ -1,21 +1,20 @@
 // Debtors Collection — DPD (days past due) reports.
 //
-// Two sections, each a Tally "Sundry Debtors" ageing export:
+// Two sections, each from a Tally "Sundry Debtors" ageing export:
 //   cd-cf  one row per customer per division (CF or CD) with its sales person
 //   apmc   APMC + Non-APMC customers with type and broker
-// Either report can set parties aside on sheets of their own — legal cases,
-// small debit balances, write-offs, APMC's "billed before the outlet opened" —
-// and keep them out of its totals. Those are carried here as `excluded`, one
-// group per sheet. Phone numbers and emails are joined in at import time from
-// the debtors contact list.
 //
-// There is no backend for this yet. scripts/import-dpd.mjs converts the Excel
-// exports into public/debtors-data/dpd-<section>.json, and fetchDpdReport reads
-// that file. The folder is git-ignored ON PURPOSE: this repo is public and these
-// are customer balances. When the API lands, fetchDpdReport is the one function
-// to change (apiFetch against the new endpoint); the shapes below are the
-// contract the screen is built on, and normalizeDpdReport already accepts the
-// string-encoded Decimals the FastAPI side tends to send.
+// The screen has ONE source: the collections backend's database, table
+// collection_parties (loadDpdReport in lib/debtor-calls.ts; reportFromDatabase
+// below turns its rows into a DpdReport). Nothing is read from a file in this
+// app. That table holds the Parties table's columns and a contact number —
+// no set-aside sheets, no emails and no report date.
+//
+// The data gets there in two steps: scripts/import-dpd.mjs converts the Excel
+// exports to JSON under debtors-data/ (outside public/, so it is never
+// served; git-ignored, because this repo is public and these are customer
+// balances), and the backend's scripts/load_dpd_parties.py loads that JSON
+// into the table.
 
 export type DpdSectionKey = "cd-cf" | "apmc";
 
@@ -48,25 +47,14 @@ export interface DpdParty {
   /** Contact number(s) as recorded — display text, possibly several numbers
    *  ("98200 12345 / 96112 74235"); see phoneNumbers and telHref for dialling. */
   phone: string | null;
-  email: string | null;
-}
-
-export interface DpdExcludedGroup {
-  title: string;
-  /** The reason the group is left out, when the whole group shares one. */
-  note: string | null;
-  parties: DpdParty[];
 }
 
 export interface DpdReport {
   section: DpdSectionKey;
-  /** Report date, YYYY-MM-DD. */
-  asOf: string | null;
-  /** The file the figures came from. */
-  source: string | null;
+  /** When the section's rows were last written to the database, ISO 8601. The
+   *  database carries no report date; this is the nearest thing to one. */
+  loadedAt: string | null;
   parties: DpdParty[];
-  /** Parties the report sets aside and keeps out of its totals, one group per sheet. */
-  excluded: DpdExcludedGroup[];
 }
 
 const BUCKET_KEYS: readonly AgeBucketKey[] = AGE_BUCKETS.map((b) => b.key);
@@ -81,23 +69,7 @@ export function emptyAgeing(): Ageing {
   return { lt30: 0, d30to60: 0, d60to90: 0, gt90: 0 };
 }
 
-// ── Loading ─────────────────────────────────────────────────────────────────
-
-const DATA_ROOT = "/debtors-data";
-
-/** The section's report, or null when none has been imported yet. */
-export async function fetchDpdReport(section: DpdSectionKey, signal?: AbortSignal): Promise<DpdReport | null> {
-  const res = await fetch(`${DATA_ROOT}/dpd-${section}.json`, { cache: "no-store", signal });
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`Couldn't load the report (HTTP ${res.status}).`);
-  let raw: unknown;
-  try {
-    raw = await res.json();
-  } catch {
-    throw new Error("The report file is not valid JSON. Re-run the DPD import.");
-  }
-  return normalizeDpdReport(section, raw);
-}
+// ── From the database ───────────────────────────────────────────────────────
 
 function toNumber(v: unknown): number {
   if (typeof v === "number") return Number.isFinite(v) ? v : 0;
@@ -158,33 +130,41 @@ function toParty(v: unknown): DpdParty | null {
     broker: toText(r.broker),
     remarks: toNote(r.remarks),
     phone: toPhone(r.phone),
-    email: toText(r.email),
   };
 }
 
-function toParties(v: unknown): DpdParty[] {
-  return Array.isArray(v) ? v.map(toParty).filter((p): p is DpdParty => p !== null) : [];
-}
-
-function toGroup(v: unknown): DpdExcludedGroup | null {
-  const g = asRecord(v);
-  return g ? { title: toText(g.title) ?? "Set aside", note: toNote(g.note), parties: toParties(g.parties) } : null;
-}
-
-/** Coerce an untrusted report payload into a DpdReport. Rows without a
- *  customer name are dropped; a payload with no parties list is rejected.
- *  `excluded` may be a list of groups or (older files) a single group. */
-export function normalizeDpdReport(section: DpdSectionKey, raw: unknown): DpdReport {
+/** The collections backend's GET /parties reply as a DpdReport, or null when
+ *  the section has no parties loaded. Its rows carry the database's column
+ *  names (cd_cf, below_30_days, contact_number …); rows without a customer are
+ *  dropped. A reply with no parties list is rejected. */
+export function reportFromDatabase(section: DpdSectionKey, raw: unknown): DpdReport | null {
   const r = asRecord(raw);
-  if (!r || !Array.isArray(r.parties)) throw new Error("The report is not in the expected format.");
-  const groups = Array.isArray(r.excluded) ? r.excluded : [r.excluded];
-  return {
-    section,
-    asOf: toText(r.asOf),
-    source: toText(r.source),
-    parties: toParties(r.parties),
-    excluded: groups.map(toGroup).filter((g): g is DpdExcludedGroup => g !== null),
-  };
+  if (!r || !Array.isArray(r.parties)) throw new Error("The parties list is not in the expected format.");
+  const parties = r.parties
+    .map((v) => {
+      const row = asRecord(v);
+      return row
+        ? toParty({
+            customer: row.customer,
+            pending: row.outstanding,
+            ageing: {
+              lt30: row.below_30_days,
+              d30to60: row.days_30_to_60,
+              d60to90: row.days_60_to_90,
+              gt90: row.above_90_days,
+            },
+            division: row.cd_cf,
+            salesPerson: row.sales_person,
+            type: row.type,
+            broker: row.broker,
+            remarks: row.remarks,
+            phone: row.contact_number,
+          })
+        : null;
+    })
+    .filter((p): p is DpdParty => p !== null);
+  if (parties.length === 0) return null;
+  return { section, loadedAt: toText(r.updated_at), parties };
 }
 
 // ── Totals & grouping ───────────────────────────────────────────────────────
@@ -234,6 +214,17 @@ export function groupParties(parties: readonly DpdParty[], dim: DpdDimension, bl
   return [...byKey]
     .map(([key, list]) => ({ key, label: key || blankLabel, ...totalsOf(list) }))
     .sort((a, b) => b.pending - a.pending || a.label.localeCompare(b.label));
+}
+
+const slug = (v: string | null) => (v ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+
+/** A party's stable id: "cd-cf:cf:bigbasket" — section, division, customer.
+ *  The report has no id of its own, and a customer billed under both CF and CD
+ *  is two parties. Calls and their summaries are filed under this, so it must
+ *  stay identical to the collections backend's helpers.party_slug — it is
+ *  the primary key of its collection_parties table. */
+export function partyKey(section: DpdSectionKey, p: Pick<DpdParty, "customer" | "division">): string {
+  return [slug(section), slug(p.division), slug(p.customer)].filter(Boolean).join(":");
 }
 
 // ── Filtering & sorting ─────────────────────────────────────────────────────

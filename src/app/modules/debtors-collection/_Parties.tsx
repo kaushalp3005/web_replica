@@ -10,11 +10,13 @@
 
 import { useMemo, useState, type RefObject } from "react";
 import {
-  AGE_BUCKETS, compactInr, dimensionValue, formatInr, groupParties, hasDues, isFiltered, sortParties, totalsOf,
-  NO_FILTER, type AgeBucketKey, type DpdExcludedGroup, type DpdFilter, type DpdParty, type DpdSortKey, type SortDir,
+  AGE_BUCKETS, compactInr, dimensionValue, formatInr, groupParties, hasDues, isFiltered, totalsOf,
+  NO_FILTER, type AgeBucketKey, type DpdFilter, type DpdParty, type DpdSectionKey,
+  type DpdSortKey, type SortDir,
 } from "@/lib/debtors";
 import { AgeingBar, PhoneIcon, Pill, Remark, Swatch } from "./_ui";
 import { CallDialog } from "./_CallDialog";
+import { PartySummaryDialog } from "./_SummaryDialog";
 import type { DimensionDef } from "./_sections";
 
 export interface SortState {
@@ -65,8 +67,30 @@ function CallNowButton({ party, onCall, size }: { party: DpdParty; onCall: (p: D
   );
 }
 
+/** Opens the summary sheet for one party; sits beside Call now, in neutral grey. */
+function SummaryButton({ party, onSummary, size }: { party: DpdParty; onSummary: (p: DpdParty) => void; size: "sm" | "md" }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSummary(party)}
+      aria-haspopup="dialog"
+      aria-label={`Summary: ${party.customer}`}
+      className={[
+        "inline-flex items-center justify-center gap-1.5 rounded-[2px] border border-[var(--aws-border-strong)] bg-white font-semibold text-[var(--text-primary)] whitespace-nowrap transition-colors hover:bg-[var(--surface-subtle)]",
+        size === "sm" ? "h-7 px-2.5 text-[12px]" : "h-9 px-3.5 text-[13px]",
+      ].join(" ")}
+    >
+      <svg aria-hidden viewBox="0 0 16 16" className="w-3.5 h-3.5">
+        <path d="M3 13V8M8 13V3M13 13V6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      </svg>
+      Summary
+    </button>
+  );
+}
+
 export function PartiesList({
   anchorRef,
+  section,
   all,
   rows,
   dimensions,
@@ -79,6 +103,7 @@ export function PartiesList({
 }: {
   /** Scrolled to when a breakdown row narrows the list. */
   anchorRef: RefObject<HTMLElement | null>;
+  section: DpdSectionKey;
   /** Every party in the section — the filter options come from these. */
   all: readonly DpdParty[];
   /** The parties to show, already filtered and sorted. */
@@ -98,6 +123,7 @@ export function PartiesList({
   // The card list keeps its own "show more" count; a new filter starts it over.
   const filterKey = JSON.stringify([filter, sort]);
   const [calling, setCalling] = useState<DpdParty | null>(null);
+  const [summarising, setSummarising] = useState<DpdParty | null>(null);
 
   return (
     <section
@@ -191,6 +217,7 @@ export function PartiesList({
             sort={sort}
             onSort={onSort}
             onCall={setCalling}
+            onSummary={setSummarising}
           />
           <PartyCards
             key={filterKey}
@@ -199,10 +226,31 @@ export function PartiesList({
             dimensions={dimensions}
             bucket={filter.bucket}
             onCall={setCalling}
+            onSummary={setSummarising}
           />
         </>
       )}
-      <CallDialog party={calling} dimensions={dimensions} onClose={() => setCalling(null)} />
+      <CallDialog
+        party={calling}
+        section={section}
+        dimensions={dimensions}
+        onClose={() => setCalling(null)}
+        onViewSummary={(p) => {
+          setCalling(null);
+          setSummarising(p);
+        }}
+      />
+      <PartySummaryDialog
+        party={summarising}
+        section={section}
+        all={all}
+        dimensions={dimensions}
+        onClose={() => setSummarising(null)}
+        onCall={(p) => {
+          setSummarising(null);
+          setCalling(p);
+        }}
+      />
     </section>
   );
 }
@@ -314,6 +362,7 @@ function PartiesTable({
   sort,
   onSort,
   onCall,
+  onSummary,
 }: {
   rows: readonly DpdParty[];
   totals: ReturnType<typeof totalsOf>;
@@ -323,6 +372,7 @@ function PartiesTable({
   sort: SortState;
   onSort: (s: SortState) => void;
   onCall: (p: DpdParty) => void;
+  onSummary: (p: DpdParty) => void;
 }) {
   const header = (key: DpdSortKey, label: string, align: "left" | "right", swatch?: AgeBucketKey) => {
     const active = sort.key === key;
@@ -372,7 +422,7 @@ function PartiesTable({
             {header("pending", "Outstanding", "right")}
             {AGE_BUCKETS.map((b) => header(b.key, b.label, "right", b.key))}
             <th scope="col" className={`${TH} bg-[var(--surface-subtle)] text-center`}>
-              Call now
+              Actions
             </th>
           </tr>
         </thead>
@@ -399,7 +449,10 @@ function PartiesTable({
                 </td>
               ))}
               <td className={`${TD} text-center`}>
-                <CallNowButton party={p} onCall={onCall} size="sm" />
+                <span className="inline-flex items-center gap-1.5">
+                  <SummaryButton party={p} onSummary={onSummary} size="sm" />
+                  <CallNowButton party={p} onCall={onCall} size="sm" />
+                </span>
               </td>
             </tr>
           ))}
@@ -434,12 +487,14 @@ function PartyCards({
   dimensions,
   bucket,
   onCall,
+  onSummary,
 }: {
   rows: readonly DpdParty[];
   keyOf: Map<DpdParty, number>;
   dimensions: readonly DimensionDef[];
   bucket: AgeBucketKey | null;
   onCall: (p: DpdParty) => void;
+  onSummary: (p: DpdParty) => void;
 }) {
   const [limit, setLimit] = useState(CARD_PAGE);
   const shown = rows.slice(0, limit);
@@ -491,7 +546,10 @@ function PartyCards({
                 <span className="min-w-0 truncate text-[12px] tabular-nums text-[var(--text-secondary)]" title={p.phone ?? undefined}>
                   {p.phone ?? ""}
                 </span>
-                <CallNowButton party={p} onCall={onCall} size="md" />
+                <span className="shrink-0 flex items-center gap-2">
+                  <SummaryButton party={p} onSummary={onSummary} size="md" />
+                  <CallNowButton party={p} onCall={onCall} size="md" />
+                </span>
               </div>
             </li>
           );
@@ -507,54 +565,5 @@ function PartyCards({
         </button>
       ) : null}
     </div>
-  );
-}
-
-// ── Parties the report leaves out ───────────────────────────────────────────
-
-/** A collapsed list of parties the report keeps out of its totals — one sheet
- *  of the workbook ("LEGAL", "write off", "Before APMC outlet" …) — with the
- *  report's reason when the whole sheet shares one. */
-export function ExcludedParties({ group }: { group: DpdExcludedGroup }) {
-  const total = useMemo(() => totalsOf(group.parties).pending, [group]);
-  const sorted = useMemo(() => sortParties(group.parties, "pending", "desc"), [group]);
-  return (
-    <details className="group/ex bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.12)]">
-      <summary className="flex cursor-pointer list-none items-start gap-3 rounded-md px-4 sm:px-5 py-3.5 hover:bg-[var(--surface-subtle)] [&::-webkit-details-marker]:hidden">
-        <svg
-          aria-hidden
-          viewBox="0 0 16 16"
-          className="mt-[3px] w-3.5 h-3.5 shrink-0 text-[var(--text-muted)] transition-transform duration-200 group-open/ex:rotate-90"
-        >
-          <path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-        <span className="min-w-0 flex-1">
-          <span className="block text-[13px] font-semibold text-[var(--text-primary)]">{group.title}</span>
-          <span className="block mt-0.5 text-[12px] text-[var(--text-secondary)]">
-            {group.parties.length} {group.parties.length === 1 ? "party" : "parties"}, not counted in the totals above
-            {group.note ? ` — ${group.note}` : ""}
-          </span>
-        </span>
-        <span className="shrink-0 text-[13px] font-semibold tabular-nums text-[var(--text-primary)]">{formatInr(total)}</span>
-      </summary>
-      <ul role="list" className="border-t border-[var(--aws-border)] divide-y divide-[var(--surface-divider)]">
-        {sorted.map((p, i) => (
-          <li key={i} className="flex items-center gap-3 px-4 sm:px-5 py-2 text-[13px]">
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-[var(--text-primary)]" title={p.customer}>{p.customer}</span>
-              {p.remarks && p.remarks !== group.note ? <Remark text={p.remarks} /> : null}
-            </span>
-            {p.type ? (
-              <span className="hidden sm:inline">
-                <Pill>{p.type}</Pill>
-              </span>
-            ) : null}
-            <span className="w-[108px] shrink-0 text-right tabular-nums font-medium text-[var(--text-primary)]">
-              {formatInr(p.pending)}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </details>
   );
 }

@@ -6,16 +6,16 @@
 import { useCallback, useState, type HTMLAttributes, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { AGE_BUCKETS, compactInr, formatShare, hasDues, type AgeBucketKey, type Ageing } from "@/lib/debtors";
 
-// Ordinal ramp for the four age buckets: one hue (the brand maroon, OKLCH
-// h≈20), light → dark as the dues get older, so the order reads in the colour
-// itself. Validated as an ordinal ramp against the white card surface:
-// lightness monotone, adjacent steps ≥ 0.06 apart, lightest step 2.22:1.
-// Change one step and re-check the set; never hand-pick a single swatch.
+// Traffic-light ramp for the four age buckets, as the collections team reads
+// them: green (fresh) → light yellow → orange → dark red (over 90 days). Hue and
+// lightness both step, so neighbours stay apart for colour-blind readers too.
+// The light yellow barely shows on white; every bucket's
+// amount is also printed beside its swatch, so the colour is never the only cue.
 export const BUCKET_COLOR: Record<AgeBucketKey, string> = {
-  lt30: "#dd9e9d",
-  d30to60: "#cd7575",
-  d60to90: "#b64e52",
-  gt90: "#8a2e34",
+  lt30: "#16a34a",
+  d30to60: "#fde047",
+  d60to90: "#ea580c",
+  gt90: "#991b1b",
 };
 
 /** Legend swatch — a small rect, mirroring the bar segments it keys. */

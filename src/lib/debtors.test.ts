@@ -8,8 +8,8 @@
 // and a rupee figure must never be printed in a misleading unit.
 
 import {
-  compactInr, filterParties, formatAsOf, formatInr, formatShare, groupParties, normalizeDpdReport,
-  phoneNumbers, sortParties, telHref, totalsOf, NO_FILTER, type DpdParty,
+  compactInr, filterParties, formatAsOf, formatInr, formatShare, groupParties,
+  partyKey, phoneNumbers, reportFromDatabase, sortParties, telHref, totalsOf, NO_FILTER, type DpdParty,
 } from "./debtors.ts";
 
 let failures = 0;
@@ -22,7 +22,7 @@ function party(customer: string, ageing: [number, number, number, number], more:
   const [lt30, d30to60, d60to90, gt90] = ageing;
   return {
     customer, pending: lt30 + d30to60 + d60to90 + gt90, ageing: { lt30, d30to60, d60to90, gt90 },
-    division: null, salesPerson: null, type: null, broker: null, remarks: null, phone: null, email: null, ...more,
+    division: null, salesPerson: null, type: null, broker: null, remarks: null, phone: null, ...more,
   };
 }
 
@@ -119,46 +119,60 @@ check("by a dimension puts blanks last in both directions",
   sortParties(P, "salesPerson", "desc").map((p) => p.salesPerson), ["Shailendra P", "PRASHANT PAL", "Ajay Bajaj", "Ajay Bajaj", null]);
 check("sorting does not mutate its input", P[0].customer, "August Assortments");
 
-// ── normalising a report (the JSON is external input — later the API's) ──
-const R = normalizeDpdReport("apmc", {
-  asOf: "2026-09-26",
-  source: "APMC + Non APMC DPD 26 sept.xlsx",
+// ── reading the database's rows (external input: never trusted as typed) ──
+const R = reportFromDatabase("apmc", {
+  section: "apmc", updated_at: "2026-10-12T10:10:00+00:00",
   parties: [
-    { customer: " Ekta Trading Co-APMC\r\r\n ", type: " Debtors (APMC) ", broker: "", pending: "1,57,088.50",
-      ageing: { gt90: "157088.5" }, phone: " 98200 12345 " },
-    { customer: "   ", pending: 100, ageing: { lt30: 100 } },
-    { customer: "No pending field", ageing: { lt30: 10, gt90: 5 }, phone: 9820012345 },
+    { customer: " Ekta Trading Co-APMC\r\r\n ", type: " Debtors (APMC) ", broker: "", outstanding: "1,57,088.50",
+      above_90_days: "157088.5", contact_number: " 98200 12345 " },
+    { customer: "   ", outstanding: 100, below_30_days: 100 },
+    { customer: "No outstanding field", below_30_days: 10, above_90_days: 5, contact_number: 9820012345 },
     "not a party",
   ],
-  excluded: { title: "Before APMC outlet ", note: "Not our party", parties: [{ customer: "Bhagyalaxmi", pending: 629257, ageing: { gt90: 629257 } }] },
 });
-check("names lose line breaks and padding", R.parties.map((p) => p.customer), ["Ekta Trading Co-APMC", "No pending field"]);
-check("numeric strings are parsed", [R.parties[0].pending, R.parties[0].ageing.gt90, R.parties[0].ageing.lt30], [157088.5, 157088.5, 0]);
-check("blank text becomes null", [R.parties[0].broker, R.parties[0].type], [null, "Debtors (APMC)"]);
-check("a missing pending falls back to the bucket sum", R.parties[1].pending, 15);
-check("phones: text is trimmed, a spreadsheet number becomes text", R.parties.map((p) => p.phone), ["98200 12345", "9820012345"]);
-check("no phone field is null", normalizeDpdReport("cd-cf", { parties: [{ customer: "X", pending: 1 }] }).parties[0].phone, null);
-check("report metadata", [R.section, R.asOf, R.source], ["apmc", "2026-09-26", "APMC + Non APMC DPD 26 sept.xlsx"]);
-check("a single set-aside group (older files) becomes a list of one",
-  R.excluded.map((g) => [g.title, g.note, g.parties.length]), [["Before APMC outlet", "Not our party", 1]]);
-check("no set-aside groups", normalizeDpdReport("cd-cf", { parties: [] }).excluded, []);
-const R2 = normalizeDpdReport("cd-cf", {
-  parties: [{ customer: "Basil Trading", division: " CF ", email: " accounts@basiltrading.in ", pending: 5,
+check("names lose line breaks and padding", R?.parties.map((p) => p.customer), ["Ekta Trading Co-APMC", "No outstanding field"]);
+check("numeric strings are parsed", [R?.parties[0].pending, R?.parties[0].ageing.gt90, R?.parties[0].ageing.lt30], [157088.5, 157088.5, 0]);
+check("blank text becomes null", [R?.parties[0].broker, R?.parties[0].type], [null, "Debtors (APMC)"]);
+check("a missing outstanding falls back to the bucket sum", R?.parties[1].pending, 15);
+check("contact numbers: text is trimmed, a number becomes text", R?.parties.map((p) => p.phone), ["98200 12345", "9820012345"]);
+check("no contact number is null", reportFromDatabase("cd-cf", { parties: [{ customer: "X", outstanding: 1 }] })?.parties[0].phone, null);
+const R2 = reportFromDatabase("cd-cf", {
+  parties: [{ customer: "Basil Trading", cd_cf: " CF ", outstanding: 5,
     remarks: "20-21 FY issue\r\n1.  4 lac of packing material\r\n\r\n2. rest   pending " }],
-  excluded: [
-    { title: "LEGAL", parties: [{ customer: "Pure Food Origin LLP", pending: 50958, ageing: { gt90: 50958 } }] },
-    { title: "write off", parties: [] },
+});
+check("CD - CF is trimmed", R2?.parties[0].division, "CF");
+check("remarks keep their line breaks, tidied", R2?.parties[0].remarks, "20-21 FY issue\n1. 4 lac of packing material\n2. rest pending");
+check("search finds the division",
+  filterParties(R2?.parties ?? [], { ...NO_FILTER, search: "cf" }).length, 1);
+// ── the database's rows → the report the screen is built on ──
+const DB = reportFromDatabase("cd-cf", {
+  section: "cd-cf", updated_at: "2026-10-12T10:10:00+00:00",
+  parties: [
+    { party_id: "cd-cf:cf:bigbasket", customer: " Bigbasket ", cd_cf: "CF", sales_person: "Prashant Pal", type: null, broker: null,
+      outstanding: 2960823.35, below_30_days: 87014, days_30_to_60: 0, days_60_to_90: 78.93, above_90_days: 2873730.42,
+      remarks: "Follow up\r\nweekly", contact_number: "99805 42121 / 96112 74235" },
+    { party_id: "x", customer: "", outstanding: 5 },
     "junk",
   ],
 });
-check("division and email are trimmed", [R2.parties[0].division, R2.parties[0].email], ["CF", "accounts@basiltrading.in"]);
-check("remarks keep their line breaks, tidied", R2.parties[0].remarks, "20-21 FY issue\n1. 4 lac of packing material\n2. rest pending");
-check("several set-aside groups, junk dropped", R2.excluded.map((g) => [g.title, g.parties.length]), [["LEGAL", 1], ["write off", 0]]);
-check("search finds the division",
-  filterParties(R2.parties, { ...NO_FILTER, search: "cf" }).length, 1);
-let threw = false;
-try { normalizeDpdReport("cd-cf", { rows: [] }); } catch { threw = true; }
-check("a file without a parties list is rejected", threw, true);
+check("database rows map onto the party shape", DB?.parties, [{
+  customer: "Bigbasket", pending: 2960823.35, ageing: { lt30: 87014, d30to60: 0, d60to90: 78.93, gt90: 2873730.42 },
+  division: "CF", salesPerson: "Prashant Pal", type: null, broker: null, remarks: "Follow up\nweekly",
+  phone: "99805 42121 / 96112 74235",
+}]);
+check("the report carries its section and when the rows were written", [DB?.section, DB?.loadedAt],
+  ["cd-cf", "2026-10-12T10:10:00+00:00"]);
+check("the buckets still add up to the outstanding", totalsOf(DB?.parties ?? []).ageing.gt90 + 87014 + 78.93, 2960823.35);
+check("a section with nothing loaded is no report", reportFromDatabase("apmc", { section: "apmc", updated_at: null, parties: [] }), null);
+let rejected = false;
+try { reportFromDatabase("cd-cf", { detail: "nope" }); } catch { rejected = true; }
+check("a reply without a parties list is rejected", rejected, true);
+
+// ── party ids: must match the collections backend's party_slug ──
+check("section, division and customer", partyKey("cd-cf", party("Bigbasket", [1, 0, 0, 0], { division: "CF" })), "cd-cf:cf:bigbasket");
+check("CF and CD rows of one customer differ", partyKey("cd-cf", party("Bigbasket", [1, 0, 0, 0], { division: "CD" })), "cd-cf:cd:bigbasket");
+check("punctuation and spacing collapse", partyKey("apmc", party("  M/s. Shah & Co. ", [1, 0, 0, 0])), "apmc:m-s-shah-co");
+check("a (Sale) suffix is kept", partyKey("cd-cf", party("Farmfield (Sale)", [1, 0, 0, 0], { division: "CF" })), "cd-cf:cf:farmfield-sale");
 
 if (failures) { console.error(`${failures} failed`); process.exit(1); }
 console.log("debtors: all checks passed");

@@ -1,35 +1,43 @@
 "use client";
 
-// The "Call now" sheet for one party: the number(s) to dial, the email, the
-// dues to talk about and the collection remarks, so whoever makes the call has
-// it all in front of them.
+// The "Call now" sheet for one party. Its main action hands the call to the
+// Sarvam Collections agent (_AgentCall.tsx); dialling the number yourself is
+// still there. Under them: the number(s), the dues to talk about and the
+// collection remarks, so whoever is on the call has it all in front of them.
 //
-// Numbers and emails come from the debtors contact list, joined in by
-// scripts/import-dpd.mjs (the customer master, once the backend exists). Many
-// parties have none on file; the sheet says so rather than offering a link
-// that dials nothing.
+// Numbers are the party's contact_number in the database (joined in from the
+// debtors contact list when the report is imported). Many parties have none on
+// file; the sheet says so rather than offering a link that dials nothing.
 //
 // A native <dialog> opened with showModal(), styled like the module modals
 // elsewhere: Escape, keeping focus inside, and an inert page behind it come
 // from the browser instead of hand-rolled listeners.
 
 import { useEffect, useRef } from "react";
-import { AGE_BUCKETS, formatInr, hasDues, phoneNumbers, telHref, dimensionValue, type DpdParty } from "@/lib/debtors";
+import {
+  AGE_BUCKETS, formatInr, hasDues, partyKey, phoneNumbers, telHref, dimensionValue, type DpdParty, type DpdSectionKey,
+} from "@/lib/debtors";
 import { AgeingBar, PhoneIcon, Remark, Swatch, isFlag } from "./_ui";
+import { AgentCall } from "./_AgentCall";
 import type { DimensionDef } from "./_sections";
 
 export function CallDialog({
   party,
+  section,
   dimensions,
   onClose,
+  onViewSummary,
 }: {
   /** The party to call; null keeps the dialog closed. */
   party: DpdParty | null;
+  /** The section the party is in: part of the id its calls are filed under. */
+  section: DpdSectionKey;
   dimensions: readonly DimensionDef[];
   onClose: () => void;
+  /** Open this party's Summary sheet, where a finished call's summary and conversation are. */
+  onViewSummary: (p: DpdParty) => void;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
-  const dialRef = useRef<HTMLAnchorElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -37,8 +45,8 @@ export function CallDialog({
     if (!dialog) return;
     if (party && !dialog.open) {
       dialog.showModal();
-      // Land on the action: dial when there is a number, otherwise Close.
-      (dialRef.current ?? closeRef.current)?.focus();
+      // Land on Close, never on a button that rings somebody.
+      closeRef.current?.focus();
     } else if (!party && dialog.open) {
       dialog.close();
     }
@@ -84,6 +92,14 @@ export function CallDialog({
           </div>
 
           <div className="px-5 py-4 space-y-4">
+            <AgentCall
+              key={partyKey(section, party)}
+              section={section}
+              party={party}
+              dialable={numbers.length > 0}
+              onViewSummary={() => onViewSummary(party)}
+            />
+
             <div>
               <p className="text-[11px] font-medium text-[var(--text-secondary)]">
                 {numbers.length > 1 ? "Phone numbers" : "Phone"}
@@ -110,14 +126,6 @@ export function CallDialog({
                   No phone number on file for this party yet.
                 </p>
               )}
-              {party.email ? (
-                <p className="mt-2 text-[12px]">
-                  <span className="text-[var(--text-secondary)]">Email </span>
-                  <a href={`mailto:${party.email}`} className="text-[var(--aws-link)] hover:underline break-all">
-                    {party.email}
-                  </a>
-                </p>
-              ) : null}
             </div>
 
             {party.remarks && !isFlag(party.remarks) ? (
@@ -164,12 +172,11 @@ export function CallDialog({
             </button>
             {tel ? (
               <a
-                ref={dialRef}
                 href={tel}
-                className="inline-flex items-center gap-2 h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-[13px] font-semibold text-white hover:bg-[var(--aws-orange-hover)]"
+                className="inline-flex items-center gap-2 h-9 px-4 rounded-[2px] border border-[var(--aws-orange)] bg-white text-[13px] font-semibold text-[var(--aws-orange)] hover:bg-[var(--aws-orange)] hover:text-white"
               >
                 <PhoneIcon className="w-4 h-4" />
-                Call {numbers[0]}
+                Dial {numbers[0]} myself
               </a>
             ) : null}
           </div>

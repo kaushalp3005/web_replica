@@ -5,26 +5,32 @@
 // pressing one narrows the parties list to the parties with dues in it.
 
 import {
-  AGE_BUCKETS, compactInr, formatAsOf, formatInr, formatShare, type AgeBucketKey, type DpdTotals,
+  AGE_BUCKETS, compactInr, formatInr, formatShare, type AgeBucketKey, type DpdTotals,
 } from "@/lib/debtors";
 import { AgeingBar, Swatch, Tip, useHoverTip } from "./_ui";
 
+/** "12 Oct 2026, 3:40 pm" in the viewer's own time zone; null for anything unreadable. */
+function formatLoadedAt(iso: string | null): string | null {
+  const d = iso ? new Date(iso) : null;
+  if (!d || Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
 export function SummaryCard({
   totals,
-  asOf,
-  source,
+  loadedAt,
   bucket,
   onBucket,
 }: {
   totals: DpdTotals;
-  asOf: string | null;
-  source: string | null;
+  /** When the section's rows were last written to the database. */
+  loadedAt: string | null;
   /** The bucket the list is filtered to, if any. */
   bucket: AgeBucketKey | null;
   onBucket: (b: AgeBucketKey | null) => void;
 }) {
   const { tip, track } = useHoverTip<AgeBucketKey>();
-  const asOfText = formatAsOf(asOf);
+  const loadedText = formatLoadedAt(loadedAt);
   const tipBucket = tip ? AGE_BUCKETS.find((b) => b.key === tip.key) : null;
   const barLabel = `Ageing split of the total: ${AGE_BUCKETS.map(
     (b) => `${b.label} ${formatShare(totals.ageing[b.key], totals.pending)}`,
@@ -54,21 +60,10 @@ export function SummaryCard({
             ) : null}
           </p>
         </div>
-        {asOfText || source ? (
+        {loadedText ? (
+          // The database carries no report date — only when its rows were written.
           <p className="text-[12px] text-[var(--text-secondary)] sm:text-right">
-            {asOfText ? (
-              <>
-                As on <span className="font-semibold text-[var(--text-primary)]">{asOfText}</span>
-              </>
-            ) : (
-              // Never guess a date: a report without one says so.
-              "Report date not given"
-            )}
-            {source ? (
-              <span className="block max-w-[280px] truncate text-[11px] text-[var(--text-muted)]" title={source}>
-                {source}
-              </span>
-            ) : null}
+            Updated <span className="font-semibold text-[var(--text-primary)]">{loadedText}</span>
           </p>
         ) : null}
       </div>

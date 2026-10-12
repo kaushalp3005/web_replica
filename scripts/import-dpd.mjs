@@ -1,5 +1,6 @@
-// Converts the Tally "Sundry Debtors" DPD (days past due) exports into the JSON
-// the Debtors Collection screen reads, public/debtors-data/dpd-<section>.json:
+// Converts the Tally "Sundry Debtors" DPD (days past due) exports into JSON,
+// debtors-data/dpd-<section>.json — step one of getting a report onto the
+// Debtors Collection screen:
 //
 //   npm run dpd:import -- --cd-cf "../CF-CD refer.xlsx" --apmc "../APMC + Non APMC DPD 26 sept.xlsx" \
 //                         --contacts "../debtors contact numbers.xlsx" [--as-of YYYY-MM-DD]
@@ -14,9 +15,16 @@
 // no header row are read with the main sheet's column layout, and only if every
 // row checks out against it.
 //
-// A stopgap until the backend owns this data (see src/lib/debtors.ts). The
-// output folder is git-ignored ON PURPOSE: this repo is public and these are
-// customer balances. Keep it out of commits and out of deploys.
+// The screen does NOT read this file. It reads the collections backend's
+// database, so step two is loading the JSON there, from the backend repo:
+//
+//   python scripts/load_dpd_parties.py <this repo>/debtors-data/dpd-cd-cf.json --apply
+//
+// That load takes the main list and its contact numbers; the set-aside sheets
+// and the emails stay in the JSON only.
+//
+// The output folder sits OUTSIDE public/ so the app never serves it, and is
+// git-ignored ON PURPOSE: this repo is public and these are customer balances.
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
@@ -24,7 +32,7 @@ import { fileURLToPath } from "node:url";
 import XLSX from "xlsx-js-style";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const OUT_DIR = join(ROOT, "public", "debtors-data");
+const OUT_DIR = join(ROOT, "debtors-data");
 
 // Header text, lower-cased with spaces, brackets and dots removed → report field.
 // "(< 30 days )" becomes "<30days", so the < and > still tell the ends apart.

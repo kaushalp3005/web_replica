@@ -2,9 +2,8 @@
 
 // Debtors Collection — the DPD (days past due) view: what each customer owes,
 // split by how long it has been outstanding, in two sections: CD-CF and
-// APMC + Non-APMC. Reads the reports through lib/debtors, which for now serves
-// JSON converted from the Tally Excel exports (see that file for the swap to
-// the backend).
+// APMC + Non-APMC. The parties come from the collections backend's database
+// (lib/debtor-calls loadDpdReport) and from nowhere else.
 //
 // Admin-only, like its tile in lib/modules: scoped roles are bounced by
 // useRequireModuleAccess, and any other non-admin gets the no-access panel.
@@ -15,7 +14,8 @@ import { Suspense, useEffect, useRef, useState, type KeyboardEvent } from "react
 import { useRouter, useSearchParams } from "next/navigation";
 import { BackLink } from "@/components/BackLink";
 import { useIsAdmin, useMe, useRequireAuth, useRequireModuleAccess } from "@/lib/user";
-import { compactInr, fetchDpdReport, totalsOf, type DpdReport, type DpdSectionKey } from "@/lib/debtors";
+import { compactInr, totalsOf, type DpdReport, type DpdSectionKey } from "@/lib/debtors";
+import { loadDpdReport } from "@/lib/debtor-calls";
 import { DebtorsChrome } from "./_chrome";
 import { DpdSection } from "./_DpdSection";
 import { SECTIONS, type SectionDef } from "./_sections";
@@ -62,13 +62,13 @@ function DebtorsCollectionScreen() {
     if (!authed || !isAdmin) return;
     const ctrl = new AbortController();
     for (const s of SECTIONS) {
-      fetchDpdReport(s.key, ctrl.signal)
+      loadDpdReport(s.key, ctrl.signal)
         .then((report) => {
           setLoads((prev) => ({ ...prev, [s.key]: report ? { status: "ready", report } : { status: "missing" } }));
         })
         .catch((err: unknown) => {
           if (ctrl.signal.aborted) return;
-          const message = err instanceof Error ? err.message : "Couldn't load the report.";
+          const message = err instanceof Error ? err.message : "Couldn't load the parties from the database.";
           setLoads((prev) => ({ ...prev, [s.key]: { status: "error", message } }));
         });
     }
@@ -187,13 +187,16 @@ function SectionBody({ state, def, onRetry }: { state: LoadState; def: SectionDe
     return <Notice tall>Loading the {def.label} report…</Notice>;
   }
   if (state.status === "missing") {
+    const CODE = "block mt-2 mx-auto w-fit max-w-full overflow-x-auto rounded bg-[var(--surface-divider)] px-2 py-1 text-[12px] text-[var(--text-primary)]";
     return (
       <Notice tall>
         <span className="block font-semibold text-[var(--text-primary)]">No {def.label} report yet</span>
-        <span className="block mt-1">Import the DPD Excel export for this section, then reload this page:</span>
-        <code className="block mt-2 mx-auto w-fit max-w-full overflow-x-auto rounded bg-[var(--surface-divider)] px-2 py-1 text-[12px] text-[var(--text-primary)]">
-          npm run dpd:import -- --{def.key} &quot;&lt;file&gt;&quot;
-        </code>
+        <span className="block mt-1">
+          The database has no {def.label} parties. Import the DPD Excel export, load it into the database, then
+          reload this page:
+        </span>
+        <code className={CODE}>npm run dpd:import -- --{def.key} &quot;&lt;file&gt;&quot;</code>
+        <code className={CODE}>python scripts/load_dpd_parties.py debtors-data/dpd-{def.key}.json --apply</code>
       </Notice>
     );
   }
