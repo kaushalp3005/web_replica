@@ -32,6 +32,10 @@ export type Ageing = Record<AgeBucketKey, number>;
 export type DpdDimension = "division" | "salesPerson" | "type" | "broker";
 
 export interface DpdParty {
+  /** The party's id in the database (collection_parties.party_id). Calls, call
+   *  summaries and contact-number changes are all addressed by it — never by a
+   *  name rebuilt here, which would miss a row somebody added by hand. */
+  id: string;
   customer: string;
   /** Total outstanding — the report's own "Pending Bills" figure. */
   pending: number;
@@ -109,10 +113,11 @@ function asRecord(v: unknown): Record<string, unknown> | null {
   return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 }
 
-function toParty(v: unknown): DpdParty | null {
+function toParty(section: DpdSectionKey, v: unknown): DpdParty | null {
   const r = asRecord(v);
   const customer = r ? toText(r.customer) : null;
   if (!r || !customer) return null;
+  const division = toText(r.division);
   const a = asRecord(r.ageing) ?? {};
   const ageing: Ageing = {
     lt30: toNumber(a.lt30),
@@ -121,16 +126,44 @@ function toParty(v: unknown): DpdParty | null {
     gt90: toNumber(a.gt90),
   };
   return {
+    // Every row has an id; the slug is only for a reply that somehow lacks one.
+    id: toText(r.id) ?? partyKey(section, { customer, division }),
     customer,
     pending: r.pending == null ? BUCKET_KEYS.reduce((s, k) => s + ageing[k], 0) : toNumber(r.pending),
     ageing,
-    division: toText(r.division),
+    division,
     salesPerson: toText(r.salesPerson),
     type: toText(r.type),
     broker: toText(r.broker),
     remarks: toNote(r.remarks),
     phone: toPhone(r.phone),
   };
+}
+
+/** One row of collection_parties, under the database's own column names
+ *  (cd_cf, below_30_days, contact_number …), as a DpdParty. null for anything
+ *  that is not a row with a customer. */
+export function partyFromDatabase(section: DpdSectionKey, v: unknown): DpdParty | null {
+  const row = asRecord(v);
+  return row
+    ? toParty(section, {
+        id: row.party_id,
+        customer: row.customer,
+        pending: row.outstanding,
+        ageing: {
+          lt30: row.below_30_days,
+          d30to60: row.days_30_to_60,
+          d60to90: row.days_60_to_90,
+          gt90: row.above_90_days,
+        },
+        division: row.cd_cf,
+        salesPerson: row.sales_person,
+        type: row.type,
+        broker: row.broker,
+        remarks: row.remarks,
+        phone: row.contact_number,
+      })
+    : null;
 }
 
 /** The collections backend's GET /parties reply as a DpdReport, or null when
@@ -140,29 +173,7 @@ function toParty(v: unknown): DpdParty | null {
 export function reportFromDatabase(section: DpdSectionKey, raw: unknown): DpdReport | null {
   const r = asRecord(raw);
   if (!r || !Array.isArray(r.parties)) throw new Error("The parties list is not in the expected format.");
-  const parties = r.parties
-    .map((v) => {
-      const row = asRecord(v);
-      return row
-        ? toParty({
-            customer: row.customer,
-            pending: row.outstanding,
-            ageing: {
-              lt30: row.below_30_days,
-              d30to60: row.days_30_to_60,
-              d60to90: row.days_60_to_90,
-              gt90: row.above_90_days,
-            },
-            division: row.cd_cf,
-            salesPerson: row.sales_person,
-            type: row.type,
-            broker: row.broker,
-            remarks: row.remarks,
-            phone: row.contact_number,
-          })
-        : null;
-    })
-    .filter((p): p is DpdParty => p !== null);
+  const parties = r.parties.map((v) => partyFromDatabase(section, v)).filter((p): p is DpdParty => p !== null);
   if (parties.length === 0) return null;
   return { section, loadedAt: toText(r.updated_at), parties };
 }
@@ -218,11 +229,11 @@ export function groupParties(parties: readonly DpdParty[], dim: DpdDimension, bl
 
 const slug = (v: string | null) => (v ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
-/** A party's stable id: "cd-cf:cf:bigbasket" — section, division, customer.
- *  The report has no id of its own, and a customer billed under both CF and CD
- *  is two parties. Calls and their summaries are filed under this, so it must
- *  stay identical to the collections backend's helpers.party_slug — it is
- *  the primary key of its collection_parties table. */
+/** The id the backend's report loader gives a party: "cd-cf:cf:bigbasket" —
+ *  section, division, customer (its helpers.party_slug). The report has no id
+ *  of its own, and a customer billed under both CF and CD is two parties.
+ *  The screen addresses a party by the id the database returns (DpdParty.id);
+ *  this is only the fallback for a row that came without one. */
 export function partyKey(section: DpdSectionKey, p: Pick<DpdParty, "customer" | "division">): string {
   return [slug(section), slug(p.division), slug(p.customer)].filter(Boolean).join(":");
 }

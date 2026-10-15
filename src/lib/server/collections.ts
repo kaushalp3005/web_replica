@@ -58,14 +58,18 @@ function actorOf(me: MeResponse): string {
  * @param method  the backend method
  * @param path    path under /api/collections, e.g. "/parties/<id>/summaries";
  *                the caller encodes each segment
- * @param body    for POST: the JSON to send. It is given `initiated_by` here,
- *                from the verified sign-in, overriding whatever it carried.
+ * @param body    for POST and PUT: the JSON to send. It is stamped here with
+ *                who is doing it (`actorField`), from the verified sign-in,
+ *                overriding whatever the browser put there.
+ * @param actorField  the backend's name for that: who placed a call, or who
+ *                changed a value.
  */
 export async function forwardCollections(
   request: Request,
-  method: "GET" | "DELETE" | "POST",
+  method: "GET" | "DELETE" | "POST" | "PUT",
   path: string,
   body?: Record<string, unknown>,
+  actorField: "initiated_by" | "updated_by" = "initiated_by",
 ): Promise<Response> {
   const me = await requireAdmin(request);
   if (me instanceof Response) return me;
@@ -79,13 +83,57 @@ export async function forwardCollections(
     upstream = await fetch(`${COLLECTIONS_API_URL}/api/collections${path}`, {
       method,
       headers,
-      body: body ? JSON.stringify({ ...body, initiated_by: actorOf(me) }) : undefined,
+      body: body ? JSON.stringify({ ...body, [actorField]: actorOf(me) }) : undefined,
       cache: "no-store",
     });
   } catch {
     return problem(502, "Couldn't reach the collections service. Try again.");
   }
   // Relay status and JSON as they are; the client reads `detail` on errors.
+  const reply = await upstream.arrayBuffer();
+  const out = new Headers();
+  const contentType = upstream.headers.get("content-type");
+  if (contentType) out.set("content-type", contentType);
+  return new Response(reply, { status: upstream.status, headers: out });
+}
+
+/**
+ * Forward an upload (multipart form) to the collections backend on behalf of a
+ * signed-in admin. The form is rebuilt here, so only the expected fields go on,
+ * and it is stamped with who is uploading (`uploaded_by`) from the verified
+ * sign-in.
+ *
+ * @param path   path under /api/collections, e.g. "/dpd-upload/preview"
+ * @param fields the text fields to send
+ * @param files  the files to send, by field name
+ */
+export async function forwardCollectionsUpload(
+  request: Request,
+  path: string,
+  fields: Record<string, string>,
+  files: Record<string, File>,
+): Promise<Response> {
+  const me = await requireAdmin(request);
+  if (me instanceof Response) return me;
+  if (!COLLECTIONS_API_URL || !COLLECTIONS_API_KEY) {
+    return problem(503, "The collections service is not set up on this server yet (COLLECTIONS_API_URL, COLLECTIONS_API_KEY).");
+  }
+  const form = new FormData();
+  for (const [name, value] of Object.entries(fields)) form.set(name, value);
+  form.set("uploaded_by", actorOf(me));
+  for (const [name, file] of Object.entries(files)) form.set(name, file, file.name);
+  let upstream: Response;
+  try {
+    // No Content-Type: fetch writes multipart/form-data with its own boundary.
+    upstream = await fetch(`${COLLECTIONS_API_URL}/api/collections${path}`, {
+      method: "POST",
+      headers: { "x-api-key": COLLECTIONS_API_KEY },
+      body: form,
+      cache: "no-store",
+    });
+  } catch {
+    return problem(502, "Couldn't reach the collections service. Try again.");
+  }
   const reply = await upstream.arrayBuffer();
   const out = new Headers();
   const contentType = upstream.headers.get("content-type");

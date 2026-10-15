@@ -10,7 +10,8 @@
 
 import { useMemo, useRef, useState } from "react";
 import {
-  filterParties, sortParties, totalsOf, NO_FILTER, type AgeBucketKey, type DpdDimension, type DpdFilter, type DpdReport,
+  filterParties, sortParties, totalsOf, NO_FILTER, type AgeBucketKey, type DpdDimension, type DpdFilter, type DpdParty,
+  type DpdReport,
 } from "@/lib/debtors";
 import { SummaryCard } from "./_Summary";
 import { BreakdownCard } from "./_Breakdown";
@@ -20,7 +21,16 @@ import type { SectionDef } from "./_sections";
 
 const DEFAULT_SORT: SortState = { key: "pending", dir: "desc" };
 
-export function DpdSection({ report, def }: { report: DpdReport; def: SectionDef }) {
+export function DpdSection({
+  report,
+  def,
+  onPartyChange,
+}: {
+  report: DpdReport;
+  def: SectionDef;
+  /** A party was edited on this screen: swap `before` for `after` in the report. */
+  onPartyChange: (before: DpdParty, after: DpdParty) => void;
+}) {
   const [filter, setFilter] = useState<DpdFilter>(NO_FILTER);
   const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
   const [breakdownBy, setBreakdownBy] = useState<DpdDimension>(def.defaultBreakdown ?? def.dimensions[0].field);
@@ -74,6 +84,7 @@ export function DpdSection({ report, def }: { report: DpdReport; def: SectionDef
       <PartiesList
         anchorRef={listRef}
         section={report.section}
+        onPartyChange={onPartyChange}
         all={report.parties}
         rows={rows}
         dimensions={def.dimensions}

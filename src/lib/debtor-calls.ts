@@ -9,7 +9,9 @@
 // src/lib/server/collections.ts.
 
 import { fetchMe, readApiErrorMessage, tokenStore } from "@/lib/auth";
-import { partyKey, reportFromDatabase, type DpdParty, type DpdReport, type DpdSectionKey } from "@/lib/debtors";
+import {
+  partyFromDatabase, reportFromDatabase, type AgeBucketKey, type DpdParty, type DpdReport, type DpdSectionKey,
+} from "@/lib/debtors";
 
 export interface CallSummary {
   /** The call this summary came from. */
@@ -108,6 +110,180 @@ export async function deleteCallSummary(partyKey: string, summaryId: string): Pr
   throw new Error(await readApiErrorMessage(res, `Couldn't delete the summary (HTTP ${res.status}).`));
 }
 
+// ── Excel export ─────────────────────────────────────────────────────────────
+
+/** One party as the export endpoint gives it: the table's columns under the
+ *  database's names, its call summaries and its calls, newest first. */
+export interface DpdExportParty extends DpdAmounts {
+  party_id: string;
+  customer: string;
+  cd_cf: string | null;
+  sales_person: string | null;
+  type: string | null;
+  broker: string | null;
+  remarks: string | null;
+  contact_number: string | null;
+  call_summary: {
+    id: string; date: string; at: string; summary: string; status: string | null; disposition: string | null;
+    promise_date: string | null; promise_amount: number | null; is_test: boolean;
+  }[];
+  calls: {
+    id: string; date: string | null; created_at: string | null; status: string | null; is_test: boolean;
+    disposition: string | null; promise_date: string | null; promise_amount: number | null; duration_sec: number | null;
+    callback_time: string | null; dispute_reason: string | null;
+    conversation: { role?: string; en_text?: string; indic_text?: string }[] | null;
+  }[];
+}
+
+/** A tab's parties with their call summaries and calls, for the Excel export. */
+export async function fetchDpdExport(section: DpdSectionKey): Promise<DpdExportParty[]> {
+  const res = await collectionsFetch(`/api/collections/export?section=${encodeURIComponent(section)}`);
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, `The export failed (HTTP ${res.status}).`));
+  const data = (await res.json().catch(() => null)) as { parties?: unknown } | null;
+  if (!data || !Array.isArray(data.parties)) throw new Error("The export is not in the expected format.");
+  return data.parties as DpdExportParty[];
+}
+
+// ── Uploading Tally's raw export ─────────────────────────────────────────────
+
+/** The five figures of a row, under the database's column names. */
+export interface DpdAmounts {
+  outstanding: number;
+  below_30_days: number;
+  days_30_to_60: number;
+  days_60_to_90: number;
+  above_90_days: number;
+}
+
+/** What an upload would do to a section's DPD — or, after apply, what it did. */
+export interface DpdUploadPlan {
+  section: DpdSectionKey;
+  files: { division: "CF" | "CD" | null; company: string | null; period: string | null; rows: number; debit: number; credit: number }[];
+  /** Customers already in the DPD: new figures, everything else kept. */
+  updated: { party_id: string; customer: string; division: string | null; sales_person: string | null; before: DpdAmounts; after: DpdAmounts }[];
+  /** Customers that owe but are not in the DPD: added only when ticked. */
+  new: {
+    party_id: string; customer: string; division: string | null; sales_person: string | null; type: string | null;
+    broker: string | null; amounts: DpdAmounts; reason: string; include_by_default: boolean;
+  }[];
+  /** In the DPD but owing nothing now: removed, or kept with dues at zero when it has calls. */
+  dropped: { party_id: string; customer: string; division: string | null; outstanding_before: number; has_history: boolean; why: string }[];
+  /** Ledgers that are never DPD customers, and why. */
+  left_out: { division: string | null; customer: string; where: string; debit: number; credit: number; net: number; reason: string }[];
+  warnings: string[];
+  /** After apply only. */
+  result?: { updated: number; added: number; removed: number; kept_with_history: number; not_added: number; left_out: number };
+}
+
+/** The files of one upload: CF and/or CD for the CD-CF tab, one file for APMC + Non-APMC. */
+export interface DpdUploadFiles {
+  cf?: File | null;
+  cd?: File | null;
+  apmc?: File | null;
+}
+
+function uploadForm(section: DpdSectionKey, files: DpdUploadFiles, include?: string[]): FormData {
+  const form = new FormData();
+  form.set("section", section);
+  if (files.cf) form.set("cf_file", files.cf, files.cf.name);
+  if (files.cd) form.set("cd_file", files.cd, files.cd.name);
+  if (files.apmc) form.set("apmc_file", files.apmc, files.apmc.name);
+  if (include) form.set("include", JSON.stringify(include));
+  return form;
+}
+
+async function upload(step: "preview" | "apply", form: FormData): Promise<DpdUploadPlan> {
+  const res = await collectionsFetch(`/api/collections/upload?step=${step}`, { method: "POST", body: form });
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, `The upload failed (HTTP ${res.status}).`));
+  const plan = (await res.json().catch(() => null)) as DpdUploadPlan | null;
+  if (!plan || !Array.isArray(plan.updated)) throw new Error("The reply to the upload is not in the expected format.");
+  return plan;
+}
+
+/** What uploading these files would change. Writes nothing. */
+export function previewDpdUpload(section: DpdSectionKey, files: DpdUploadFiles): Promise<DpdUploadPlan> {
+  return upload("preview", uploadForm(section, files));
+}
+
+/** Replace the section's DPD (the part the files cover) with what they say.
+ *  `include` is the party_ids of the new customers to add. */
+export function applyDpdUpload(section: DpdSectionKey, files: DpdUploadFiles, include: string[]): Promise<DpdUploadPlan> {
+  return upload("apply", uploadForm(section, files, include));
+}
+
+// ── Editing a row ────────────────────────────────────────────────────────────
+
+/** What was changed on a row: only the fields that differ from what is saved.
+ *  A text field set to "" is cleared (the customer name cannot be). */
+export interface PartyChanges {
+  customer?: string;
+  division?: string;
+  salesPerson?: string;
+  type?: string;
+  broker?: string;
+  pending?: number;
+  ageing?: Partial<Record<AgeBucketKey, number>>;
+  remarks?: string;
+  phone?: string;
+}
+
+const BUCKET_COLUMN: Record<AgeBucketKey, string> = {
+  lt30: "below_30_days",
+  d30to60: "days_30_to_60",
+  d60to90: "days_60_to_90",
+  gt90: "above_90_days",
+};
+
+/** Save an edited row and return it as the database now has it. Only the
+ *  fields in `changes` are written. The backend refuses — with a message worth
+ *  showing — a blank customer name, or a contact number nobody could dial.
+ *
+ *  The next report import for the section writes the report's values over an
+ *  edit again, all but the contact number: an edit is a correction until the
+ *  report catches up. */
+export async function saveParty(section: DpdSectionKey, party: DpdParty, changes: PartyChanges): Promise<DpdParty> {
+  const body: Record<string, unknown> = {};
+  if (changes.customer !== undefined) body.customer = changes.customer;
+  if (changes.division !== undefined) body.cd_cf = changes.division;
+  if (changes.salesPerson !== undefined) body.sales_person = changes.salesPerson;
+  if (changes.type !== undefined) body.type = changes.type;
+  if (changes.broker !== undefined) body.broker = changes.broker;
+  if (changes.pending !== undefined) body.outstanding = changes.pending;
+  for (const [bucket, amount] of Object.entries(changes.ageing ?? {}) as [AgeBucketKey, number][]) {
+    body[BUCKET_COLUMN[bucket]] = amount;
+  }
+  if (changes.remarks !== undefined) body.remarks = changes.remarks;
+  if (changes.phone !== undefined) body.contact_number = changes.phone;
+
+  const res = await collectionsFetch(`/api/collections/party?party=${encodeURIComponent(party.id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, `Couldn't save the changes (HTTP ${res.status}).`));
+  const saved = partyFromDatabase(section, await res.json().catch(() => null));
+  if (!saved) throw new Error("The changes were saved but the row did not come back.");
+  return saved;
+}
+
+// ── Contact number ───────────────────────────────────────────────────────────
+
+/** Change the number the agent calls a party on; blank clears it. Returns the
+ *  number as saved (tidied), or null when cleared. The text is free-form —
+ *  "98200 12345 / 96112 74235" — but must hold at least one Indian mobile
+ *  number; the backend refuses anything else with a message worth showing.
+ *  A number saved here is never overwritten by a report import. */
+export async function saveContactNumber(party: DpdParty, contactNumber: string): Promise<string | null> {
+  const res = await collectionsFetch(`/api/collections/contact?party=${encodeURIComponent(party.id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ contact_number: contactNumber }),
+  });
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, `Couldn't save the number (HTTP ${res.status}).`));
+  const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+  return data ? text(data.contact_number) : null;
+}
+
 // ── Calls ────────────────────────────────────────────────────────────────────
 
 export type CallStatus = "initiated" | "connected" | "no_answer" | "busy" | "failed" | "unknown";
@@ -159,7 +335,7 @@ function toTurns(v: unknown): ConversationTurn[] {
  *  mobile number, a call already in progress, a call too recently, or it is
  *  outside calling hours. */
 export async function placeCall(section: DpdSectionKey, party: DpdParty): Promise<PlacedCall> {
-  const res = await collectionsFetch(`/api/collections/call?party=${encodeURIComponent(partyKey(section, party))}`, {
+  const res = await collectionsFetch(`/api/collections/call?party=${encodeURIComponent(party.id)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

@@ -89,12 +89,27 @@ function Conversation({ callId }: { callId: string }) {
   );
 }
 
+/** The line a summary becomes in the Remarks: "12 Oct 2026: Promised 5 lakh by 20 October." */
+export function remarkLine(s: CallSummary): string {
+  return `${formatAsOf(s.date) ?? s.date}: ${s.summary.replace(/\s+/g, " ").trim()}`;
+}
+
 /** Mount with `key={partyKey}` so each party starts from its own load. */
-export function CallSummaries({ partyKey }: { partyKey: string }) {
+export function CallSummaries({
+  partyKey,
+  remarks,
+  onAddToRemarks,
+}: {
+  partyKey: string;
+  /** The party's remarks now: a summary already in them is shown as added. */
+  remarks: string | null;
+  /** Add a summary to the party's remarks; throws with a message to show if it can't. */
+  onAddToRemarks: (s: CallSummary) => Promise<void>;
+}) {
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
-  // The entry whose Delete was pressed and is waiting for a yes.
-  const [confirming, setConfirming] = useState<string | null>(null);
+  // The entry whose Delete or Add to remarks was pressed and is waiting for a yes.
+  const [confirming, setConfirming] = useState<{ id: string; action: "delete" | "remark" } | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
@@ -112,6 +127,19 @@ export function CallSummaries({ partyKey }: { partyKey: string }) {
   function retry() {
     setState({ status: "loading" });
     setAttempt((n) => n + 1);
+  }
+
+  async function addToRemarks(s: CallSummary) {
+    setDeleting(s.id);
+    setDeleteError(null);
+    try {
+      await onAddToRemarks(s);
+      setConfirming(null);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Couldn't add it to the remarks.");
+    } finally {
+      setDeleting(null);
+    }
   }
 
   async function remove(id: string) {
@@ -151,8 +179,9 @@ export function CallSummaries({ partyKey }: { partyKey: string }) {
         <ul role="list" className="mt-1.5 space-y-2">
           {state.items.map((s) => {
             const promise = promiseText(s);
-            const asking = confirming === s.id;
+            const asking = confirming?.id === s.id ? confirming.action : null;
             const busy = deleting === s.id;
+            const inRemarks = Boolean(remarks && remarks.includes(remarkLine(s)));
             return (
               <li key={s.id} className="rounded-[2px] border border-[var(--surface-divider)] bg-[var(--surface-subtle)] px-2.5 py-2">
                 <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
@@ -162,7 +191,22 @@ export function CallSummaries({ partyKey }: { partyKey: string }) {
                     {s.disposition ? <Pill>{dispositionLabel(s.disposition)}</Pill> : null}
                     {s.isTest ? <Pill>Test call</Pill> : null}
                   </p>
-                  {asking ? (
+                  {asking === "remark" ? (
+                    <span className="flex items-center gap-2 text-[12px]">
+                      <span className="text-[var(--text-secondary)]">Add this summary to the remarks?</span>
+                      <button type="button" disabled={busy} onClick={() => setConfirming(null)} className={LINK}>
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => addToRemarks(s)}
+                        className="h-6 px-2 rounded-[2px] bg-[var(--aws-orange)] text-[12px] font-semibold text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-60"
+                      >
+                        {busy ? "Adding…" : "Add"}
+                      </button>
+                    </span>
+                  ) : asking === "delete" ? (
                     <span className="flex items-center gap-2 text-[12px]">
                       <span className="text-[var(--text-secondary)]">Delete this summary?</span>
                       <button type="button" disabled={busy} onClick={() => setConfirming(null)} className={LINK}>
@@ -178,17 +222,34 @@ export function CallSummaries({ partyKey }: { partyKey: string }) {
                       </button>
                     </span>
                   ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDeleteError(null);
-                        setConfirming(s.id);
-                      }}
-                      aria-label={`Delete the summary of ${formatAsOf(s.date) ?? s.date}`}
-                      className="text-[12px] font-medium text-[var(--text-secondary)] hover:text-[#b0280e] hover:underline"
-                    >
-                      Delete
-                    </button>
+                    <span className="flex items-center gap-3">
+                      {inRemarks ? (
+                        <span className="text-[12px] text-[var(--text-muted)]">In remarks ✓</span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDeleteError(null);
+                            setConfirming({ id: s.id, action: "remark" });
+                          }}
+                          aria-label={`Add the summary of ${formatAsOf(s.date) ?? s.date} to the remarks`}
+                          className="text-[12px] font-medium text-[var(--aws-link)] hover:underline"
+                        >
+                          Add to remarks
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDeleteError(null);
+                          setConfirming({ id: s.id, action: "delete" });
+                        }}
+                        aria-label={`Delete the summary of ${formatAsOf(s.date) ?? s.date}`}
+                        className="text-[12px] font-medium text-[var(--text-secondary)] hover:text-[#b0280e] hover:underline"
+                      >
+                        Delete
+                      </button>
+                    </span>
                   )}
                 </div>
                 <p className="mt-1.5 text-[12px] leading-[18px] text-[var(--text-primary)] whitespace-pre-line break-words">{s.summary}</p>

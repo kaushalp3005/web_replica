@@ -2,8 +2,9 @@
 
 // The "Call now" sheet for one party. Its main action hands the call to the
 // Sarvam Collections agent (_AgentCall.tsx); dialling the number yourself is
-// still there. Under them: the number(s), the dues to talk about and the
-// collection remarks, so whoever is on the call has it all in front of them.
+// still there. Under them: the contact number, which can be changed here
+// (_ContactNumber.tsx), the dues to talk about and the collection remarks, so
+// whoever is on the call has it all in front of them.
 //
 // Numbers are the party's contact_number in the database (joined in from the
 // debtors contact list when the report is imported). Many parties have none on
@@ -15,10 +16,11 @@
 
 import { useEffect, useRef } from "react";
 import {
-  AGE_BUCKETS, formatInr, hasDues, partyKey, phoneNumbers, telHref, dimensionValue, type DpdParty, type DpdSectionKey,
+  AGE_BUCKETS, formatInr, hasDues, phoneNumbers, telHref, dimensionValue, type DpdParty, type DpdSectionKey,
 } from "@/lib/debtors";
 import { AgeingBar, PhoneIcon, Remark, Swatch, isFlag } from "./_ui";
 import { AgentCall } from "./_AgentCall";
+import { ContactNumber } from "./_ContactNumber";
 import type { DimensionDef } from "./_sections";
 
 export function CallDialog({
@@ -27,15 +29,18 @@ export function CallDialog({
   dimensions,
   onClose,
   onViewSummary,
+  onContactSaved,
 }: {
   /** The party to call; null keeps the dialog closed. */
   party: DpdParty | null;
-  /** The section the party is in: part of the id its calls are filed under. */
+  /** The tab the party is on; sent with a call so the backend files it there. */
   section: DpdSectionKey;
   dimensions: readonly DimensionDef[];
   onClose: () => void;
   /** Open this party's Summary sheet, where a finished call's summary and conversation are. */
   onViewSummary: (p: DpdParty) => void;
+  /** The party's contact number was changed here (null: cleared). */
+  onContactSaved: (p: DpdParty, phone: string | null) => void;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -93,40 +98,18 @@ export function CallDialog({
 
           <div className="px-5 py-4 space-y-4">
             <AgentCall
-              key={partyKey(section, party)}
+              key={party.id}
               section={section}
               party={party}
               dialable={numbers.length > 0}
               onViewSummary={() => onViewSummary(party)}
             />
 
-            <div>
-              <p className="text-[11px] font-medium text-[var(--text-secondary)]">
-                {numbers.length > 1 ? "Phone numbers" : "Phone"}
-              </p>
-              {numbers.length > 0 ? (
-                <ul className="mt-1 space-y-1">
-                  {numbers.map((n) => (
-                    <li key={n} className="flex items-center justify-between gap-3">
-                      <span className="text-[16px] font-semibold tabular-nums text-[var(--text-primary)] select-all">{n}</span>
-                      {numbers.length > 1 ? (
-                        <a
-                          href={telHref(n) ?? undefined}
-                          aria-label={`Call ${n}`}
-                          className="shrink-0 text-[12px] font-medium text-[var(--aws-link)] hover:underline"
-                        >
-                          Call
-                        </a>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-1 text-[13px] text-[var(--text-secondary)]">
-                  No phone number on file for this party yet.
-                </p>
-              )}
-            </div>
+            <ContactNumber
+              key={party.id}
+              party={party}
+              onSaved={(phone) => onContactSaved(party, phone)}
+            />
 
             {party.remarks && !isFlag(party.remarks) ? (
               <div>

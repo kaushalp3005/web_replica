@@ -17,7 +17,9 @@ import {
 import { AgeingBar, PhoneIcon, Pill, Remark, Swatch } from "./_ui";
 import { CallDialog } from "./_CallDialog";
 import { PartySummaryDialog } from "./_SummaryDialog";
-import type { DimensionDef } from "./_sections";
+import { EditPartyDialog } from "./_EditPartyDialog";
+import { SECTIONS, type DimensionDef } from "./_sections";
+import { exportPartiesToExcel } from "./_export";
 
 export interface SortState {
   key: DpdSortKey;
@@ -88,9 +90,31 @@ function SummaryButton({ party, onSummary, size }: { party: DpdParty; onSummary:
   );
 }
 
+/** Opens the edit sheet for one party's row. Quietest of the three: it is the one used least. */
+function EditButton({ party, onEdit, size }: { party: DpdParty; onEdit: (p: DpdParty) => void; size: "sm" | "md" }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onEdit(party)}
+      aria-haspopup="dialog"
+      aria-label={`Edit: ${party.customer}`}
+      className={[
+        "inline-flex items-center justify-center gap-1.5 rounded-[2px] border border-[var(--aws-border-strong)] bg-white font-semibold text-[var(--text-primary)] whitespace-nowrap transition-colors hover:bg-[var(--surface-subtle)]",
+        size === "sm" ? "h-7 px-2.5 text-[12px]" : "h-9 px-3.5 text-[13px]",
+      ].join(" ")}
+    >
+      <svg aria-hidden viewBox="0 0 16 16" className="w-3.5 h-3.5">
+        <path d="M10.5 2.5 13.5 5.5 5.5 13.5 2 14 2.5 10.5Z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+      </svg>
+      Edit
+    </button>
+  );
+}
+
 export function PartiesList({
   anchorRef,
   section,
+  onPartyChange,
   all,
   rows,
   dimensions,
@@ -104,6 +128,8 @@ export function PartiesList({
   /** Scrolled to when a breakdown row narrows the list. */
   anchorRef: RefObject<HTMLElement | null>;
   section: DpdSectionKey;
+  /** A party was edited on this screen: swap `before` for `after` in the section's data. */
+  onPartyChange: (before: DpdParty, after: DpdParty) => void;
   /** Every party in the section — the filter options come from these. */
   all: readonly DpdParty[];
   /** The parties to show, already filtered and sorted. */
@@ -124,6 +150,23 @@ export function PartiesList({
   const filterKey = JSON.stringify([filter, sort]);
   const [calling, setCalling] = useState<DpdParty | null>(null);
   const [summarising, setSummarising] = useState<DpdParty | null>(null);
+  const [editing, setEditing] = useState<DpdParty | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportNote, setExportNote] = useState<{ error: boolean; text: string } | null>(null);
+
+  async function exportExcel() {
+    setExporting(true);
+    setExportNote(null);
+    try {
+      const label = SECTIONS.find((s) => s.key === section)?.label ?? section;
+      const n = await exportPartiesToExcel({ section, label, dimensions, rows, filtered });
+      setExportNote({ error: false, text: `Exported ${n} ${n === 1 ? "party" : "parties"}.` });
+    } catch (err) {
+      setExportNote({ error: true, text: err instanceof Error ? err.message : "The export failed." });
+    } finally {
+      setExporting(false);
+    }
+  }
 
   return (
     <section
@@ -131,20 +174,39 @@ export function PartiesList({
       aria-labelledby="dpd-parties-title"
       className="scroll-mt-4 bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.12)] p-4 sm:p-5"
     >
-      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 mb-3">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 mb-3">
         <h2 id="dpd-parties-title" className="text-[14px] font-semibold text-[var(--text-primary)]">Parties</h2>
-        <p aria-live="polite" className="text-[12px] text-[var(--text-secondary)] tabular-nums">
-          {filtered ? (
-            <>
-              Showing <span className="font-semibold text-[var(--text-primary)]">{rows.length}</span> of {all.length}
-            </>
-          ) : (
-            <>{all.length} parties</>
-          )}
-          {" · "}
-          <span className="font-semibold text-[var(--text-primary)]">{compactInr(totals.pending)}</span>
-        </p>
+        <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
+          <p aria-live="polite" className="text-[12px] text-[var(--text-secondary)] tabular-nums">
+            {filtered ? (
+              <>
+                Showing <span className="font-semibold text-[var(--text-primary)]">{rows.length}</span> of {all.length}
+              </>
+            ) : (
+              <>{all.length} parties</>
+            )}
+            {" · "}
+            <span className="font-semibold text-[var(--text-primary)]">{compactInr(totals.pending)}</span>
+          </p>
+          <button
+            type="button"
+            onClick={exportExcel}
+            disabled={exporting || rows.length === 0}
+            title={filtered ? "Exports the parties the filters are showing" : "Exports every party on this tab"}
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[12px] font-semibold text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-subtle)] disabled:opacity-50"
+          >
+            <svg aria-hidden viewBox="0 0 16 16" className="w-3.5 h-3.5">
+              <path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M2.5 10.5v2.5a.5.5 0 0 0 .5.5h10a.5.5 0 0 0 .5-.5v-2.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            {exporting ? "Exporting…" : filtered ? `Export ${rows.length} to Excel` : "Export to Excel"}
+          </button>
+        </div>
       </div>
+      {exportNote ? (
+        <p role={exportNote.error ? "alert" : "status"} className={`-mt-1.5 mb-3 text-right text-[12px] ${exportNote.error ? "text-[#b0280e]" : "text-[var(--text-secondary)]"}`}>
+          {exportNote.text}
+        </p>
+      ) : null}
 
       <div className="flex flex-wrap items-end gap-2 sm:gap-3 mb-4">
         <div className="w-full sm:w-auto sm:flex-1 sm:min-w-[220px] sm:max-w-[340px]">
@@ -218,6 +280,7 @@ export function PartiesList({
             onSort={onSort}
             onCall={setCalling}
             onSummary={setSummarising}
+            onEdit={setEditing}
           />
           <PartyCards
             key={filterKey}
@@ -227,6 +290,7 @@ export function PartiesList({
             bucket={filter.bucket}
             onCall={setCalling}
             onSummary={setSummarising}
+            onEdit={setEditing}
           />
         </>
       )}
@@ -239,12 +303,31 @@ export function PartiesList({
           setCalling(null);
           setSummarising(p);
         }}
+        onContactSaved={(p, phone) => {
+          const after = { ...p, phone };
+          onPartyChange(p, after);
+          // The sheet stays open on the same party, now with its new number.
+          setCalling(after);
+        }}
+      />
+      <EditPartyDialog
+        party={editing}
+        section={section}
+        dimensions={dimensions}
+        onClose={() => setEditing(null)}
+        onSaved={(before, after) => {
+          onPartyChange(before, after);
+          setEditing(null);
+        }}
       />
       <PartySummaryDialog
         party={summarising}
         section={section}
-        all={all}
-        dimensions={dimensions}
+        onPartyChange={(before, after) => {
+          onPartyChange(before, after);
+          // The sheet stays open on the same party, now with its new remarks.
+          setSummarising(after);
+        }}
         onClose={() => setSummarising(null)}
         onCall={(p) => {
           setSummarising(null);
@@ -363,6 +446,7 @@ function PartiesTable({
   onSort,
   onCall,
   onSummary,
+  onEdit,
 }: {
   rows: readonly DpdParty[];
   totals: ReturnType<typeof totalsOf>;
@@ -373,6 +457,7 @@ function PartiesTable({
   onSort: (s: SortState) => void;
   onCall: (p: DpdParty) => void;
   onSummary: (p: DpdParty) => void;
+  onEdit: (p: DpdParty) => void;
 }) {
   const header = (key: DpdSortKey, label: string, align: "left" | "right", swatch?: AgeBucketKey) => {
     const active = sort.key === key;
@@ -450,6 +535,7 @@ function PartiesTable({
               ))}
               <td className={`${TD} text-center`}>
                 <span className="inline-flex items-center gap-1.5">
+                  <EditButton party={p} onEdit={onEdit} size="sm" />
                   <SummaryButton party={p} onSummary={onSummary} size="sm" />
                   <CallNowButton party={p} onCall={onCall} size="sm" />
                 </span>
@@ -488,6 +574,7 @@ function PartyCards({
   bucket,
   onCall,
   onSummary,
+  onEdit,
 }: {
   rows: readonly DpdParty[];
   keyOf: Map<DpdParty, number>;
@@ -495,6 +582,7 @@ function PartyCards({
   bucket: AgeBucketKey | null;
   onCall: (p: DpdParty) => void;
   onSummary: (p: DpdParty) => void;
+  onEdit: (p: DpdParty) => void;
 }) {
   const [limit, setLimit] = useState(CARD_PAGE);
   const shown = rows.slice(0, limit);
@@ -542,11 +630,13 @@ function PartyCards({
                   );
                 })}
               </dl>
-              <div className="mt-2.5 pt-2.5 border-t border-[var(--surface-divider)] flex items-center justify-between gap-3">
+              {/* Three buttons do not fit beside the number on a phone: the row wraps, buttons to the right. */}
+              <div className="mt-2.5 pt-2.5 border-t border-[var(--surface-divider)] flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
                 <span className="min-w-0 truncate text-[12px] tabular-nums text-[var(--text-secondary)]" title={p.phone ?? undefined}>
                   {p.phone ?? ""}
                 </span>
-                <span className="shrink-0 flex items-center gap-2">
+                <span className="ml-auto flex flex-wrap items-center justify-end gap-2">
+                  <EditButton party={p} onEdit={onEdit} size="md" />
                   <SummaryButton party={p} onSummary={onSummary} size="md" />
                   <CallNowButton party={p} onCall={onCall} size="md" />
                 </span>

@@ -21,7 +21,7 @@ function check(name: string, got: unknown, want: unknown) {
 function party(customer: string, ageing: [number, number, number, number], more: Partial<DpdParty> = {}): DpdParty {
   const [lt30, d30to60, d60to90, gt90] = ageing;
   return {
-    customer, pending: lt30 + d30to60 + d60to90 + gt90, ageing: { lt30, d30to60, d60to90, gt90 },
+    id: `test:${customer}`, customer, pending: lt30 + d30to60 + d60to90 + gt90, ageing: { lt30, d30to60, d60to90, gt90 },
     division: null, salesPerson: null, type: null, broker: null, remarks: null, phone: null, ...more,
   };
 }
@@ -156,7 +156,7 @@ const DB = reportFromDatabase("cd-cf", {
   ],
 });
 check("database rows map onto the party shape", DB?.parties, [{
-  customer: "Bigbasket", pending: 2960823.35, ageing: { lt30: 87014, d30to60: 0, d60to90: 78.93, gt90: 2873730.42 },
+  id: "cd-cf:cf:bigbasket", customer: "Bigbasket", pending: 2960823.35, ageing: { lt30: 87014, d30to60: 0, d60to90: 78.93, gt90: 2873730.42 },
   division: "CF", salesPerson: "Prashant Pal", type: null, broker: null, remarks: "Follow up\nweekly",
   phone: "99805 42121 / 96112 74235",
 }]);
@@ -167,6 +167,15 @@ check("a section with nothing loaded is no report", reportFromDatabase("apmc", {
 let rejected = false;
 try { reportFromDatabase("cd-cf", { detail: "nope" }); } catch { rejected = true; }
 check("a reply without a parties list is rejected", rejected, true);
+
+// ── a party is addressed by the id the database gives it ──
+const HAND = reportFromDatabase("apmc", { parties: [
+  { party_id: "A-003", section: "apmc/non-apmc", customer: "Mehta Bros", type: "APMC", broker: "K Broker", outstanding: 7000, above_90_days: 7000 },
+  { customer: "No Id Traders", outstanding: 5 },
+] });
+check("a row added by hand keeps its own id", HAND?.parties[0].id, "A-003");
+check("…and its APMC columns", [HAND?.parties[0].type, HAND?.parties[0].broker, HAND?.section], ["APMC", "K Broker", "apmc"]);
+check("a row without an id falls back to the loader's slug", HAND?.parties[1].id, "apmc:no-id-traders");
 
 // ── party ids: must match the collections backend's party_slug ──
 check("section, division and customer", partyKey("cd-cf", party("Bigbasket", [1, 0, 0, 0], { division: "CF" })), "cd-cf:cf:bigbasket");

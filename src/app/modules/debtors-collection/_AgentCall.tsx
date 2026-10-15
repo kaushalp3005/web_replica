@@ -30,7 +30,7 @@ const OUTCOME: Record<Exclude<CallStatus, "initiated">, string> = {
   unknown: "No result came back for this call",
 };
 
-/** Mount with `key={party key}` so each party starts from idle. */
+/** Mount with `key={party.id}` so each party starts from idle. */
 export function AgentCall({
   section,
   party,

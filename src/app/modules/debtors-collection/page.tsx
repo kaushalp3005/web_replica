@@ -14,10 +14,11 @@ import { Suspense, useEffect, useRef, useState, type KeyboardEvent } from "react
 import { useRouter, useSearchParams } from "next/navigation";
 import { BackLink } from "@/components/BackLink";
 import { useIsAdmin, useMe, useRequireAuth, useRequireModuleAccess } from "@/lib/user";
-import { compactInr, totalsOf, type DpdReport, type DpdSectionKey } from "@/lib/debtors";
+import { compactInr, totalsOf, type DpdParty, type DpdReport, type DpdSectionKey } from "@/lib/debtors";
 import { loadDpdReport } from "@/lib/debtor-calls";
 import { DebtorsChrome } from "./_chrome";
 import { DpdSection } from "./_DpdSection";
+import { UploadDialog } from "./_UploadDialog";
 import { SECTIONS, type SectionDef } from "./_sections";
 
 type LoadState =
@@ -55,6 +56,8 @@ function DebtorsCollectionScreen() {
 
   const [loads, setLoads] = useState<Record<DpdSectionKey, LoadState>>(ALL_LOADING);
   const [attempt, setAttempt] = useState(0);
+  // The tab whose Tally export is being uploaded; null when the upload is closed.
+  const [uploading, setUploading] = useState<SectionDef | null>(null);
   const tabRefs = useRef<Partial<Record<DpdSectionKey, HTMLButtonElement | null>>>({});
 
   // Both sections load up front: they are small, and the tabs show each total.
@@ -80,6 +83,17 @@ function DebtorsCollectionScreen() {
     setAttempt((n) => n + 1);
   }
 
+  // A party edited on the screen (its contact number) is already saved in the
+  // database; this swaps it into what is on screen, so nothing needs reloading.
+  function replaceParty(section: DpdSectionKey, before: DpdParty, after: DpdParty) {
+    setLoads((prev) => {
+      const state = prev[section];
+      if (state.status !== "ready") return prev;
+      const parties = state.report.parties.map((p) => (p === before ? after : p));
+      return { ...prev, [section]: { status: "ready", report: { ...state.report, parties } } };
+    });
+  }
+
   function selectSection(key: DpdSectionKey) {
     const href = key === SECTIONS[0].key ? "/modules/debtors-collection" : `/modules/debtors-collection?section=${key}`;
     router.replace(href, { scroll: false });
@@ -100,12 +114,27 @@ function DebtorsCollectionScreen() {
       <div className="mb-3">
         <BackLink parentHref="/modules" label="modules" />
       </div>
-      <div className="mb-5">
-        <h1 className="text-[22px] leading-[28px] font-semibold text-[var(--text-primary)]">Debtors Collection</h1>
-        <p className="text-[13px] text-[var(--text-secondary)] mt-1">
-          DPD view — what each customer owes, by how long it has been outstanding.
-        </p>
+      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-[22px] leading-[28px] font-semibold text-[var(--text-primary)]">Debtors Collection</h1>
+          <p className="text-[13px] text-[var(--text-secondary)] mt-1">
+            DPD view — what each customer owes, by how long it has been outstanding.
+          </p>
+        </div>
+        {scopeOk && isAdmin ? (
+          <button type="button" onClick={() => setUploading(active)} aria-haspopup="dialog" className="inline-flex items-center gap-2 h-9 px-3.5 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-semibold text-[var(--text-primary)] hover:bg-[var(--surface-subtle)]">
+            <UploadIcon />
+            Upload {active.label} from Tally
+          </button>
+        ) : null}
       </div>
+      <UploadDialog
+        open={uploading !== null}
+        section={uploading?.key ?? active.key}
+        label={uploading?.label ?? active.label}
+        onClose={() => setUploading(null)}
+        onApplied={retry}
+      />
 
       {!scopeOk ? null : me === null ? (
         <Notice>Checking your access…</Notice>
@@ -159,7 +188,13 @@ function DebtorsCollectionScreen() {
             aria-labelledby={`dpd-tab-${active.key}`}
             className="transition-opacity duration-300 starting:opacity-0 motion-reduce:transition-none"
           >
-            <SectionBody state={loads[active.key]} def={active} onRetry={retry} />
+            <SectionBody
+              onUpload={() => setUploading(active)}
+              state={loads[active.key]}
+              def={active}
+              onRetry={retry}
+              onPartyChange={(before, after) => replaceParty(active.key, before, after)}
+            />
           </div>
         </>
       )}
@@ -181,22 +216,34 @@ function TabSubtitle({ state }: { state: LoadState }) {
   return <>Couldn&rsquo;t load</>;
 }
 
-function SectionBody({ state, def, onRetry }: { state: LoadState; def: SectionDef; onRetry: () => void }) {
-  if (state.status === "ready") return <DpdSection report={state.report} def={def} />;
+function SectionBody({
+  state,
+  def,
+  onRetry,
+  onUpload,
+  onPartyChange,
+}: {
+  state: LoadState;
+  def: SectionDef;
+  onRetry: () => void;
+  onUpload: () => void;
+  onPartyChange: (before: DpdParty, after: DpdParty) => void;
+}) {
+  if (state.status === "ready") return <DpdSection report={state.report} def={def} onPartyChange={onPartyChange} />;
   if (state.status === "loading") {
     return <Notice tall>Loading the {def.label} report…</Notice>;
   }
   if (state.status === "missing") {
-    const CODE = "block mt-2 mx-auto w-fit max-w-full overflow-x-auto rounded bg-[var(--surface-divider)] px-2 py-1 text-[12px] text-[var(--text-primary)]";
     return (
       <Notice tall>
         <span className="block font-semibold text-[var(--text-primary)]">No {def.label} report yet</span>
         <span className="block mt-1">
-          The database has no {def.label} parties. Import the DPD Excel export, load it into the database, then
-          reload this page:
+          Upload the {def.label} Group Outstandings export from Tally to build it.
         </span>
-        <code className={CODE}>npm run dpd:import -- --{def.key} &quot;&lt;file&gt;&quot;</code>
-        <code className={CODE}>python scripts/load_dpd_parties.py debtors-data/dpd-{def.key}.json --apply</code>
+        <button type="button" onClick={onUpload} className="mt-3 inline-flex items-center gap-2 h-9 px-3.5 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-semibold text-[var(--text-primary)] hover:bg-[var(--surface-subtle)]">
+          <UploadIcon />
+          Upload {def.label} from Tally
+        </button>
       </Notice>
     );
   }
@@ -211,6 +258,14 @@ function SectionBody({ state, def, onRetry }: { state: LoadState; def: SectionDe
         Try again
       </button>
     </Notice>
+  );
+}
+
+function UploadIcon() {
+  return (
+    <svg aria-hidden viewBox="0 0 16 16" className="w-4 h-4">
+      <path d="M8 10.5V2.5M4.5 6 8 2.5 11.5 6M2.5 10.5v2.5a.5.5 0 0 0 .5.5h10a.5.5 0 0 0 .5-.5v-2.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
