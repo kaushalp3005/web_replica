@@ -94,9 +94,14 @@ function DebtorsCollectionScreen() {
     });
   }
 
+  // Not router.replace: this page is prerendered with no query, so after it is
+  // opened on ?section=apmc the router still takes the bare address for the one
+  // it is on, and replacing to it (the CD-CF tab) did nothing in production —
+  // the tab could not be clicked. history.replaceState changes the address
+  // without a server round trip, and Next keeps useSearchParams in step with it.
   function selectSection(key: DpdSectionKey) {
     const href = key === SECTIONS[0].key ? "/modules/debtors-collection" : `/modules/debtors-collection?section=${key}`;
-    router.replace(href, { scroll: false });
+    window.history.replaceState(null, "", href);
   }
 
   // Tabs pattern: arrow keys move between tabs (and select), Tab leaves the list.
