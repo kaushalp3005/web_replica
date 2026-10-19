@@ -32,6 +32,16 @@ export function inwardWarehouseChoices(
   return { options, value };
 }
 
+/** The one site a user books every inward to: set when a non-admin's access
+ *  covers exactly one site (under any spelling of it), so the Warehouse field
+ *  is filled in and fixed. Null for admins and for access to several sites
+ *  (they choose from the dropdown) or none. */
+export function lockedWarehouse(isAdmin: boolean, granted: readonly string[]): string | null {
+  if (isAdmin) return null;
+  const scoped = INWARD_WAREHOUSES.filter((w) => userHasWarehouse(granted, w));
+  return scoped.length === 1 ? scoped[0] : null;
+}
+
 /** Label printing is a cold-storage operation: Print all / Print range are
  *  offered only when the inward is booked to a cold store, under any spelling. */
 export function printsColdLabels(warehouse: string | null | undefined): boolean {

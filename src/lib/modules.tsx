@@ -197,7 +197,10 @@ export const MODULES: ModuleItem[] = [
     stat: "PO Creation & Receiving",
     route: "purchase",
     implemented: true,
-    adminOnly: true,
+    // Admins; purchase_manager and store_head through ROLE_MODULE_SCOPE; and
+    // inventory_manager (an unscoped role, so it is listed here) for Material
+    // In. The landing page shows each sub-tile only with its permission.
+    allowedRoles: ["inventory_manager"],
     Icon: PurchaseIcon,
   },
   {

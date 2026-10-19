@@ -63,9 +63,9 @@ export function ContractsTab({
   confirm: Confirm;
 }): React.JSX.Element {
   // Contract action gates (UX only — server enforces).
-  const canCreate = useHasPermission("purchase", "vendor", "contract", "create");
-  const canUpdate = useHasPermission("purchase", "vendor", "contract", "update");
-  const canDelete = useHasPermission("purchase", "vendor", "contract", "delete");
+  const canCreate = useHasPermission("vendor", "contract", null, "create");
+  const canUpdate = useHasPermission("vendor", "contract", null, "update");
+  const canDelete = useHasPermission("vendor", "contract", null, "delete");
 
   const [rows, setRows] = useState<ContractResponse[]>(initial);
   const [typeFilter, setTypeFilter] = useState("");

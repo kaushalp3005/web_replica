@@ -1,5 +1,5 @@
 // node "src/app/modules/purchase/material-in/[transaction_no]/_warehouses.test.ts"
-import { INWARD_WAREHOUSES, inwardWarehouseChoices, printsColdLabels } from "./_warehouses.ts";
+import { INWARD_WAREHOUSES, inwardWarehouseChoices, lockedWarehouse, printsColdLabels } from "./_warehouses.ts";
 
 let failures = 0;
 function check(name: string, got: unknown, want: unknown) {
@@ -42,6 +42,13 @@ check("cold stores print labels",
 check("warehouses and unknown names do not",
   ["W202", "A185", "A185 Cold", "F53", "Savla", "Dev Int", "", null, undefined].map(printsColdLabels),
   [false, false, false, false, false, false, false, false, false]);
+
+// Access to one site fixes the Warehouse; several (or admin) get the dropdown.
+check("one grant locks to its site", lockedWarehouse(false, ["D-39"]), "Savla D-39");
+check("spellings of one site still lock", lockedWarehouse(false, ["W-202", "Warehouse W202"]), "W202");
+check("two sites: choose from the dropdown", lockedWarehouse(false, ["W202", "A185"]), null);
+check("an admin is never locked", lockedWarehouse(true, ["W202"]), null);
+check("no access: nothing to lock to", lockedWarehouse(false, []), null);
 
 if (failures) { console.error(`${failures} failure(s)`); process.exit(1); }
 console.log("purchase inward warehouses: all passed");

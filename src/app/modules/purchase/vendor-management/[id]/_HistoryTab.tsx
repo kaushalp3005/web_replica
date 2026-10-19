@@ -64,7 +64,7 @@ export function HistoryTab({
   onReloadVendor: () => Promise<void>;
 }): React.JSX.Element {
   // Reverting a history entry maps to vendor/master/revert (UX gate).
-  const canRevert = useHasPermission("purchase", "vendor", "master", "revert");
+  const canRevert = useHasPermission("vendor", "master", null, "revert");
   const [entries, setEntries] = useState<VendorHistoryEntry[]>([]);
   const [opFilter, setOpFilter] = useState("");
   const [loading, setLoading] = useState(false);

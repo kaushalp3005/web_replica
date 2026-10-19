@@ -4,7 +4,7 @@
 // PO Upload is the purchase entry point on the web.
 
 import { useRouter } from "next/navigation";
-import { useRequireAuth, useHasRole, useMe, useIsAdmin } from "@/lib/user";
+import { useRequireAuth, useHasRole, useHasPermission, useMe, useIsAdmin } from "@/lib/user";
 import { roleNamesOf } from "@/lib/sample-roles";
 import { scopeAllowsRoute } from "@/lib/modules";
 import { BackLink } from "@/components/BackLink";
@@ -21,23 +21,35 @@ const SUB_MODULES: SubModule[] = [
 export default function PurchaseLandingPage() {
   const router = useRouter();
   useRequireAuth(router.replace);
-  // Admins, purchase managers, and stores (Material-In) clerks may use the
-  // Purchase module. useHasRole returns true for admins too, so this covers
-  // all three. Keep this role list in sync with ROLE_MODULE_SCOPE["purchase"]
-  // in lib/modules.tsx (both admit the same set into the Purchase tile).
-  // Call both hooks unconditionally (|| short-circuits, which would make the
-  // second call conditional and violate the rules of hooks), then combine.
+  // Admins, purchase managers, stores (Material-In) clerks and inventory
+  // managers may use the Purchase module. useHasRole returns true for admins
+  // too. Keep this role list in sync with the Purchase tile in lib/modules.tsx
+  // (ROLE_MODULE_SCOPE for the scoped roles, allowedRoles for inventory_manager).
+  // Call every hook unconditionally (|| short-circuits, which would make the
+  // later calls conditional and violate the rules of hooks), then combine.
   const isPurchaseManager = useHasRole("purchase_manager");
   const isStoreHead = useHasRole("store_head");
-  const canAccess = isPurchaseManager || isStoreHead;
+  const isInventoryManager = useHasRole("inventory_manager");
+  const canAccess = isPurchaseManager || isStoreHead || isInventoryManager;
 
-  // Per-sub-tile scope, same pattern as production/page.tsx: a role scoped to a
-  // sub-route (store_head → "purchase/material-in") reaches the tile but only
-  // its own screens. Unscoped roles + admins keep seeing all three.
+  // Each sub-tile shows only to a user holding the permission its screen works
+  // with, so a role sees exactly what it was granted (admins pass every check).
+  const canPoUpload = useHasPermission("purchase", "po", null, "create");
+  const canMaterialIn = useHasPermission("purchase", "material_in", null, "view");
+  const canVendors = useHasPermission("vendor", "master", null, "view");
+  const permitted: Record<string, boolean> = {
+    "/modules/purchase/po-creation": canPoUpload,
+    "/modules/purchase/material-in": canMaterialIn,
+    "/modules/purchase/vendor-management": canVendors,
+  };
+
+  // Per-sub-tile scope too, same pattern as production/page.tsx: a role scoped
+  // to a sub-route (store_head → "purchase/material-in") reaches the tile but
+  // only its own screens.
   const isAdmin = useIsAdmin();
   const roles = roleNamesOf(useMe());
   const visible = SUB_MODULES.filter(
-    (m) => scopeAllowsRoute(roles, isAdmin, m.route.replace("/modules/", "")),
+    (m) => permitted[m.route] && scopeAllowsRoute(roles, isAdmin, m.route.replace("/modules/", "")),
   );
 
   return (

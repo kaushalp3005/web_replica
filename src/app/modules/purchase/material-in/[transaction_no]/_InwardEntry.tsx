@@ -14,7 +14,7 @@ import { listArrivals, type ArrivalItem } from "@/lib/qc";
 import { inwardReducer, buildReceiveRequest, buildUpdateSections, buildAddSections, buildAddBoxesPayload, postedNewSectionIds, existingKey, type DraftState, type LogisticsField, type InwardAction, type SectionSeed, type PrintResolver } from "./_boxEngine";
 import { LineCard } from "./_LineCard";
 import { printLabels } from "./_labelPrint";
-import { inwardWarehouseChoices } from "./_warehouses";
+import { inwardWarehouseChoices, lockedWarehouse } from "./_warehouses";
 import { SendIntimationModal } from "../_SendIntimationModal";
 
 function matchKey(s: string | null | undefined): string {
@@ -88,6 +88,15 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
   // for it instead of starting a second save that posts the same new sections
   // again — duplicate boxes and stock.
   const saveRef = useRef<Promise<void> | null>(null);
+  // A user whose access covers one warehouse books every inward there: fill it
+  // in once the draft and the user's scope are loaded, unless the PO already
+  // has a warehouse saved.
+  const { isAdmin, warehouses } = useUserScope();
+  const lockedSite = lockedWarehouse(isAdmin, warehouses);
+  const needsWarehouse = draft != null && !draft.header.warehouse;
+  useEffect(() => {
+    if (lockedSite && needsWarehouse) dispatch({ type: "setHeader", field: "warehouse", value: lockedSite });
+  }, [lockedSite, needsWarehouse]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -449,6 +458,9 @@ function LogisticsForm({
   // falls outside the user's scope; a saved spelling of a listed site shows
   // as that site (_warehouses.ts).
   const warehouseChoice = inwardWarehouseChoices(header.warehouse, isAdmin, warehouses);
+  // Access to one warehouse: shown fixed, no dropdown (the page fills it in).
+  // Access to several, or an admin: the dropdown of those sites.
+  const lockedSite = lockedWarehouse(isAdmin, warehouses);
   return (
     <div className="bg-white border border-[var(--aws-border)] rounded-md p-4 mb-4">
       <div className="mb-3">
@@ -460,8 +472,22 @@ function LogisticsForm({
           const id = `mi-recv-${d.field}`;
           return (
             <div key={d.field} className="flex flex-col gap-1">
-              <label htmlFor={id} className="text-[11px] font-semibold text-[var(--text-primary)]">{d.label}</label>
-              {d.field === "warehouse" ? (
+              <label htmlFor={id} className="text-[11px] font-semibold text-[var(--text-primary)]">
+                {d.label}
+                {d.field === "warehouse" && lockedSite ? (
+                  <span className="font-normal text-[var(--text-muted)]"> · from your access</span>
+                ) : null}
+              </label>
+              {d.field === "warehouse" && lockedSite ? (
+                <input
+                  id={id}
+                  type="text"
+                  readOnly
+                  value={warehouseChoice.value || lockedSite}
+                  title="Set by your warehouse access"
+                  className="h-8 px-2 text-[13px] rounded-[2px] bg-[var(--surface-subtle)] border border-[var(--aws-border)] text-[var(--text-primary)] font-mono cursor-not-allowed outline-none"
+                />
+              ) : d.field === "warehouse" ? (
                 <select
                   id={id}
                   value={warehouseChoice.value}

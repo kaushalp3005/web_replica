@@ -55,9 +55,9 @@ export function BankingTab({
   confirm: Confirm;
 }): React.JSX.Element {
   // Banking action gates (UX only — server enforces).
-  const canAdd = useHasPermission("purchase", "vendor", "banking", "create");
-  const canUpdate = useHasPermission("purchase", "vendor", "banking", "update");
-  const canDelete = useHasPermission("purchase", "vendor", "banking", "delete");
+  const canAdd = useHasPermission("vendor", "banking", null, "create");
+  const canUpdate = useHasPermission("vendor", "banking", null, "update");
+  const canDelete = useHasPermission("vendor", "banking", null, "delete");
 
   const [rows, setRows] = useState<BankingResponse[]>(initial);
   const [activeOnly, setActiveOnly] = useState(false);

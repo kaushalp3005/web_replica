@@ -60,8 +60,8 @@ export default function ExistingVendorsPage(): React.JSX.Element {
   const authed = useRequireAuth(router.replace);
 
   // Row-action permission gates (UX only — server enforces).
-  const canApprove = useHasPermission("purchase", "vendor", "master", "approve");
-  const canDeleteVendor = useHasPermission("purchase", "vendor", "master", "delete");
+  const canApprove = useHasPermission("vendor", "master", null, "approve");
+  const canDeleteVendor = useHasPermission("vendor", "master", null, "delete");
 
   // Hydration gate — hold the auth branch until after mount so the SSR HTML and
   // the first client paint are byte-identical (mirrors the wizard / list pages).

@@ -19,7 +19,8 @@ import type {
   UpdateSectionPayload,
 } from "@/lib/purchase-receive";
 
-export const BOXES_PER_PAGE = 100;
+// Generated boxes of a new section shown per page.
+export const BOXES_PER_PAGE = 50;
 
 // Stores-owned logistics (po_header) fields, in display order.
 export const LOGISTICS_FIELDS = [

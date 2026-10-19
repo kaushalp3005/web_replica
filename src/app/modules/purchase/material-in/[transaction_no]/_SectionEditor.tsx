@@ -12,7 +12,7 @@
 // Range fetch the boxes from GET /{txn}/boxes/print (all, or a box_number range).
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useHasPermission } from "@/lib/user";
+import { useHasPermission, useHasRole } from "@/lib/user";
 import {
   listSectionBoxes,
   listSectionBoxesForPrint,
@@ -255,9 +255,12 @@ export function SectionEditor({
   const existingSections = line.sections ?? [];
   const totalExisting = existingSections.reduce((n, s) => n + (s.total_boxes ?? s.box_count ?? s.boxes?.length ?? 0), 0);
   const newForLine = draft.newSections.filter((s) => s.line_number === line.line_number);
-  // Label printing (Print all / Range) is gated to the cold stores, under any
-  // spelling of the inward's Warehouse ("Savla D-34" counts as Savla D-39).
+  // Print all is gated to the cold stores, under any spelling of the inward's
+  // Warehouse ("Savla D-34" counts as Savla D-39).
   const canPrintLabels = printsColdLabels(draft.header.warehouse);
+  // Print range: admins and inventory managers only, at any warehouse
+  // (useHasRole is true for admins too).
+  const canPrintRange = useHasRole("inventory_manager");
 
   function addSection() {
     const id = `${line.line_number}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -297,6 +300,7 @@ export function SectionEditor({
           busy={busy}
           onPrint={onPrint}
           canPrint={canPrintLabels}
+          canPrintRange={canPrintRange}
           canAddBoxes={canAddBoxes}
           canUpdateBoxes={canUpdateBoxes}
           printedIds={printedIds}
@@ -304,7 +308,7 @@ export function SectionEditor({
       ))}
 
       {newForLine.map((sec) => (
-        <NewSectionCard key={sec.id} line={line} section={sec} carton={carton} dispatch={dispatch} onPrint={onPrint} canPrint={canPrintLabels} />
+        <NewSectionCard key={sec.id} line={line} section={sec} carton={carton} dispatch={dispatch} onPrint={onPrint} canPrint={canPrintLabels} canPrintRange={canPrintRange} />
       ))}
 
       {existingSections.length === 0 && newForLine.length === 0 ? (
@@ -328,6 +332,7 @@ function ExistingSectionCard({
   busy,
   onPrint,
   canPrint,
+  canPrintRange,
   canAddBoxes,
   canUpdateBoxes,
   printedIds,
@@ -344,6 +349,7 @@ function ExistingSectionCard({
   busy: string | null;
   onPrint: (resolve: PrintResolver) => void;
   canPrint: boolean;
+  canPrintRange: boolean;
   canAddBoxes: boolean;
   canUpdateBoxes: boolean;
   printedIds: Set<string>;
@@ -464,10 +470,10 @@ function ExistingSectionCard({
             </button>
           ) : null}
           {canPrint ? (
-            <>
-              <PrintAllButton count={sectionTotal} resolve={() => resolvePrint()} onPrint={onPrint} />
-              <PrintRangeControl minBox={sectionTotal ? 1 : 0} maxBox={sectionTotal} resolve={resolvePrint} onPrint={onPrint} />
-            </>
+            <PrintAllButton count={sectionTotal} resolve={() => resolvePrint()} onPrint={onPrint} />
+          ) : null}
+          {canPrintRange ? (
+            <PrintRangeControl minBox={sectionTotal ? 1 : 0} maxBox={sectionTotal} resolve={resolvePrint} onPrint={onPrint} />
           ) : null}
           <span className="text-[11px] text-[var(--text-muted)]">{sectionTotal} box{sectionTotal !== 1 ? "es" : ""}</span>
         </div>
@@ -593,6 +599,7 @@ function NewSectionCard({
   dispatch,
   onPrint,
   canPrint,
+  canPrintRange,
 }: {
   line: PurchaseLine;
   section: NewSection;
@@ -600,6 +607,7 @@ function NewSectionCard({
   dispatch: React.Dispatch<InwardAction>;
   onPrint: (resolve: PrintResolver) => void;
   canPrint: boolean;
+  canPrintRange: boolean;
 }) {
   const generated = section.boxes;
   const total = generated?.length ?? 0;
@@ -665,10 +673,10 @@ function NewSectionCard({
         <div className="space-y-2">
           <div className="flex items-center justify-between gap-2">
             <span className="text-[11px] font-bold uppercase tracking-wide text-[var(--text-muted)]">Generated Boxes ({total})</span>
-            {canPrint ? (
+            {canPrint || canPrintRange ? (
               <div className="flex items-center gap-1.5">
-                <PrintAllButton count={total} resolve={() => resolveGen()} onPrint={onPrint} />
-                <PrintRangeControl minBox={genMin} maxBox={genMax} resolve={resolveGen} onPrint={onPrint} />
+                {canPrint ? <PrintAllButton count={total} resolve={() => resolveGen()} onPrint={onPrint} /> : null}
+                {canPrintRange ? <PrintRangeControl minBox={genMin} maxBox={genMax} resolve={resolveGen} onPrint={onPrint} /> : null}
               </div>
             ) : null}
           </div>
