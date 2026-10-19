@@ -3,25 +3,14 @@
 // and KPI totals. Box counts are per-transfer (deduped), not summed per line.
 
 import type { TransferRecord } from "./transferDashboard";
+import { canonicalSite } from "./sites.ts";
 
-// ── Normalization (ports shared/canonicalize.py) ─────────────────────────────
-const WAREHOUSE_ALIASES: Record<string, string> = {
-  "savla d-39": "Savla D-39", "savla d39": "Savla D-39", "d-39": "Savla D-39", "d39": "Savla D-39",
-  "savla bond": "Savla D-39", "old savla": "Savla D-39", "savla d-39 cold": "Savla D-39", "savla d39 cold": "Savla D-39",
-  "savla d-514": "Savla D-514", "savla d514": "Savla D-514", "d-514": "Savla D-514", "d514": "Savla D-514",
-  "new savla": "Savla D-514", "savla d-514 cold": "Savla D-514",
-  "rishi": "Rishi", "rishi cold": "Rishi", "rishi cold storage": "Rishi",
-  "supreme": "Supreme", "supreme cold": "Supreme", "supreme cold storage": "Supreme",
-  "w202": "W202", "warehouse w202": "W202", "a101": "A101", "warehouse a101": "A101",
-  "a185": "A185", "warehouse a185": "A185", "a68": "A68", "warehouse a68": "A68",
-  "f53": "F53", "warehouse f53": "F53", "dev int": "Dev Int", "dev_int": "Dev Int",
-};
-
+// ── Normalization (the shared site table, lib/sites) ─────────────────────────
+// The canonical site name, so every spelling of one site ("A-185",
+// "Warehouse A185", "D-39", "Supreme Cold") lands in one bucket; an unknown
+// name comes back trimmed.
 export function normalizeWarehouseName(raw?: string | null): string {
-  const s = (raw || "").trim();
-  if (!s) return "";
-  const key = s.toLowerCase().replace(/_/g, " ");
-  return WAREHOUSE_ALIASES[key] ?? s;
+  return canonicalSite(raw);
 }
 
 export const getDisplayWarehouseName = normalizeWarehouseName;

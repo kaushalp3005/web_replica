@@ -2,9 +2,12 @@
 // Terminology: the source filed this under "RTV" but it is a customer-RETURN document
 // system that mints CR- ids; the target's return-to-vendor (/rtv/*) is a DIFFERENT module.
 //
-// Live backend today is Phase 1 (CRUD) + Phase 2 (boxes + export). There is NO
-// approve / send-for-approval / email / summary / sku endpoint — the approval flow
-// is stubbed on fixtures in the module (see customer-returns/_fixtures.ts).
+// Live backend: CRUD, boxes + export, and the approval flow — send for approval
+// (mail + WhatsApp, reporting what actually went out) and Approve / Reject / Hold
+// in-app, by the mailed link or by WhatsApp. Only the CR's Business Head or a
+// standing deputy may decide, never the person who raised it, and only while it is
+// Pending / On Hold (the server enforces this; see sendCustomerReturnForApproval and
+// decideCustomerReturn below).
 //
 // Keys: the header PK is `rtv_id` (the CR-YYYYMMDDHHMMSS string). There is no
 // numeric id — every path segment and link uses the rtv_id string.
@@ -22,8 +25,9 @@ export const CR_READ_ONLY: boolean = false;
 export type Company = "CFPL" | "CDPL";
 export const COMPANIES: Company[] = ["CFPL", "CDPL"];
 
-// status values the backend can set: Pending (create), Submitted (bulk box save).
-// Approved/Rejected/On Hold only reachable via the (not-yet-live) approval flow.
+// Pending (create) → Approved / Rejected / On Hold by a decision, taken only from
+// Pending or On Hold. Submitted = approved, then the warehouse saved boxes (the bulk
+// box save flips Approved → Submitted); it is decided, like Approved and Rejected.
 export type CRStatus = "Pending" | "Approved" | "Submitted" | "Rejected" | "On Hold";
 
 // ── Requests ────────────────────────────────────────────────────────────────
@@ -69,7 +73,10 @@ export interface CRCreate {
   lines: CRLineCreate[];
 }
 
-export type CRHeaderUpdate = Partial<CRHeaderCreate> & { status?: CRStatus };
+// No status: a return is decided only by Approve / Reject / Hold (decideCustomerReturn,
+// the mailed link or WhatsApp), where the server checks who decides and when. The
+// header PUT ignores a status, so it can neither decide a return nor re-open one.
+export type CRHeaderUpdate = Partial<CRHeaderCreate>;
 
 export interface CRBulkBoxItem {
   article_description: string;
@@ -355,13 +362,46 @@ export function getCrEmailRouting(): Promise<CrEmailRouting> {
   return jsonOrThrow(apiFetch(`${BASE}/email-routing`), "Failed to load approval email routing");
 }
 
-// Fire the threaded Business-Head approval mail (with in-email Approve/Reject/Hold
-// magic-link buttons). Best-effort server-side — no-op if SMTP is unconfigured.
+// Send the approval request: the threaded mail (each approver who can decide gets the
+// Approve / Reject / Hold buttons, everyone else — the person who raised the return
+// included, even when they are an approver — a copy) and the WhatsApp card to the
+// same approvers. Allowed only while the CR is Pending / On Hold (else 409
+// already_decided), so it is also the re-send. Sending is best-effort, but the
+// response says what actually went out.
+export type CRSendStatus = "sent" | "partial" | "failed";
+
+export interface CRSendMailOutcome {
+  sent: boolean; // every copy went out
+  to: string[]; // the TO line: the approvers who can decide + notify_to
+  cc_count: number;
+  approvers_mailed: number; // approver copies (with the buttons) that went out
+  reason?: "smtp_not_configured" | "no_recipients" | "smtp_error" | "error" | (string & {});
+  failed?: string[]; // addresses that were not mailed
+}
+
+export interface CRSendWhatsAppOutcome {
+  status: CRSendStatus | "skipped"; // skipped = not configured / no number on file
+  sent: number;
+  failed: number;
+  reason?:
+    | "wa_disabled" | "no_approver_phone" | "send_failed" | "media_upload_failed"
+    | "mapping_store_failed" | "exception" | (string & {});
+  recipients?: { name: string; sent: boolean }[];
+}
+
 export interface CRSendForApprovalResponse {
-  status: string;
-  approver: { name: string; email: string } | null;
+  // sent: every mail copy went out and WhatsApp didn't fail; failed: nobody who can
+  // decide was reached, or nobody can decide it — reason "no_approver" (no Business
+  // Head mapped and no deputy) or "only_creator" (its only approver raised it);
+  // partial: in between.
+  status: CRSendStatus;
+  reason?: "no_approver" | "only_creator" | (string & {});
+  approver: { name: string; email: string } | null; // the Business Head, when mapped (even if they raised it)
+  approvers: { name: string; email: string }[]; // everyone who may decide it, BH first — never its creator
   to: string[];
   cc_count: number;
+  mail: CRSendMailOutcome;
+  whatsapp: CRSendWhatsAppOutcome;
 }
 export function sendCustomerReturnForApproval(company: Company, crId: string): Promise<CRSendForApprovalResponse> {
   return jsonOrThrow(
@@ -370,23 +410,38 @@ export function sendCustomerReturnForApproval(company: Company, crId: string): P
   );
 }
 
-// In-app Approve/Reject/Hold — persists the status + audit and sends the threaded
-// status mail. (The emailed buttons hit the public /email-action route instead.)
+// In-app Approve/Reject/Hold as the logged-in user — persists the status + audit and
+// sends the threaded status mail. 403 when the user isn't the CR's Business Head or a
+// deputy approver, raised the return themselves, or has no e-mail; 409 when the CR has
+// no approver at all. A decided CR comes back already_actioned. (The emailed buttons
+// open the public /email-action confirmation page instead.)
 export type CRApprovalAction = "approve" | "reject" | "hold";
+export interface CRDecisionResponse {
+  rtv_id: string;
+  status: CRStatus;
+  already_actioned: boolean;
+  decided_by?: string; // the e-mail recorded as approved_by (a real decision only)
+}
 export function decideCustomerReturn(
   company: Company, crId: string, action: CRApprovalAction, remark?: string,
-): Promise<{ rtv_id: string; status: CRStatus; already_actioned: boolean }> {
+): Promise<CRDecisionResponse> {
   return jsonOrThrow(
     apiFetch(`${BASE}/${company}/${enc(crId)}/approve`, { method: "POST", body: JSON.stringify({ action, remark }) }),
     "Failed to apply the decision",
   );
 }
 
-// Server-built styled .xlsx (edited cells highlighted). Returns a Blob to download.
+// Server-built styled .xlsx (edited cells highlighted): the file to download and the
+// name the server gave it (its Content-Disposition, readable because the API lists it
+// in CORS expose_headers; null when the header didn't come through).
+export interface CRExportFile {
+  blob: Blob;
+  filename: string | null;
+}
 export async function exportCustomerReturns(
   company: Company,
   params: Omit<CRListParams, "page" | "per_page"> = {},
-): Promise<Blob> {
+): Promise<CRExportFile> {
   const q = new URLSearchParams();
   q.set("company", company);
   if (params.status) q.set("status", params.status);
@@ -400,7 +455,9 @@ export async function exportCustomerReturns(
     headers: { Accept: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
   });
   if (!res.ok) throw new Error(await readApiErrorMessage(res, "Export failed"));
-  return res.blob();
+  const cd = res.headers.get("Content-Disposition") ?? "";
+  const filename = /filename="([^"]+)"/.exec(cd)?.[1] ?? null;
+  return { blob: await res.blob(), filename };
 }
 
 // yyyy-mm-dd (native <input type=date>) → DD-MM-YYYY (backend filter format).

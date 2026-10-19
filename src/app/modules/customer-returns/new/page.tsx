@@ -12,18 +12,22 @@
 //                          entry is NOT gated on approval.
 //
 // Submit = "Send for Approval": ensure the CR exists (create, or UPDATE header+lines if
-// a print already created it), bulk-save the boxes, then fire the threaded BH mail. The
-// createdId/createPromise refs keep it to exactly one CR across prints + retries. Starts
-// "Pending" = awaiting Business-Head approval.
+// a print already created it), bulk-save the boxes, then request approval (the threaded
+// mail + WhatsApp to the Business Head and the deputies) and open the detail screen,
+// which shows once what that request actually achieved — a failed send is shown in red
+// there, with its own Send for approval to retry. The createdId/createPromise refs keep
+// it to exactly one CR across prints + retries. Starts "Pending" = awaiting approval.
 
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useRequireAuth, useIsAdmin, useMe } from "@/lib/user";
+import { sessionSave } from "@/lib/session-state";
 import { createCustomerReturn, updateCustomerReturn, updateCustomerReturnLines, deleteCustomerReturn, sendCustomerReturnForApproval, bulkSaveBoxes, upsertBox, listCustomerReturns, getCrEmailRouting, type CRLineCreate, type CRHeaderCreate, type CrEmailRouting } from "@/lib/customer-returns";
 import { CustomerReturnsChrome } from "../_chrome";
 import { CompanyToggle, ErrorBanner, ConfirmDialog, useCompany, isColdWarehouse, WAREHOUSES } from "../_shared";
 import { SALES_POC_OTHER } from "../_fixtures";
 import { EMPTY_ROUTING } from "../_approvalMatrix";
+import { sendErrorNotice, sendNoticeKey, sendOutcomeNotice, type SendNotice } from "../_approvalFlow";
 import { CustomerReturnLineEditor, emptyCrLine, type CRLineForm } from "../_LineEditor";
 import { ArticleBoxEditor } from "../_ArticleBoxEditor";
 import { printCrLabels } from "../_labelPrint";
@@ -372,8 +376,16 @@ export default function NewCustomerReturnPage() {
       // deletions; printed boxes are always in the payload, so none are dropped.
       const items = toBulkItems(boxes, (article) => lines.find((l) => l.item_description === article)?.uom || "");
       if (items.length > 0) await bulkSaveBoxes(company, crId, items, { allowClear: true });
-      // Threaded Business-Head approval mail — best-effort (no-op if SMTP unset).
-      await sendCustomerReturnForApproval(company, crId).catch(() => undefined);
+      // Request approval (mail + WhatsApp). The CR is saved either way, so a failed
+      // request still opens the detail screen — with what happened, in red, and its
+      // Send for approval button to retry — rather than being silently dropped.
+      let notice: SendNotice;
+      try {
+        notice = sendOutcomeNotice(await sendCustomerReturnForApproval(company, crId));
+      } catch (e) {
+        notice = sendErrorNotice(e instanceof Error ? e.message : "Failed to send for approval");
+      }
+      sessionSave(sendNoticeKey(company, crId), notice);
       router.push(`/modules/customer-returns/${crId}?company=${company}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to send for approval");

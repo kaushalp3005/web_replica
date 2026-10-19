@@ -24,7 +24,8 @@ import {
   type CRStatus,
 } from "@/lib/customer-returns";
 import { CustomerReturnsChrome } from "./_chrome";
-import { CompanyToggle, StatusBadge, ErrorBanner, ConfirmDialog, useCompany, cx, fmtDate, fmtDateTime } from "./_shared";
+import { CompanyToggle, StatusBadge, ErrorBanner, ConfirmDialog, useCompany, cx, fmtDate, fmtDateTime, CR_STATUS_LABEL } from "./_shared";
+import { istStamp } from "./_dates";
 
 const PER_PAGE = 20;
 
@@ -47,11 +48,13 @@ const IconPencil = (p: IconProps) => <S {...p}><path d="M12 20h9" /><path d="M16
 const IconTrash = (p: IconProps) => <S {...p}><path d="M3 6h18" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></S>;
 const IconSpinner = (p: IconProps) => <S {...(p.className ? p : { className: "h-3.5 w-3.5 animate-spin" })}><path d="M21 12a9 9 0 1 1-6.219-8.56" /></S>;
 
+// The Submitted tab still filters on the stored value (the server's status filter is
+// an exact match); it is labelled as what it is, an approved return with boxes saved.
 const STATUS_TABS: { label: string; value: CRStatus | "all"; Icon: (p: IconProps) => React.ReactElement; color: string }[] = [
   { label: "All", value: "all", Icon: IconAll, color: "text-[var(--text-primary)]" },
   { label: "Pending", value: "Pending", Icon: IconClock, color: "text-[#b45309]" },
   { label: "Approved", value: "Approved", Icon: IconCheckCircle, color: "text-[var(--text-success)]" },
-  { label: "Submitted", value: "Submitted", Icon: IconCheckCheck, color: "text-[#2c5fa8]" },
+  { label: CR_STATUS_LABEL.Submitted, value: "Submitted", Icon: IconCheckCheck, color: "text-[var(--text-success)]" },
 ];
 
 // ── CR No hover card — pastel roll-up shown on hover (mouse) / tap (touch) ─────
@@ -331,7 +334,7 @@ export default function CustomerReturnsListPage() {
   async function handleDownload() {
     setDownloading(true);
     try {
-      const blob = await exportCustomerReturns(company, {
+      const { blob, filename } = await exportCustomerReturns(company, {
         status: statusFilter === "all" ? undefined : statusFilter,
         customer: search || undefined,
         from_date: toApiDate(fromDate),
@@ -340,7 +343,8 @@ export default function CustomerReturnsListPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `rtv_${company}_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.xlsx`;
+      // The server's name; the same one (today in IST) if its header didn't come through.
+      a.download = filename ?? `customer_returns_${company}_${istStamp()}.xlsx`;
       document.body.appendChild(a);
       a.click();
       a.remove();

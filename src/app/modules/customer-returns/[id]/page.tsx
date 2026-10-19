@@ -16,17 +16,21 @@
 //   PUT    /{company}/{cr_id}/boxes    bulkSaveBoxes          (full sync)
 //   POST   /box-edit-log               logBoxEdits
 //   DELETE /{company}/{cr_id}          deleteCustomerReturn
+//   POST   /{company}/{cr_id}/send-for-approval  sendCustomerReturnForApproval
 //
 // Live adaptation of the legacy split: the legacy detail page defers box-weight
-// ENTRY to /approve (its box-entry screen). The live /approve is the stubbed
-// approval-matrix preview, so box entry lives HERE in edit mode and is not gated
-// on approval (the live approve/email flow is Phase 3).
+// ENTRY to /approve (its box-entry screen). Here box entry lives in edit mode and is
+// not gated on approval. "Send for approval" (Pending / On Hold only) sends — or
+// re-sends — the approval mail + WhatsApp and shows what actually went out; the New
+// screen leaves the outcome of its own send here as a one-shot notice.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useRequireAuth, useIsAdmin, useMe } from "@/lib/user";
+import { sessionClear, sessionLoad } from "@/lib/session-state";
 import {
+  CR_READ_ONLY,
   getCustomerReturn,
   updateCustomerReturn,
   updateCustomerReturnLines,
@@ -34,6 +38,7 @@ import {
   upsertBox,
   bulkSaveBoxes,
   logBoxEdits,
+  sendCustomerReturnForApproval,
   type CRWithDetails,
   type CRBox,
   type CRLine,
@@ -43,6 +48,7 @@ import { CustomerReturnsChrome } from "../_chrome";
 import { ErrorBanner, SuccessBanner, InfoBanner, ConfirmDialog, StatusBadge, CompanyChip, CrHeaderGrid, useCompanyParam, cx, fmtDateTime, num, isColdWarehouse } from "../_shared";
 import { printCrLabels } from "../_labelPrint";
 import { crBoxToForm, isCommitted, type CRBoxForm } from "../_boxEngine";
+import { isUndecided, sendErrorNotice, sendNoticeKey, sendOutcomeNotice, type SendNotice } from "../_approvalFlow";
 
 // ── Inline SVG icons (lucide look; no lucide dep in web_replica) ──────────────
 type IconProps = { className?: string };
@@ -150,6 +156,29 @@ export default function CustomerReturnDetailPage() {
   const [printingRange, setPrintingRange] = useState<string | null>(null);
   const [printRange, setPrintRange] = useState<Record<string, { from: string; to: string }>>({});
   const [boxPage, setBoxPage] = useState(1);
+  // Send for approval: the confirm dialog, the request, and what it achieved.
+  const [showSend, setShowSend] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sendNotice, setSendNotice] = useState<SendNotice | null>(null);
+
+  // One-shot: the New screen leaves the outcome of its send for this page to show
+  // (tab-scoped sessionStorage). It is read on mount and shown in every view, the
+  // load-error view too; the stored copy is dropped only once the return has loaded,
+  // so a failed load — then a reload — still shows a send that did not go out.
+  useEffect(() => {
+    queueMicrotask(() => {
+      const left = sessionLoad<SendNotice>(sendNoticeKey(company, crId));
+      if (left && typeof left.text === "string" && left.tone in SEND_NOTICE_STYLE) setSendNotice(left);
+    });
+  }, [company, crId]);
+  useEffect(() => {
+    if (data) sessionClear(sendNoticeKey(company, crId));
+  }, [data, company, crId]);
+  // Dismissing drops the stored copy too (it is still there after a failed load).
+  const dismissSendNotice = () => {
+    setSendNotice(null);
+    sessionClear(sendNoticeKey(company, crId));
+  };
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -478,6 +507,29 @@ export default function CustomerReturnDetailPage() {
     }
   }
 
+  // (Re-)send the approval mail + WhatsApp and show what actually went out.
+  async function handleSendForApproval() {
+    setSending(true);
+    setSendNotice(null);
+    try {
+      setSendNotice(sendOutcomeNotice(await sendCustomerReturnForApproval(company, crId)));
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Failed to send for approval";
+      // A refusal (e.g. decided meanwhile) can't be retried: re-read the status so the
+      // button — and the retry hint — stay only while a retry can work.
+      let retry = true;
+      try {
+        const fresh = await getCustomerReturn(company, crId);
+        setData(fresh);
+        retry = isUndecided(fresh.status);
+      } catch { /* keep the hint — the CR could not be re-read */ }
+      setSendNotice(sendErrorNotice(message, retry));
+    } finally {
+      setSending(false);
+      setShowSend(false);
+    }
+  }
+
   async function handleDelete() {
     setDeleting(true);
     try {
@@ -523,6 +575,7 @@ export default function CustomerReturnDetailPage() {
   if (error && !data) {
     return (
       <CustomerReturnsChrome title="Detail">
+        {sendNotice && <div className="mb-3"><SendNoticeBanner notice={sendNotice} onDismiss={dismissSendNotice} /></div>}
         <div className="mb-3"><ErrorBanner message={error} /></div>
         <Link href={`/modules/customer-returns?company=${company}`} className="inline-block text-[13px] rounded-md border border-[var(--aws-border)] px-3 py-1.5 bg-white">
           ← Back to list
@@ -589,6 +642,17 @@ export default function CustomerReturnDetailPage() {
             Review
           </Link>
         )}
+        {!editing && !CR_READ_ONLY && isUndecided(data.status) && (
+          <button
+            onClick={() => setShowSend(true)}
+            disabled={sending}
+            title="Send the Approve / Reject / Hold request to the Business Head and the deputy approvers (mail + WhatsApp)"
+            className="h-8 inline-flex items-center gap-1.5 text-[13px] rounded-md border border-[var(--aws-border)] px-3 bg-white hover:border-[var(--aws-orange)] disabled:opacity-50"
+          >
+            {sending && <IconSpinner className="h-3.5 w-3.5 animate-spin" />}
+            Send for approval
+          </button>
+        )}
         {!editing && data.status === "Pending" && (
           <button onClick={() => setShowDelete(true)} className="h-8 inline-flex items-center gap-1.5 text-[13px] rounded-md border border-[var(--aws-border)] px-3 bg-white text-[var(--aws-error)]">
             <IconTrash className="h-3.5 w-3.5" /> Delete
@@ -596,6 +660,7 @@ export default function CustomerReturnDetailPage() {
         )}
       </div>
 
+      {sendNotice && <div className="mb-3"><SendNoticeBanner notice={sendNotice} onDismiss={dismissSendNotice} /></div>}
       {error && <div className="mb-3"><ErrorBanner message={error} /></div>}
       {notice && <div className="mb-3"><SuccessBanner message={notice} /></div>}
 
@@ -702,8 +767,8 @@ export default function CustomerReturnDetailPage() {
             {!editing && (
               <div className="mb-3">
                 <InfoBanner>
-                  Box weights &amp; QR labels are entered in <strong>Edit details / boxes</strong>. Approval/email routing is a
-                  later phase — box entry is available now.
+                  Box weights &amp; QR labels are entered in <strong>Edit details / boxes</strong>. Box entry doesn&rsquo;t
+                  wait for the approval.
                 </InfoBanner>
               </div>
             )}
@@ -870,7 +935,47 @@ export default function CustomerReturnDetailPage() {
           will remove all lines and boxes. This action cannot be undone.
         </ConfirmDialog>
       )}
+
+      {/* Send-for-approval confirm */}
+      {showSend && (
+        <ConfirmDialog
+          title="Send for approval?"
+          confirmLabel="Send"
+          danger={false}
+          busy={sending}
+          busyLabel="Sending…"
+          onCancel={() => setShowSend(false)}
+          onConfirm={handleSendForApproval}
+        >
+          The Business Head and the deputy approvers get the Approve / Reject / Hold request for{" "}
+          <span className="font-medium text-[var(--text-primary)]">{data.rtv_id}</span> by mail and WhatsApp — all but
+          whoever raised it, who gets a copy instead. Anyone who already has it gets it again; the first decision taken
+          stands.
+        </ConfirmDialog>
+      )}
     </CustomerReturnsChrome>
+  );
+}
+
+// What Send for approval achieved: green (everything went out), amber (only part of
+// it), red (no approver was reached — retry with Send for approval).
+const SEND_NOTICE_STYLE: Record<SendNotice["tone"], string> = {
+  success: "border-[#b6dbb1] bg-[#eaf6ed] text-[var(--text-success)]",
+  warning: "border-[#ecd9a3] bg-[#fdf6e3] text-[#8a6d1a]",
+  error: "border-[#f0c7be] bg-[#fdf3f1] text-[#b1361e]",
+};
+
+function SendNoticeBanner({ notice, onDismiss }: { notice: SendNotice; onDismiss: () => void }) {
+  return (
+    <div
+      role={notice.tone === "success" ? "status" : "alert"}
+      className={cx("flex items-start gap-2 rounded-md border px-3 py-2 text-[13px]", SEND_NOTICE_STYLE[notice.tone])}
+    >
+      <span className="flex-1 break-words">{notice.text}</span>
+      <button onClick={onDismiss} aria-label="Dismiss" className="flex-shrink-0 px-1 leading-none opacity-70 hover:opacity-100">
+        ✕
+      </button>
+    </div>
   );
 }
 

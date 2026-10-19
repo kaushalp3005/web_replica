@@ -31,7 +31,9 @@ import {
 } from "@/lib/dashboardUtils";
 import { getDisplayWarehouseName } from "@/lib/transferBuildSummary";
 import { CustomerReturnsChrome } from "../_chrome";
-import { CompanyToggle, useCompany, cx, StatusBadge, ErrorBanner, fmtN, fmtV, fmtR } from "../_shared";
+import { CompanyToggle, useCompany, cx, StatusBadge, ErrorBanner, fmtN, fmtV, fmtR, crStatusLabel, isCrApproved } from "../_shared";
+import { factoryUnitGroup } from "../_factoryUnit";
+import { crIstYmd, crMonthLabel, crPresetRange, fmtCrShortDate, istToday } from "../_dates";
 
 // ── formatters (fmtN/fmtV/fmtR come from _shared for module-wide consistency) ──
 const num = (v: string | number | null | undefined): number => {
@@ -39,17 +41,10 @@ const num = (v: string | number | null | undefined): number => {
   const n = typeof v === "number" ? v : parseFloat(v);
   return isFinite(n) ? n : 0;
 };
-const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-const monthLabel = (d: string | null): string => {
-  if (!d) return "Unknown";
-  const date = new Date(d);
-  return isNaN(date.getTime()) ? "Unknown" : date.toLocaleDateString("en-GB", { month: "short", year: "numeric" });
-};
-const shortDate = (d: string | null | undefined): string => {
-  if (!d) return "";
-  const date = new Date(d);
-  return isNaN(date.getTime()) ? "" : date.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "2-digit" });
-};
+// Days and months are IST (_dates.ts), whatever the browser's zone: a 02:00 IST
+// return is on the 19th, in October's bucket, inside "Today" — as its CR id says.
+const monthLabel = (d: string | null): string => crMonthLabel(d) || "Unknown";
+const shortDate = fmtCrShortDate;
 const titleFold = (s: string | null | undefined): string => {
   if (!s) return "";
   const t = String(s).trim();
@@ -96,13 +91,15 @@ const GROUP_OPTIONS: { value: GroupByKey; label: string }[] = [
   { value: "month", label: "Month" },
 ];
 
+// Each preset is a [from, to] of IST days (crPresetRange; Last Month no longer rolls
+// over into the current month on 31 Oct / 31 Dec / 29-31 Mar).
 const DATE_PRESETS = [
-  { label: "Today", fn: () => { const d = ymd(new Date()); return [d, d]; } },
-  { label: "This Week", fn: () => { const now = new Date(); const day = now.getDay() === 0 ? 6 : now.getDay() - 1; const start = new Date(now); start.setDate(now.getDate() - day); return [ymd(start), ymd(now)]; } },
-  { label: "This Month", fn: () => [ymd(new Date(new Date().getFullYear(), new Date().getMonth(), 1)), ymd(new Date())] },
-  { label: "Last Month", fn: () => { const d = new Date(); d.setMonth(d.getMonth() - 1); return [ymd(new Date(d.getFullYear(), d.getMonth(), 1)), ymd(new Date(d.getFullYear(), d.getMonth() + 1, 0))]; } },
-  { label: "This FY", fn: () => { const y = new Date().getMonth() >= 3 ? new Date().getFullYear() : new Date().getFullYear() - 1; return [`${y}-04-01`, ymd(new Date())]; } },
-  { label: "All Time", fn: () => ["", ""] },
+  { label: "Today", fn: () => crPresetRange("today") },
+  { label: "This Week", fn: () => crPresetRange("thisWeek") },
+  { label: "This Month", fn: () => crPresetRange("thisMonth") },
+  { label: "Last Month", fn: () => crPresetRange("lastMonth") },
+  { label: "This FY", fn: () => crPresetRange("thisFy") },
+  { label: "All Time", fn: () => crPresetRange("all") },
 ];
 
 interface RTVRow {
@@ -112,15 +109,22 @@ interface RTVRow {
   uom: string; qty: number; rate: number; value: number; net_weight: number;
 }
 
-const RTV_SEARCH_FIELDS: (keyof RTVRow & string)[] = [
-  "rtv_id", "customer", "factory_unit", "status", "material_type",
+// Search matches the status both as stored and as the page shows it: status_label is
+// the badge's wording, so "approved" or "boxed" finds a Submitted ("Approved · Boxed")
+// row, which the Approved CRs KPI counts, and "submitted" still does. The label is
+// added at match time, so the cached row shape is unchanged.
+type RTVSearchRow = RTVRow & { status_label: string };
+const RTV_SEARCH_FIELDS: (keyof RTVSearchRow & string)[] = [
+  "rtv_id", "customer", "factory_unit", "status", "status_label", "material_type",
   "item_category", "sub_category", "item_description", "uom", "rtv_date",
 ];
 
+// factory_unit groups by site (_factoryUnit.ts): "D-39" and "Savla D-39" are
+// one "Savla D-39" chip, not two that each filter half of that site's returns.
 function seedRow(h: CRListItem): RTVRow {
   return {
     rtv_id: h.rtv_id, rtv_date: h.rtv_date ?? null,
-    factory_unit: titleFold(h.factory_unit) || "Unassigned",
+    factory_unit: factoryUnitGroup(h.factory_unit) || "Unassigned",
     customer: h.customer || "Unknown",
     status: h.status || "Pending", month_label: monthLabel(h.rtv_date || h.created_ts || null),
     material_type: "", item_category: "", sub_category: "", item_description: "",
@@ -130,7 +134,7 @@ function seedRow(h: CRListItem): RTVRow {
 function lineToRow(h: CRLine, header: CRListItem): RTVRow {
   return {
     rtv_id: header.rtv_id, rtv_date: header.rtv_date ?? null,
-    factory_unit: titleFold(header.factory_unit) || "Unassigned",
+    factory_unit: factoryUnitGroup(header.factory_unit) || "Unassigned",
     customer: header.customer || "Unknown",
     status: header.status || "Pending", month_label: monthLabel(header.rtv_date || header.created_ts || null),
     material_type: titleFold(h.material_type), item_category: titleFold(h.item_category),
@@ -181,7 +185,11 @@ export default function CustomerReturnsDashboard() {
   const [customerPopup, setCustomerPopup] = useState<string | null>(null);
   const [peek, setPeek] = useState<{ rtvId: string; x: number; y: number } | null>(null);
 
-  const cacheKey = `cr-dashboard:cache:v1:${company}`;
+  // v2: factory_unit now holds the canonical site, so rows cached by v1 (case
+  // fold only) are not painted with the old, split factory chips.
+  // v3: month_label is the IST month and rtv_date carries its IST offset, so rows
+  // cached by v2 (browser-local months, offset-less UTC dates) are not painted.
+  const cacheKey = `cr-dashboard:cache:v3:${company}`;
 
   const fetchData = useCallback(async (opts?: { silent?: boolean }) => {
     const silent = opts?.silent ?? false;
@@ -243,7 +251,7 @@ export default function CustomerReturnsDashboard() {
 
   const inDateRange = useCallback((d: string | null): boolean => {
     if (!dateFrom && !dateTo) return true;
-    const x = (d || "").slice(0, 10);
+    const x = crIstYmd(d); // the IST day, not the first 10 characters of a UTC clock face
     if (dateFrom && x < dateFrom) return false;
     if (dateTo && x > dateTo) return false;
     return true;
@@ -251,7 +259,10 @@ export default function CustomerReturnsDashboard() {
 
   const searchTerms = useMemo(() => parseSearchTerms(searchQuery), [searchQuery]);
   const isSearching = searchTerms.length > 0;
-  const searchMatch = useMemo(() => makeRecordSearch<RTVRow>(searchQuery, RTV_SEARCH_FIELDS), [searchQuery]);
+  const searchMatch = useMemo(() => {
+    const match = makeRecordSearch<RTVSearchRow>(searchQuery, RTV_SEARCH_FIELDS);
+    return (r: RTVRow) => match({ ...r, status_label: crStatusLabel(r.status) });
+  }, [searchQuery]);
 
   const filtered = useMemo(() => rows.filter((r) => {
     if (!inDateRange(r.rtv_date)) return false;
@@ -312,7 +323,7 @@ export default function CustomerReturnsDashboard() {
       total_value: filtered.reduce((s, r) => s + r.value, 0),
       total_kg: filtered.reduce((s, r) => s + r.net_weight, 0),
       pending: new Set(filtered.filter((r) => r.status === "Pending").map((r) => r.rtv_id)).size,
-      approved: new Set(filtered.filter((r) => r.status === "Approved").map((r) => r.rtv_id)).size,
+      approved: new Set(filtered.filter((r) => isCrApproved(r.status)).map((r) => r.rtv_id)).size, // + Approved · Boxed
       customers: new Set(filtered.map((r) => r.customer).filter(Boolean)).size,
     };
   }, [filtered]);
@@ -321,7 +332,7 @@ export default function CustomerReturnsDashboard() {
     switch (groupBy) {
       case "factory_unit": return r.factory_unit || "Unassigned";
       case "customer": return r.customer || "Unknown";
-      case "status": return r.status || "Pending";
+      case "status": return crStatusLabel(r.status);
       case "material_type": return r.material_type || "N/A";
       case "item_category": return r.item_category || "Uncategorized";
       case "month": return r.month_label || "Unknown";
@@ -413,7 +424,7 @@ export default function CustomerReturnsDashboard() {
     else if (dateTo) periodLine = `Period: up to ${shortDate(dateTo)}`;
     else periodLine = "Period: All time";
     const lines = [
-      `Customer Returns Summary - ${shortDate(ymd(new Date()))} - ${company}`,
+      `Customer Returns Summary - ${shortDate(istToday())} - ${company}`,
       periodLine, "",
       `Total: ${kpis.total_rtvs} CRs | ${fmtN(kpis.total_qty)} Qty${kpis.total_kg > 0 ? ` | ${fmtN(kpis.total_kg)} Kg` : ""} | ${fmtV(kpis.total_value)}`,
       `Pending: ${kpis.pending} | Approved: ${kpis.approved} | Customers: ${kpis.customers}`, "",
@@ -519,7 +530,7 @@ export default function CustomerReturnsDashboard() {
             </div>
           </div>
 
-          <ChipRow label="Status" opts={cascadedOpts.statuses} sel={selStatus} onToggle={(v) => setSelStatus(chipToggle(selStatus, v))} activeCls="bg-amber-500 text-white border-amber-500" approvedCls="bg-emerald-600 text-white border-emerald-600" />
+          <ChipRow label="Status" opts={cascadedOpts.statuses} sel={selStatus} onToggle={(v) => setSelStatus(chipToggle(selStatus, v))} activeCls="bg-amber-500 text-white border-amber-500" approvedCls="bg-emerald-600 text-white border-emerald-600" render={crStatusLabel} />
           <ChipRow label="Factory" opts={cascadedOpts.factories} sel={selFactory} onToggle={(v) => setSelFactory(chipToggle(selFactory, v))} activeCls="bg-blue-600 text-white border-blue-600" render={getDisplayWarehouseName} />
 
           {/* Customer (with group-similar toggle) */}
@@ -824,7 +835,7 @@ function ChipRow({ label, opts, sel, onToggle, activeCls, approvedCls, render }:
       <div className="flex flex-wrap gap-1.5">
         {opts.map((o) => {
           const active = sel.has(o.name);
-          const on = active ? (approvedCls && o.name === "Approved" ? approvedCls : activeCls) : "bg-white border-[var(--aws-border)] hover:bg-[var(--background)]";
+          const on = active ? (approvedCls && isCrApproved(o.name) ? approvedCls : activeCls) : "bg-white border-[var(--aws-border)] hover:bg-[var(--background)]";
           return (
             <button key={o.name} onClick={() => onToggle(o.name)} className={cx("text-[13px] font-medium px-3 py-1.5 rounded-md border", on)}>
               {render ? render(o.name) : o.name} <span className="text-[11px] opacity-70">({o.count})</span>

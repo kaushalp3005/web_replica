@@ -2,23 +2,33 @@
 
 // Business-head review / approval screen.
 //
+// Who opens it: admins, and the return's own approvers — its Business Head and the
+// standing deputies — who need not be admins, since deciding in-app is their channel
+// (reviewAccess, ../../_approvalFlow.ts; each approver's approval mail links here).
+// Anyone else is turned away. Box entry stays admin-only.
+//
 // The recipient MATRIX (who the Approve/Reject/Hold mail reaches, and who is
-// allowed to decide) is REAL — computed by resolveRecipients() from the same
-// email maps the backend uses (see ../../_approvalMatrix.ts, ported verbatim
-// from shared/email_notifier.py). Only the SEND + PERSIST are stubbed: the
-// decision runs through mockApplyApproval() and updates status on screen only.
-// When the Phase-3 /approve endpoint lands, swap mockApplyApproval for the real
-// call; the whole matrix panel stays as-is.
+// allowed to decide) is computed by resolveRecipients() from the same DB routing
+// the backend uses (see ../../_approvalMatrix.ts). Approve / Reject / Hold here is
+// LIVE (decideCustomerReturn): the server records the decision as the logged-in
+// user and allows it only for the CR's Business Head or a standing deputy — never
+// an admin as such, never the person who raised the return — and only while it is
+// Pending / On Hold. decisionGate (../../_approvalFlow.ts) applies the same rule up
+// front so the buttons are disabled with a reason instead of failing on click; the
+// server's 403 / 409 message is shown if it still refuses. A return that could not
+// be loaded falls back to SAMPLE_CR for an admin, for display only — no decision is
+// offered on it; anyone else is told it could not be loaded.
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useRequireAuth, useIsAdmin } from "@/lib/user";
-import { getCustomerReturn, getCrEmailRouting, decideCustomerReturn, bulkSaveBoxes, upsertBox, type CRWithDetails, type CRStatus, type CrEmailRouting } from "@/lib/customer-returns";
+import { useRequireAuth, useIsAdmin, useMe } from "@/lib/user";
+import { CR_READ_ONLY, getCustomerReturn, getCrEmailRouting, decideCustomerReturn, bulkSaveBoxes, upsertBox, type CRWithDetails, type CRStatus, type CrEmailRouting } from "@/lib/customer-returns";
 import { CustomerReturnsChrome } from "../../_chrome";
-import { StatusBadge, CompanyChip, ErrorBanner, InfoBanner, SuccessBanner, useCompanyParam, fmtDate, fmtDateTime, num, isColdWarehouse } from "../../_shared";
+import { StatusBadge, CompanyChip, ErrorBanner, InfoBanner, SuccessBanner, useCompanyParam, fmtDate, fmtDateTime, num, isColdWarehouse, crStatusLabel } from "../../_shared";
 import { SAMPLE_CR, type ApprovalAction, ACTION_TO_STATUS } from "../../_fixtures";
-import { resolveRecipients, formatActor, EMPTY_ROUTING } from "../../_approvalMatrix";
+import { resolveRecipients, formatActor, approverEmails, EMPTY_ROUTING } from "../../_approvalMatrix";
+import { decisionGate, isUndecided, reviewAccess } from "../../_approvalFlow";
 import { ArticleBoxEditor } from "../../_ArticleBoxEditor";
 import { type CRBoxForm, toBulkItems, crBoxToForm } from "../../_boxEngine";
 import { printCrLabels } from "../../_labelPrint";
@@ -41,12 +51,13 @@ export default function CustomerReturnApprovePage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
   const crId = decodeURIComponent(params.id);
-  useRequireAuth(router.replace);
+  const authed = useRequireAuth(router.replace);
   const isAdmin = useIsAdmin();
+  const me = useMe();
   const company = useCompanyParam();
 
-  const [data, setData] = useState<CRWithDetails | null>(null);
-  const [usingSample, setUsingSample] = useState(false);
+  const [live, setLive] = useState<CRWithDetails | null>(null); // the return as loaded
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -70,41 +81,32 @@ export default function CustomerReturnApprovePage() {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    setRoutingError(false);
-    // Recipient routing is independent of the CR fetch — load it in parallel and
-    // don't let a routing failure blank the whole screen.
-    getCrEmailRouting().then(setRouting, () => { setRouting(EMPTY_ROUTING); setRoutingError(true); });
-    try {
-      const cr = await getCustomerReturn(company, crId);
-      setData(cr);
-      setStatus(cr.status);
-      setBoxes((cr.boxes ?? []).map(crBoxToForm));
-      setUsingSample(false);
-    } catch {
-      // Live record not reachable — show the fixture so the stub still demos.
-      setData(SAMPLE_CR);
+    // The return and the approver routing load in parallel, and the screen waits for
+    // both: who may open it and decide depends on the two together. A routing failure
+    // alone doesn't blank the screen (an admin still sees the return).
+    const [cr, rt] = await Promise.allSettled([getCustomerReturn(company, crId), getCrEmailRouting()]);
+    setRouting(rt.status === "fulfilled" ? rt.value : EMPTY_ROUTING);
+    setRoutingError(rt.status === "rejected");
+    if (cr.status === "fulfilled") {
+      setLive(cr.value);
+      setStatus(cr.value.status);
+      setBoxes((cr.value.boxes ?? []).map(crBoxToForm));
+      setLoadError(null);
+    } else {
+      // Live record not reachable — an admin is shown the fixture so the screen still
+      // demos; anyone else is told it could not be loaded.
+      setLive(null);
       setStatus(SAMPLE_CR.status);
       setBoxes([]);
-      setUsingSample(true);
-    } finally {
-      setLoading(false);
+      setLoadError(cr.reason instanceof Error ? cr.reason.message : "Failed to load customer return");
     }
+    setLoading(false);
   }, [company, crId]);
 
   useEffect(() => {
-    if (!isAdmin) return;
+    if (!authed) return;
     queueMicrotask(() => { load(); });
-  }, [isAdmin, load]);
-
-  if (!isAdmin) {
-    return (
-      <CustomerReturnsChrome title="Review">
-        <section className="bg-white border border-[var(--aws-border)] rounded-md p-6 text-[13px] text-[var(--text-secondary)]">
-          You don&rsquo;t have access to the Customer Returns module.
-        </section>
-      </CustomerReturnsChrome>
-    );
-  }
+  }, [authed, load]);
 
   if (loading) {
     return (
@@ -125,22 +127,57 @@ export default function CustomerReturnApprovePage() {
       </CustomerReturnsChrome>
     );
   }
-  if (!data) return null;
 
-  const recipients = resolveRecipients(routing, data);
-  // Terminal states can't be re-decided (backend treats them as already-actioned);
-  // On Hold is still actionable. Drives whether the decision UI shows at all.
-  const alreadyDecided = status === "Approved" || status === "Rejected";
-  // Needs SOMEONE who can approve (mapped BH or a standing deputy) + a non-terminal
-  // status. A CR with an unmapped BH is still actionable now — the deputies hold the
-  // same buttons, which is the point of having them.
-  const canDecide = recipients.approvers.length > 0 && !alreadyDecided;
+  // The sample stands in for a return that failed to load, for an admin only.
+  const usingSample = !live && !!loadError && isAdmin;
+  const data = live ?? (usingSample ? SAMPLE_CR : null);
+  const recipients = data ? resolveRecipients(routing, data) : null;
+  const access = reviewAccess({
+    isAdmin,
+    me,
+    loaded: !!live,
+    approverEmails: live && recipients ? approverEmails(recipients) : [],
+    routingError,
+  });
+  if (!access.allowed || !data || !recipients) {
+    return (
+      <CustomerReturnsChrome title="Review">
+        {loadError && <div className="mb-3"><ErrorBanner message={loadError} /></div>}
+        <section className="bg-white border border-[var(--aws-border)] rounded-md p-6 text-[13px] text-[var(--text-secondary)]">
+          {access.reason ?? "This customer return couldn't be loaded. Reload to try again."}
+        </section>
+      </CustomerReturnsChrome>
+    );
+  }
+
+  // Decided — Approved, Submitted (approved, then boxes saved) or Rejected — can't be
+  // re-decided (the server reports it as already actioned); Pending and On Hold are
+  // open. Drives whether the decision UI shows at all.
+  const alreadyDecided = !isUndecided(status);
+  // Who may decide: the mapped BH or a standing deputy (an unmapped BH still leaves the
+  // deputies), not the person who raised the return, and never on the sample fallback.
+  // The server enforces the same; this disables the buttons with the reason up front.
+  const gate = decisionGate({
+    me,
+    createdBy: data.created_by,
+    approverEmails: approverEmails(recipients),
+    status,
+    usingSample,
+    routingError,
+    readOnly: CR_READ_ONLY,
+  });
+  const canDecide = gate.canDecide;
+  const meEmail = (me?.email ?? "").trim().toLowerCase();
+  const raisedBy = (data.created_by ?? "").trim().toLowerCase();
   // Box entry is independent of the approval matrix — available on any real record,
-  // regardless of status. Only the fixture fallback (no live CR) can't be edited.
-  const boxesUnlocked = !usingSample;
+  // regardless of status, to admins (the warehouse side), not to an approver who is
+  // here only to decide. The fixture fallback (no live CR) can't be edited.
+  const boxesUnlocked = !!live && isAdmin;
   const isCold = isColdWarehouse(data.factory_unit);
   const totalQty = data.lines.reduce((s, l) => s + num(l.qty), 0);
   const totalValue = data.lines.reduce((s, l) => s + num(l.value), 0);
+  const mailedTo = recipients.to.join(", ");
+  const ccCount = recipients.cc.length;
 
   async function act(action: ApprovalAction) {
     if (!canDecide) return;
@@ -151,16 +188,19 @@ export default function CustomerReturnApprovePage() {
       const res = await decideCustomerReturn(company, crId, action, remark || undefined);
       setStatus(res.status);
       if (res.already_actioned) {
-        setDecision(`This return was already “${res.status}” — no change applied.`);
+        setDecision(`This return is already “${crStatusLabel(res.status)}” — no change applied.`);
       } else {
-        const actor = formatActor(routing, (recipients.approver ?? recipients.approvers[0]).email);
+        // The server records the logged-in user (approved_by), not the Business Head.
+        const actor = formatActor(routing, res.decided_by ?? me?.email);
         setDecision(
-          `Marked “${res.status}” (attributed to ${actor})${remark ? ` · remark: “${remark}”` : ""}. ` +
-            `A threaded mail was sent To ${recipients.to.join(", ")} and Cc ${recipients.cc.length} recipient` +
-            `${recipients.cc.length === 1 ? "" : "s"} (when SMTP is configured on the server).`,
+          `Marked “${crStatusLabel(res.status)}” by ${actor}${remark ? ` · remark: “${remark}”` : ""}. ` +
+            `A threaded mail was sent To ${mailedTo} and Cc ${ccCount} recipient` +
+            `${ccCount === 1 ? "" : "s"} (when SMTP is configured on the server).`,
         );
       }
     } catch (e) {
+      // A refusal comes back as the server's own sentence (who may decide, own return,
+      // no approver) — shown as is.
       setError(e instanceof Error ? e.message : "Failed to apply the decision");
     } finally {
       setBusy(null);
@@ -178,6 +218,8 @@ export default function CustomerReturnApprovePage() {
     try {
       const uomFor = (article: string) => data.lines.find((l) => l.item_description === article)?.uom?.toString() || "";
       await bulkSaveBoxes(company, crId, toBulkItems(boxes, uomFor), { allowClear: true });
+      // The server marks an approved return whose boxes are saved 'Submitted' (still decided).
+      setStatus((s) => (s === "Approved" ? "Submitted" : s));
       setBoxNotice(`Saved ${boxes.length} box${boxes.length === 1 ? "" : "es"}. Print QR labels from the detail screen.`);
     } catch (e) {
       setBoxError(e instanceof Error ? e.message : "Failed to save boxes");
@@ -256,22 +298,26 @@ export default function CustomerReturnApprovePage() {
           </p>
         </div>
         <div className="flex-1" />
-        <Link href={`/modules/customer-returns/${encodeURIComponent(data.rtv_id)}?company=${company}`} className="text-[13px] rounded-md border border-[var(--aws-border)] px-3 py-1.5 bg-white hover:border-[var(--aws-orange)]">
-          Open detail
-        </Link>
+        {/* The detail screen is admin-only, so an approver who isn't one isn't sent there. */}
+        {isAdmin && (
+          <Link href={`/modules/customer-returns/${encodeURIComponent(data.rtv_id)}?company=${company}`} className="text-[13px] rounded-md border border-[var(--aws-border)] px-3 py-1.5 bg-white hover:border-[var(--aws-orange)]">
+            Open detail
+          </Link>
+        )}
       </div>
 
       <div className="mb-4">
         {alreadyDecided ? (
           <InfoBanner>
-            This customer return has already been <strong>{status}</strong> — no further action is needed here.
-            The recipient matrix below shows who was notified.
+            This customer return is already <strong>{crStatusLabel(status)}</strong> — the decision is final, so no
+            further action is needed here. The recipient matrix below shows who was notified.
           </InfoBanner>
         ) : (
           <InfoBanner>
             Approve / Reject / Hold here <strong>persists the decision</strong> and sends the threaded mail to the
-            recipient matrix below (the Business Head can also action it from the buttons in that mail). Delivery
-            requires SMTP to be configured on the server.
+            recipient matrix below. Only the approvers listed can decide (also from the buttons in their mail or
+            WhatsApp), and never the person who raised the return. Delivery requires SMTP to be configured on the
+            server.
           </InfoBanner>
         )}
       </div>
@@ -344,28 +390,34 @@ export default function CustomerReturnApprovePage() {
             <h2 className="text-[13px] font-semibold text-[var(--text-primary)] mb-3">Approvers</h2>
             {recipients.approvers.length > 0 ? (
               <div className="space-y-2">
-                {recipients.approvers.map((a, i) => (
-                  <div key={a.email} className="rounded-md border border-[#b6dbb1] bg-[#f4faf5] px-3 py-2.5">
-                    <div className="text-[13px] font-semibold text-[var(--text-primary)]">
-                      {a.name}
-                      <span className="ml-2 text-[11px] font-normal text-[var(--text-secondary)]">
-                        {i === 0 && recipients.approver ? "Business Head" : "Deputy"}
-                      </span>
+                {recipients.approvers.map((a, i) => {
+                  const email = a.email.trim().toLowerCase();
+                  return (
+                    <div key={a.email} className="rounded-md border border-[#b6dbb1] bg-[#f4faf5] px-3 py-2.5">
+                      <div className="text-[13px] font-semibold text-[var(--text-primary)]">
+                        {a.name}
+                        <span className="ml-2 text-[11px] font-normal text-[var(--text-secondary)]">
+                          {i === 0 && recipients.approver ? "Business Head" : "Deputy"}
+                          {meEmail && email === meEmail ? " · you" : ""}
+                          {raisedBy && email === raisedBy ? " · raised this return, so can't decide it" : ""}
+                        </span>
+                      </div>
+                      <div className="text-[12px] text-[var(--text-secondary)] break-all">{a.email}</div>
                     </div>
-                    <div className="text-[12px] text-[var(--text-secondary)] break-all">{a.email}</div>
-                  </div>
-                ))}
+                  );
+                })}
                 <p className="text-[11px] text-[var(--text-secondary)]">
-                  Each of these receives the Approve / Reject / Hold buttons by mail and WhatsApp, so a return still
-                  closes the same day when the Business Head is unavailable. Whoever decides first is the decision;
-                  a later click is reported as already actioned.
+                  Only these people can Approve / Reject / Hold — not admins, and never the person who raised the
+                  return. Each of them who didn&rsquo;t raise it receives the buttons by mail and WhatsApp, with a link
+                  to this review, so a return still closes the same day when the Business Head is unavailable. Whoever
+                  decides first is the decision; a later click is reported as already actioned.
                 </p>
               </div>
             ) : (
               <div className="rounded-md border border-[#ecd9a3] bg-[#fdf6e3] px-3 py-2.5 text-[12px] text-[#8a6d1a]">
-                No business head is mapped to an email and no deputy approver is configured, so this return has no mail
-                approver and cannot be actioned. Set a mapped Business Head ({data.business_head || "none"} is not in
-                the map) on the detail screen first.
+                No approver: the Business Head ({data.business_head || "none"}) isn&rsquo;t a user with the business-head
+                role and an e-mail, and no deputy approver is configured, so nobody can decide this return. Ask an
+                admin to fix the approver setup.
               </div>
             )}
           </section>
@@ -374,7 +426,7 @@ export default function CustomerReturnApprovePage() {
           <section className="bg-white border border-[var(--aws-border)] rounded-md p-4">
             <h2 className="text-[13px] font-semibold text-[var(--text-primary)] mb-1">Notification Matrix</h2>
             <p className="text-[11px] text-[var(--text-secondary)] mb-3">Who the decision mail would reach.</p>
-            <RecipientList label="To" emails={recipients.to} approverEmails={recipients.approvers.map((a) => a.email)} />
+            <RecipientList label="To" emails={recipients.to} approverEmails={recipients.deciders.map((a) => a.email)} />
             <div className="mt-3">
               <RecipientList label={`Cc (${recipients.cc.length})`} emails={recipients.cc} />
             </div>
@@ -390,13 +442,14 @@ export default function CustomerReturnApprovePage() {
             </div>
             {alreadyDecided ? (
               <p className="text-[12px] text-[var(--text-secondary)]">
-                This return has been <span className="font-semibold text-[var(--text-primary)]">{status}</span>. No further action can be taken here.
+                This return is already <span className="font-semibold text-[var(--text-primary)]">{crStatusLabel(status)}</span>. No
+                further decision can be taken.
               </p>
             ) : (
               <>
                 <label className="block text-[11px] text-[var(--text-secondary)]">
                   Remark (optional)
-                  <textarea value={remark} onChange={(e) => setRemark(e.target.value)} rows={3} className="w-full rounded border border-[var(--aws-border)] px-2 py-1.5 text-[12px] bg-white mt-1 mb-3" />
+                  <textarea value={remark} onChange={(e) => setRemark(e.target.value)} disabled={!canDecide} rows={3} className="w-full rounded border border-[var(--aws-border)] px-2 py-1.5 text-[12px] bg-white mt-1 mb-3 disabled:bg-[var(--background)]" />
                 </label>
                 <div className="flex flex-col gap-2">
                   {ACTIONS.map((a) => (
@@ -406,14 +459,14 @@ export default function CustomerReturnApprovePage() {
                       disabled={busy !== null || !canDecide}
                       style={{ backgroundColor: a.bg }}
                       className="text-[13px] font-semibold rounded-md px-3 py-2 text-white disabled:opacity-40 disabled:cursor-not-allowed"
-                      title={canDecide ? `Mark ${ACTION_TO_STATUS[a.action]}` : "No mapped approver"}
+                      title={canDecide ? `Mark ${ACTION_TO_STATUS[a.action]}` : (gate.reason ?? undefined)}
                     >
                       {busy === a.action ? "Applying…" : a.label}
                     </button>
                   ))}
                 </div>
-                {!canDecide && (
-                  <p className="text-[10px] text-[#8a6d1a] mt-2">Buttons are disabled until a mapped Business Head is set.</p>
+                {!canDecide && gate.reason && (
+                  <p className="text-[11px] text-[#8a6d1a] mt-2">{gate.reason}</p>
                 )}
               </>
             )}
