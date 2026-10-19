@@ -8,13 +8,13 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BackLink } from "@/components/BackLink";
 import { useUserScope, useHasPermission } from "@/lib/user";
-import { userHasWarehouse, normaliseWarehouseCode } from "@/lib/warehouseScope";
 import { fmtNum, fmtDate } from "@/lib/po";
-import { getPurchasePo, addBoxes, updateBoxes, saveReceive, type PurchasePoDetail, type PurchaseLine } from "@/lib/purchase-receive";
+import { getPurchasePo, addBoxes, updateBoxes, saveReceive, newClientKey, type PurchasePoDetail, type PurchaseLine } from "@/lib/purchase-receive";
 import { listArrivals, type ArrivalItem } from "@/lib/qc";
-import { inwardReducer, buildReceiveRequest, buildUpdateSections, buildAddSections, buildAddBoxesPayload, type DraftState, type LogisticsField, type InwardAction, type SectionSeed, type PrintResolver } from "./_boxEngine";
+import { inwardReducer, buildReceiveRequest, buildUpdateSections, buildAddSections, buildAddBoxesPayload, postedNewSectionIds, existingKey, type DraftState, type LogisticsField, type InwardAction, type SectionSeed, type PrintResolver } from "./_boxEngine";
 import { LineCard } from "./_LineCard";
 import { printLabels } from "./_labelPrint";
+import { inwardWarehouseChoices } from "./_warehouses";
 import { SendIntimationModal } from "../_SendIntimationModal";
 
 function matchKey(s: string | null | undefined): string {
@@ -52,7 +52,7 @@ function sectionSeeds(po: PurchasePoDetail, arrivals: ArrivalItem[]): SectionSee
     const lot = [...matches]
       .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
       .find((a) => a.lot_number)?.lot_number ?? "";
-    seeds.push({ line_number: line.line_number, lot_number: lot });
+    seeds.push({ line_number: line.line_number, lot_number: lot, clientKey: newClientKey() });
   }
   return seeds;
 }
@@ -84,6 +84,10 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
   const prefillRef = useRef<Partial<Record<LogisticsField, string>>>({});
   // Pre-seeded sections (per arrived article), re-applied on reset like prefill.
   const seedsRef = useRef<SectionSeed[]>([]);
+  // The full save in flight, if any. Print during Save (or a double click) waits
+  // for it instead of starting a second save that posts the same new sections
+  // again — duplicate boxes and stock.
+  const saveRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -154,6 +158,9 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
     setToast(null);
     try {
       await addBoxes(transactionNo, { sections: [payload] });
+      // Saved — clear the panel now, so a retry after a failed refresh can't
+      // post the same boxes again.
+      dispatch({ type: "clearAddBoxes", key: existingKey(line.line_number, sectionNumber) });
       await refresh();
       setToast({ kind: "ok", text: `Boxes added to Section ${sectionNumber}` });
     } catch (e) {
@@ -166,7 +173,17 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
   // Full save (reference save handler 1180-1406): receive → update existing
   // sections → create new sections, in order. Any step error aborts the rest.
   // No toast/refresh — reused by both Save and the save-then-print flow.
-  async function doFullSave() {
+  // A call while a save is running joins that save instead of starting another.
+  function doFullSave(): Promise<void> {
+    if (!saveRef.current) {
+      saveRef.current = runFullSave().finally(() => {
+        saveRef.current = null;
+      });
+    }
+    return saveRef.current;
+  }
+
+  async function runFullSave() {
     if (!po) return;
     // Header first — it sets the warehouse the box inserts stamp onto inventory
     // batches. Then update existing boxes + add new sections in parallel (they
@@ -174,10 +191,19 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
     await saveReceive(transactionNo, buildReceiveRequest(draft, po));
     const updates = buildUpdateSections(draft, po);
     const news = buildAddSections(draft, po, Date.now());
-    await Promise.all([
+    const postedIds = postedNewSectionIds(draft, po);
+    const [updated, added] = await Promise.allSettled([
       updates.length > 0 ? updateBoxes(transactionNo, { sections: updates }) : null,
       news.length > 0 ? addBoxes(transactionNo, { sections: news }) : null,
     ]);
+    // The new sections are saved once their POST lands. Drop them from the draft
+    // now, not on refresh, so a retry after a failed update or reload can't post
+    // them again.
+    if (news.length > 0 && added.status === "fulfilled") {
+      dispatch({ type: "dropNewSections", ids: postedIds });
+    }
+    if (updated.status === "rejected") throw updated.reason;
+    if (added.status === "rejected") throw added.reason;
   }
 
   async function handleSave() {
@@ -394,14 +420,6 @@ function Centered({ children, tone }: { children: React.ReactNode; tone?: "err" 
   );
 }
 
-// Physical warehouses the inward can be booked to. The Warehouse dropdown is
-// filtered to the warehouses the signed-in user is scoped to (admins see all);
-// the access match is format-insensitive via normaliseWarehouseCode
-// ("W-202" === "W202", "Savla D-34" === "SAVLAD34").
-const WAREHOUSE_OPTIONS = [
-  "W202", "A185", "A68", "F53", "A101", "Savla D-34", "Savla D-514", "Rishi", "Supreme", "Eskimo",
-];
-
 // Logistics & Receiving form — 12 Stores-owned fields (reference index.html 146-202).
 const LOGISTICS_DEFS: { field: LogisticsField; label: string; placeholder: string; type?: string; mono?: boolean }[] = [
   { field: "customer_party_name", label: "Customer / Party", placeholder: "Buyer party name" },
@@ -426,16 +444,11 @@ function LogisticsForm({
   dispatch: React.Dispatch<InwardAction>;
 }) {
   const { isAdmin, warehouses } = useUserScope();
-  // Warehouses this user may book to (admins see all). Keep an already-saved
-  // value selectable even if it now falls outside the user's scope.
-  const scopedWarehouses = isAdmin
-    ? WAREHOUSE_OPTIONS
-    : WAREHOUSE_OPTIONS.filter((w) => userHasWarehouse(warehouses, w));
-  const currentWh = (header.warehouse ?? "").trim();
-  const allowedWarehouses =
-    currentWh && !scopedWarehouses.some((w) => normaliseWarehouseCode(w) === normaliseWarehouseCode(currentWh))
-      ? [currentWh, ...scopedWarehouses]
-      : scopedWarehouses;
+  // Warehouses and cold stores this user may book to (admins see all), from
+  // the site table. Keep an already-saved value selectable even if it now
+  // falls outside the user's scope; a saved spelling of a listed site shows
+  // as that site (_warehouses.ts).
+  const warehouseChoice = inwardWarehouseChoices(header.warehouse, isAdmin, warehouses);
   return (
     <div className="bg-white border border-[var(--aws-border)] rounded-md p-4 mb-4">
       <div className="mb-3">
@@ -451,12 +464,12 @@ function LogisticsForm({
               {d.field === "warehouse" ? (
                 <select
                   id={id}
-                  value={header[d.field] ?? ""}
+                  value={warehouseChoice.value}
                   onChange={(e) => dispatch({ type: "setHeader", field: d.field, value: e.target.value })}
                   className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] font-mono"
                 >
                   <option value="">Select warehouse…</option>
-                  {allowedWarehouses.map((w) => (
+                  {warehouseChoice.options.map((w) => (
                     <option key={w} value={w}>{w}</option>
                   ))}
                 </select>

@@ -114,6 +114,9 @@ export interface AddSectionPayload {
   lot_number?: string | null;
   manufacturing_date?: string | null;
   expiry_date?: string | null;
+  // Random key for this payload (newClientKey). The server applies each key once,
+  // so a retry after a lost reply doesn't add the boxes twice.
+  client_key?: string | null;
   boxes: BoxInputPayload[];
 }
 export interface AddBoxesRequest {
@@ -149,10 +152,24 @@ async function readError(res: Response, fallback: string): Promise<string> {
     const d = body?.detail;
     if (typeof d === "string") return d;
     if (d && typeof d === "object" && typeof d.message === "string") return d.message;
+    // The backend's error envelope: { error, message, details, ... }.
+    if (typeof body?.message === "string") return body.message;
   } catch {
     /* ignore */
   }
   return `${fallback} (HTTP ${res.status})`;
+}
+
+// Key for one POST /boxes section payload (AddSectionPayload.client_key). Made
+// once per new section or Add-Boxes panel and reused on retry. randomUUID needs a
+// secure context, so plain-http pages fall back to getRandomValues.
+export function newClientKey(): string {
+  const c = globalThis.crypto;
+  if (typeof c?.randomUUID === "function") return c.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (typeof c?.getRandomValues === "function") c.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 // ── Endpoints ─────────────────────────────────────────────────────────────────

@@ -67,6 +67,8 @@ export interface PrintBox {
 export type PrintResolver = () => Promise<PrintBox[]>;
 export interface NewSection {
   id: string;
+  // Sent as client_key with the section's POST, so a retry can't add it twice.
+  clientKey: string;
   line_number: number;
   box_count: string;
   lot_number: string;
@@ -89,6 +91,7 @@ export interface ExistingSectionEdit {
 }
 export interface AddBoxesDraft {
   boxes: DraftBox[];
+  clientKey: string; // as NewSection.clientKey, for the panel's POST
 }
 export interface DraftState {
   header: Record<LogisticsField, string>;
@@ -135,6 +138,7 @@ export function computeNet(gross: string, carton: string): string {
 export interface SectionSeed {
   line_number: number;
   lot_number: string;
+  clientKey: string; // made by the caller (newClientKey) so the reducer stays pure
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -198,6 +202,7 @@ export function initDraft(
       if (!line || (line.sections ?? []).length > 0) continue;
       newSections.push({
         id: `seed-${seed.line_number}`,
+        clientKey: seed.clientKey,
         line_number: seed.line_number,
         box_count: "",
         lot_number: seed.lot_number ?? "",
@@ -215,7 +220,7 @@ export function initDraft(
 export type InwardAction =
   | { type: "setHeader"; field: LogisticsField; value: string }
   | { type: "setCarton"; line: number; value: string }
-  | { type: "addSection"; line: number; id: string }
+  | { type: "addSection"; line: number; id: string; clientKey: string }
   | { type: "removeSection"; id: string }
   | {
       type: "setNewSectionField";
@@ -233,10 +238,11 @@ export type InwardAction =
       value: string;
     }
   | { type: "setExistingBoxField"; key: string; boxId: string; field: keyof ExistingBoxEdit; value: string; carton: string }
-  | { type: "genAddBoxes"; key: string; line: PurchaseLine; sectionNumber: number; count: number }
+  | { type: "genAddBoxes"; key: string; line: PurchaseLine; sectionNumber: number; count: number; clientKey: string }
   | { type: "setAddBoxField"; key: string; boxIndex: number; field: keyof DraftBox; value: string; carton: string }
   | { type: "hydrateSectionBoxes"; key: string; boxes: PurchaseBox[] }
   | { type: "clearAddBoxes"; key: string }
+  | { type: "dropNewSections"; ids: string[] }
   | { type: "reset"; po: PurchasePoDetail; prefill?: Partial<Record<LogisticsField, string>>; seeds?: SectionSeed[] };
 
 // Recompute net for one box draft given the (possibly new) carton weight.
@@ -274,7 +280,7 @@ export function inwardReducer(state: DraftState, action: InwardAction): DraftSta
       const addBoxes: DraftState["addBoxes"] = {};
       for (const [k, panel] of Object.entries(state.addBoxes)) {
         addBoxes[k] = k.startsWith(prefix)
-          ? { boxes: panel.boxes.map((b) => withNet(b, value)) }
+          ? { ...panel, boxes: panel.boxes.map((b) => withNet(b, value)) }
           : panel;
       }
       return { ...state, cartonByLine: { ...state.cartonByLine, [line]: value }, newSections, existing, addBoxes };
@@ -285,7 +291,7 @@ export function inwardReducer(state: DraftState, action: InwardAction): DraftSta
         ...state,
         newSections: [
           ...state.newSections,
-          { id: action.id, line_number: action.line, box_count: "", lot_number: "", mfg_date: "", exp_date: "", page: 1, boxes: null },
+          { id: action.id, clientKey: action.clientKey, line_number: action.line, box_count: "", lot_number: "", mfg_date: "", exp_date: "", page: 1, boxes: null },
         ],
       };
 
@@ -379,7 +385,7 @@ export function inwardReducer(state: DraftState, action: InwardAction): DraftSta
         lot_number: lotNumber,
         count: "",
       }));
-      return { ...state, addBoxes: { ...state.addBoxes, [key]: { boxes } } };
+      return { ...state, addBoxes: { ...state.addBoxes, [key]: { boxes, clientKey: action.clientKey } } };
     }
 
     case "setAddBoxField": {
@@ -392,7 +398,7 @@ export function inwardReducer(state: DraftState, action: InwardAction): DraftSta
         const next = { ...b, [field]: clamped };
         return field === "gross_weight" ? { ...next, net_weight: computeNet(clamped, carton) } : next;
       });
-      return { ...state, addBoxes: { ...state.addBoxes, [key]: { boxes } } };
+      return { ...state, addBoxes: { ...state.addBoxes, [key]: { ...panel, boxes } } };
     }
 
     case "hydrateSectionBoxes": {
@@ -421,6 +427,12 @@ export function inwardReducer(state: DraftState, action: InwardAction): DraftSta
       return { ...state, addBoxes: next };
     }
 
+    case "dropNewSections": {
+      // These sections' POST landed — they're saved, so a retry must not post them again.
+      const ids = new Set(action.ids);
+      return { ...state, newSections: state.newSections.filter((s) => !ids.has(s.id)) };
+    }
+
     default:
       return state;
   }
@@ -447,6 +459,19 @@ export function buildReceiveRequest(state: DraftState, po: PurchasePoDetail): Re
   return { header: header as ReceiveRequest["header"], lines };
 }
 
+// The PO line a new section posts to — null when save skips the section (no box
+// count yet, or its line is gone).
+function postTarget(sec: NewSection, po: PurchasePoDetail): PurchaseLine | null {
+  if ((parseInt(sec.box_count, 10) || 0) < 1) return null;
+  return po.lines.find((l) => l.line_number === sec.line_number) ?? null;
+}
+
+// Ids of the new sections buildAddSections posts. The page drops them from the
+// draft once that POST succeeds, so a retry can't post them again.
+export function postedNewSectionIds(state: DraftState, po: PurchasePoDetail): string[] {
+  return state.newSections.filter((s) => postTarget(s, po) !== null).map((s) => s.id);
+}
+
 // POST /boxes body — new sections (reference 1296-1391). box_number continues
 // after existing boxes + prior new sections of the same line.
 export function buildAddSections(state: DraftState, po: PurchasePoDetail, nowMs: number): AddSectionPayload[] {
@@ -454,10 +479,9 @@ export function buildAddSections(state: DraftState, po: PurchasePoDetail, nowMs:
   let globalIdx = 0;
   const out: AddSectionPayload[] = [];
   for (const sec of state.newSections) {
-    const boxCount = parseInt(sec.box_count, 10) || 0;
-    if (boxCount < 1) continue;
-    const line = po.lines.find((l) => l.line_number === sec.line_number);
+    const line = postTarget(sec, po);
     if (!line) continue;
+    const boxCount = parseInt(sec.box_count, 10);
     const existingCount = countExistingBoxes(line);
     let boxes;
     if (sec.boxes && sec.boxes.length) {
@@ -496,6 +520,7 @@ export function buildAddSections(state: DraftState, po: PurchasePoDetail, nowMs:
       lot_number: sec.lot_number || null,
       manufacturing_date: sec.mfg_date || null,
       expiry_date: sec.exp_date || null,
+      client_key: sec.clientKey,
       boxes,
     });
   }
@@ -552,6 +577,7 @@ export function buildAddBoxesPayload(
     lot_number: sec?.lot_number ?? null,
     manufacturing_date: sec?.manufacturing_date ?? null,
     expiry_date: sec?.expiry_date ?? null,
+    client_key: state.addBoxes[key]?.clientKey ?? null,
     boxes: boxes.map((b, i) => ({
       box_id: `${base}-${i + 1}`,
       box_number: b.box_number,

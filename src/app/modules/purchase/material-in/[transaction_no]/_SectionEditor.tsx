@@ -16,11 +16,11 @@ import { useHasPermission } from "@/lib/user";
 import {
   listSectionBoxes,
   listSectionBoxesForPrint,
+  newClientKey,
   type PurchaseLine,
   type PurchaseSection,
   type PurchaseBox,
 } from "@/lib/purchase-receive";
-import { normaliseWarehouseCode } from "@/lib/warehouseScope";
 import {
   BOXES_PER_PAGE,
   existingKey,
@@ -32,18 +32,10 @@ import {
   type PrintBox,
   type PrintResolver,
 } from "./_boxEngine";
+import { printsColdLabels } from "./_warehouses";
 
 const BOX_FETCH_SIZE = 200; // boxes fetched per backend request (lazy chunk)
 const BOX_DISPLAY_SIZE = 10; // boxes shown per page in the box table
-
-// Label printing is a cold-storage operation — Print all / Print range are only
-// offered when one of these warehouses is selected on the inward's Warehouse field.
-const COLD_STORAGE_WAREHOUSES = ["Savla D-34", "Savla D-514", "Rishi", "Supreme", "Eskimo"];
-function isColdStorageWarehouse(w: string | null | undefined): boolean {
-  const target = normaliseWarehouseCode(w ?? "");
-  if (!target) return false;
-  return COLD_STORAGE_WAREHOUSES.some((c) => normaliseWarehouseCode(c) === target);
-}
 
 // The box table, its print controls and SecField are exported for Stores →
 // Production Indents' manual sticker print, which reuses this box format.
@@ -263,12 +255,13 @@ export function SectionEditor({
   const existingSections = line.sections ?? [];
   const totalExisting = existingSections.reduce((n, s) => n + (s.total_boxes ?? s.box_count ?? s.boxes?.length ?? 0), 0);
   const newForLine = draft.newSections.filter((s) => s.line_number === line.line_number);
-  // Label printing (Print all / Range) is gated to cold-storage warehouses.
-  const canPrintLabels = isColdStorageWarehouse(draft.header.warehouse);
+  // Label printing (Print all / Range) is gated to the cold stores, under any
+  // spelling of the inward's Warehouse ("Savla D-34" counts as Savla D-39).
+  const canPrintLabels = printsColdLabels(draft.header.warehouse);
 
   function addSection() {
     const id = `${line.line_number}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    dispatch({ type: "addSection", line: line.line_number, id });
+    dispatch({ type: "addSection", line: line.line_number, id, clientKey: newClientKey() });
   }
 
   return (
@@ -561,7 +554,7 @@ function ExistingSectionCard({
             </label>
             <button
               type="button"
-              onClick={() => dispatch({ type: "genAddBoxes", key, line, sectionNumber: section.section_number, count: parseInt(addCount, 10) || 0 })}
+              onClick={() => dispatch({ type: "genAddBoxes", key, line, sectionNumber: section.section_number, count: parseInt(addCount, 10) || 0, clientKey: newClientKey() })}
               className="h-7 px-2 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)]"
             >
               Generate

@@ -16,7 +16,7 @@ import { sendWalkInIntimation, type WalkInIntimationResult } from "@/lib/po";
 import { ArticlePicker } from "@/app/modules/sample/_form";
 import { WAREHOUSE_OPTIONS } from "@/lib/admin-api";
 import { useMe, useUserScope } from "@/lib/user";
-import { normaliseWarehouseCode } from "@/lib/warehouseScope";
+import { sameSite } from "@/lib/sites";
 
 type PickedItem = { sku_id: number; sku_name: string; rate: string; qty: string };
 
@@ -60,15 +60,19 @@ export function WalkInIntimationModal({ onClose }: { onClose: () => void }): Rea
 
   // Seed indentor + warehouse from the signed-in user once the cached /me
   // snapshot lands (a microtask after mount). Only fills a still-empty field,
-  // so anything already typed survives.
+  // so anything already typed survives. A grant seeds the option naming its
+  // site under any spelling (a "D-39" grant seeds Savla D-39). Deferred a
+  // microtask so the setState isn't synchronous in the effect body
+  // (react-hooks/set-state-in-effect).
   useEffect(() => {
-    if (me?.full_name) setIndentor((v) => v || me.full_name!);
+    const name = me?.full_name;
+    if (name) queueMicrotask(() => setIndentor((v) => v || name));
   }, [me]);
   useEffect(() => {
     const mine = warehouses
-      .map((w) => WAREHOUSE_OPTIONS.find((o) => normaliseWarehouseCode(o.value) === normaliseWarehouseCode(w))?.value)
+      .map((w) => WAREHOUSE_OPTIONS.find((o) => sameSite(o.value, w))?.value)
       .find(Boolean);
-    if (mine) setWarehouse((v) => v || mine);
+    if (mine) queueMicrotask(() => setWarehouse((v) => v || mine));
   }, [warehouses]);
 
   // Add an article from the picker, de-duped on sku_id.
