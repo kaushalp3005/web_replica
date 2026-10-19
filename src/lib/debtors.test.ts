@@ -22,7 +22,7 @@ function party(customer: string, ageing: [number, number, number, number], more:
   const [lt30, d30to60, d60to90, gt90] = ageing;
   return {
     id: `test:${customer}`, customer, pending: lt30 + d30to60 + d60to90 + gt90, ageing: { lt30, d30to60, d60to90, gt90 },
-    division: null, salesPerson: null, type: null, broker: null, remarks: null, phone: null, ...more,
+    division: null, salesPerson: null, type: null, remarks: null, phone: null, ...more,
   };
 }
 
@@ -123,7 +123,7 @@ check("sorting does not mutate its input", P[0].customer, "August Assortments");
 const R = reportFromDatabase("apmc", {
   section: "apmc", updated_at: "2026-10-12T10:10:00+00:00",
   parties: [
-    { customer: " Ekta Trading Co-APMC\r\r\n ", type: " Debtors (APMC) ", broker: "", outstanding: "1,57,088.50",
+    { customer: " Ekta Trading Co-APMC\r\r\n ", type: " Debtors (APMC) ", outstanding: "1,57,088.50",
       above_90_days: "157088.5", contact_number: " 98200 12345 " },
     { customer: "   ", outstanding: 100, below_30_days: 100 },
     { customer: "No outstanding field", below_30_days: 10, above_90_days: 5, contact_number: 9820012345 },
@@ -132,7 +132,7 @@ const R = reportFromDatabase("apmc", {
 });
 check("names lose line breaks and padding", R?.parties.map((p) => p.customer), ["Ekta Trading Co-APMC", "No outstanding field"]);
 check("numeric strings are parsed", [R?.parties[0].pending, R?.parties[0].ageing.gt90, R?.parties[0].ageing.lt30], [157088.5, 157088.5, 0]);
-check("blank text becomes null", [R?.parties[0].broker, R?.parties[0].type], [null, "Debtors (APMC)"]);
+check("type is tidied", R?.parties[0].type, "Debtors (APMC)");
 check("a missing outstanding falls back to the bucket sum", R?.parties[1].pending, 15);
 check("contact numbers: text is trimmed, a number becomes text", R?.parties.map((p) => p.phone), ["98200 12345", "9820012345"]);
 check("no contact number is null", reportFromDatabase("cd-cf", { parties: [{ customer: "X", outstanding: 1 }] })?.parties[0].phone, null);
@@ -148,7 +148,7 @@ check("search finds the division",
 const DB = reportFromDatabase("cd-cf", {
   section: "cd-cf", updated_at: "2026-10-12T10:10:00+00:00",
   parties: [
-    { party_id: "cd-cf:cf:bigbasket", customer: " Bigbasket ", cd_cf: "CF", sales_person: "Prashant Pal", type: null, broker: null,
+    { party_id: "cd-cf:cf:bigbasket", customer: " Bigbasket ", cd_cf: "CF", sales_person: "Prashant Pal", type: null,
       outstanding: 2960823.35, below_30_days: 87014, days_30_to_60: 0, days_60_to_90: 78.93, above_90_days: 2873730.42,
       remarks: "Follow up\r\nweekly", contact_number: "99805 42121 / 96112 74235" },
     { party_id: "x", customer: "", outstanding: 5 },
@@ -157,7 +157,7 @@ const DB = reportFromDatabase("cd-cf", {
 });
 check("database rows map onto the party shape", DB?.parties, [{
   id: "cd-cf:cf:bigbasket", customer: "Bigbasket", pending: 2960823.35, ageing: { lt30: 87014, d30to60: 0, d60to90: 78.93, gt90: 2873730.42 },
-  division: "CF", salesPerson: "Prashant Pal", type: null, broker: null, remarks: "Follow up\nweekly",
+  division: "CF", salesPerson: "Prashant Pal", type: null, remarks: "Follow up\nweekly",
   phone: "99805 42121 / 96112 74235",
 }]);
 check("the report carries its section and when the rows were written", [DB?.section, DB?.loadedAt],
@@ -170,11 +170,11 @@ check("a reply without a parties list is rejected", rejected, true);
 
 // ── a party is addressed by the id the database gives it ──
 const HAND = reportFromDatabase("apmc", { parties: [
-  { party_id: "A-003", section: "apmc/non-apmc", customer: "Mehta Bros", type: "APMC", broker: "K Broker", outstanding: 7000, above_90_days: 7000 },
+  { party_id: "A-003", section: "apmc/non-apmc", customer: "Mehta Bros", type: "APMC", outstanding: 7000, above_90_days: 7000 },
   { customer: "No Id Traders", outstanding: 5 },
 ] });
 check("a row added by hand keeps its own id", HAND?.parties[0].id, "A-003");
-check("…and its APMC columns", [HAND?.parties[0].type, HAND?.parties[0].broker, HAND?.section], ["APMC", "K Broker", "apmc"]);
+check("…and its APMC type", [HAND?.parties[0].type, HAND?.section], ["APMC", "apmc"]);
 check("a row without an id falls back to the loader's slug", HAND?.parties[1].id, "apmc:no-id-traders");
 
 // ── party ids: must match the collections backend's party_slug ──

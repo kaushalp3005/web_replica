@@ -356,7 +356,7 @@ export const MODULES: ModuleItem[] = [
   {
     title: "Debtors Collection",
     description:
-      "DPD view of what customers owe — CD-CF and APMC + Non-APMC outstanding split into age buckets, with CD / CF, sales person, type and broker breakdowns, and Call now from contact numbers.",
+      "DPD view of what customers owe — CD-CF and APMC + Non-APMC outstanding split into age buckets, with CD / CF, sales person and type breakdowns, and Call now from contact numbers.",
     badge: "Finance",
     stat: "DPD · CD-CF · APMC + Non-APMC",
     route: "debtors-collection",

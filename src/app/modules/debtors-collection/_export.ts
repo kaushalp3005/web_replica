@@ -143,7 +143,7 @@ export async function exportPartiesToExcel({
   const parties = rows.map((r) => byId.get(r.id)).filter((p): p is DpdExportParty => p !== undefined);
 
   // The tab's own columns: CD - CF and Sales person, or Type and Broker.
-  const DIM_COLUMN: Record<string, keyof DpdExportParty> = { division: "cd_cf", salesPerson: "sales_person", type: "type", broker: "broker" };
+  const DIM_COLUMN: Record<string, keyof DpdExportParty> = { division: "cd_cf", salesPerson: "sales_person", type: "type" };
   const dims = dimensions.map((d) => ({ label: d.label, key: DIM_COLUMN[d.field] }));
   const who = <T extends { party: DpdExportParty }>(): Column<T>[] => [
     { label: "Customer", value: (x) => x.party.customer, width: 40 },

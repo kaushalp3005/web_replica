@@ -518,7 +518,7 @@ function PartiesTable({
                 <span className="font-medium text-[var(--text-primary)]">{p.customer}</span>
                 {p.remarks ? <Remark text={p.remarks} /> : null}
               </td>
-              {/* Pills stay on one line; names may wrap (broker names run to 30+ characters). */}
+              {/* Pills stay on one line; names may wrap (sales person names run long). */}
               {dimensions.map((d) => (
                 <td
                   key={d.field}

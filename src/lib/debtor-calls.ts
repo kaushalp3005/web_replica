@@ -120,7 +120,6 @@ export interface DpdExportParty extends DpdAmounts {
   cd_cf: string | null;
   sales_person: string | null;
   type: string | null;
-  broker: string | null;
   remarks: string | null;
   contact_number: string | null;
   call_summary: {
@@ -158,13 +157,19 @@ export interface DpdAmounts {
 /** What an upload would do to a section's DPD — or, after apply, what it did. */
 export interface DpdUploadPlan {
   section: DpdSectionKey;
-  files: { division: "CF" | "CD" | null; company: string | null; period: string | null; rows: number; debit: number; credit: number }[];
+  /** layout: Tally's group report, or the ledger list (one row per customer, with a Sales person column and no
+   *  company name). total_checked: the file had a Grand Total and its rows add up to it; a ledger list has none,
+   *  and each of its rows was checked to add up to its own Pending Bills instead. */
+  files: {
+    division: "CF" | "CD"; company: string | null; period: string | null; layout: "groups" | "ledgers"; total_checked: boolean;
+    rows: number; debit: number; credit: number;
+  }[];
   /** Customers already in the DPD: new figures, everything else kept. */
   updated: { party_id: string; customer: string; division: string | null; sales_person: string | null; before: DpdAmounts; after: DpdAmounts }[];
   /** Customers that owe but are not in the DPD: added only when ticked. */
   new: {
     party_id: string; customer: string; division: string | null; sales_person: string | null; type: string | null;
-    broker: string | null; amounts: DpdAmounts; reason: string; include_by_default: boolean;
+    amounts: DpdAmounts; reason: string; include_by_default: boolean;
   }[];
   /** In the DPD but owing nothing now: removed, or kept with dues at zero when it has calls. */
   dropped: { party_id: string; customer: string; division: string | null; outstanding_before: number; has_history: boolean; why: string }[];
@@ -175,11 +180,10 @@ export interface DpdUploadPlan {
   result?: { updated: number; added: number; removed: number; kept_with_history: number; not_added: number; left_out: number };
 }
 
-/** The files of one upload: CF and/or CD for the CD-CF tab, one file for APMC + Non-APMC. */
+/** The files of one upload, for either tab: CF and/or CD. Each replaces only its own company's rows in that tab. */
 export interface DpdUploadFiles {
   cf?: File | null;
   cd?: File | null;
-  apmc?: File | null;
 }
 
 function uploadForm(section: DpdSectionKey, files: DpdUploadFiles, include?: string[]): FormData {
@@ -187,7 +191,6 @@ function uploadForm(section: DpdSectionKey, files: DpdUploadFiles, include?: str
   form.set("section", section);
   if (files.cf) form.set("cf_file", files.cf, files.cf.name);
   if (files.cd) form.set("cd_file", files.cd, files.cd.name);
-  if (files.apmc) form.set("apmc_file", files.apmc, files.apmc.name);
   if (include) form.set("include", JSON.stringify(include));
   return form;
 }
@@ -220,7 +223,6 @@ export interface PartyChanges {
   division?: string;
   salesPerson?: string;
   type?: string;
-  broker?: string;
   pending?: number;
   ageing?: Partial<Record<AgeBucketKey, number>>;
   remarks?: string;
@@ -247,7 +249,6 @@ export async function saveParty(section: DpdSectionKey, party: DpdParty, changes
   if (changes.division !== undefined) body.cd_cf = changes.division;
   if (changes.salesPerson !== undefined) body.sales_person = changes.salesPerson;
   if (changes.type !== undefined) body.type = changes.type;
-  if (changes.broker !== undefined) body.broker = changes.broker;
   if (changes.pending !== undefined) body.outstanding = changes.pending;
   for (const [bucket, amount] of Object.entries(changes.ageing ?? {}) as [AgeBucketKey, number][]) {
     body[BUCKET_COLUMN[bucket]] = amount;
@@ -346,7 +347,6 @@ export async function placeCall(section: DpdSectionKey, party: DpdParty): Promis
       division: party.division,
       sales_person: party.salesPerson,
       party_type: party.type,
-      broker: party.broker,
       remarks: party.remarks,
       outstanding: party.pending,
       ageing: party.ageing,

@@ -2,7 +2,7 @@
 //
 // Two sections, each from a Tally "Sundry Debtors" ageing export:
 //   cd-cf  one row per customer per division (CF or CD) with its sales person
-//   apmc   APMC + Non-APMC customers with type and broker
+//   apmc   APMC + Non-APMC customers with their type
 //
 // The screen has ONE source: the collections backend's database, table
 // collection_parties (loadDpdReport in lib/debtor-calls.ts; reportFromDatabase
@@ -29,7 +29,7 @@ export type AgeBucketKey = (typeof AGE_BUCKETS)[number]["key"];
 export type Ageing = Record<AgeBucketKey, number>;
 
 /** The text columns a section can be broken down and filtered by. */
-export type DpdDimension = "division" | "salesPerson" | "type" | "broker";
+export type DpdDimension = "division" | "salesPerson" | "type";
 
 export interface DpdParty {
   /** The party's id in the database (collection_parties.party_id). Calls, call
@@ -45,7 +45,6 @@ export interface DpdParty {
   division: string | null;
   salesPerson: string | null;
   type: string | null;
-  broker: string | null;
   /** Free-text collection notes; may run to several lines. */
   remarks: string | null;
   /** Contact number(s) as recorded — display text, possibly several numbers
@@ -134,7 +133,6 @@ function toParty(section: DpdSectionKey, v: unknown): DpdParty | null {
     division,
     salesPerson: toText(r.salesPerson),
     type: toText(r.type),
-    broker: toText(r.broker),
     remarks: toNote(r.remarks),
     phone: toPhone(r.phone),
   };
@@ -159,7 +157,6 @@ export function partyFromDatabase(section: DpdSectionKey, v: unknown): DpdParty 
         division: row.cd_cf,
         salesPerson: row.sales_person,
         type: row.type,
-        broker: row.broker,
         remarks: row.remarks,
         phone: row.contact_number,
       })
@@ -263,7 +260,7 @@ export function filterParties(parties: readonly DpdParty[], f: DpdFilter): DpdPa
     if (f.bucket && !hasDues(p.ageing[f.bucket])) return false;
     if (dims.some(([dim, want]) => dimensionValue(p, dim) !== want)) return false;
     if (q) {
-      const haystack = [p.customer, p.division, p.salesPerson, p.type, p.broker, p.remarks].filter(Boolean).join(" ").toLowerCase();
+      const haystack = [p.customer, p.division, p.salesPerson, p.type, p.remarks].filter(Boolean).join(" ").toLowerCase();
       if (!haystack.includes(q)) return false;
     }
     return true;

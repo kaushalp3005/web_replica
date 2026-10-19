@@ -5,15 +5,15 @@ import { forwardCollectionsUpload } from "@/lib/server/collections";
 //   POST /api/collections/upload?step=preview   what the files would change; writes nothing
 //   POST /api/collections/upload?step=apply     replace the DPD; `include` lists the new customers to add
 //
-// Form fields: section ("cd-cf" | "apmc"); the files cf_file and/or cd_file
-// (CD-CF), or apmc_file (APMC + Non-APMC); include (JSON list, apply only).
+// Form fields: section ("cd-cf" | "apmc"); the files cf_file and/or cd_file,
+// for either tab; include (JSON list, apply only).
 // A static path ON PURPOSE — see the other collections routes — and the step
 // in the query string for the same reason.
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const FILE_FIELDS = ["cf_file", "cd_file", "apmc_file"] as const;
+const FILE_FIELDS = ["cf_file", "cd_file"] as const;
 const bad = (detail: string) => Response.json({ detail }, { status: 400 });
 
 export async function POST(request: Request): Promise<Response> {

@@ -71,7 +71,7 @@ function parseAmount(text: string): number | null {
 function draftOf(p: DpdParty): Draft {
   return {
     customer: p.customer,
-    dims: { division: p.division ?? "", salesPerson: p.salesPerson ?? "", type: p.type ?? "", broker: p.broker ?? "" },
+    dims: { division: p.division ?? "", salesPerson: p.salesPerson ?? "", type: p.type ?? "" },
     amounts: Object.fromEntries(AMOUNTS.map((a) => [a.key, String(amountOf(p, a.key))])) as Record<AmountKey, string>,
     remarks: p.remarks ?? "",
     phone: p.phone ?? "",

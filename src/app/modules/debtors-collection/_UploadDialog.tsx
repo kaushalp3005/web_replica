@@ -7,10 +7,12 @@
 // customers to add, customers dropped, ledgers left out, and why); "Replace
 // the DPD" asks once more in a confirmation popup, then writes it all in one go.
 //
-// The CD-CF tab takes the Candor Foods (CF) and/or the Candor Dates (CD)
-// export: a file replaces only its own company's rows. The APMC + Non-APMC tab
-// takes its own export. The backend checks each file is the company its box
-// says, so swapped files are refused rather than loaded.
+// Either tab takes a Candor Foods (CF) and/or a Candor Dates (CD) file, the
+// company ticked for each: a file replaces only its own company's rows in that
+// tab, so uploading CF alone again leaves the CD rows as they are. Tally's group
+// report names its company, and the backend refuses one in the wrong box. The
+// ledger list (one row per customer, with a Sales person column) does not, so
+// the box it is in is taken as its company.
 //
 // New customers — owing, but not in the DPD — are added only when ticked.
 // New bills (all dues under 30 days, 5,000 or more) start ticked; the rest are
@@ -37,6 +39,12 @@ type Step =
   | { at: "done"; plan: DpdUploadPlan };
 
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+const COMPANIES = [
+  { slot: "cf", name: "Candor Foods (CF)" },
+  { slot: "cd", name: "Candor Dates (CD)" },
+] as const;
+const COMPANY_NAME: Record<string, string> = { CF: "Candor Foods (CF)", CD: "Candor Dates (CD)" };
 
 export function UploadDialog({
   open,
@@ -90,6 +98,7 @@ function UploadFlow({
   const id = useId();
   const confirmRef = useRef<HTMLDialogElement>(null);
   const [files, setFiles] = useState<DpdUploadFiles>({});
+  const [picked, setPicked] = useState<Record<keyof DpdUploadFiles, boolean>>({ cf: false, cd: false });
   const [step, setStep] = useState<Step>({ at: "choose" });
   const [error, setError] = useState<string | null>(null);
   const [include, setInclude] = useState<Set<string>>(new Set());
@@ -102,7 +111,9 @@ function UploadFlow({
     else if (!confirming && dialog.open) dialog.close();
   }, [confirming]);
 
-  const hasFiles = section === "cd-cf" ? Boolean(files.cf || files.cd) : Boolean(files.apmc);
+  // Unticking a company drops its file, so a chosen file always has its box ticked.
+  const hasFiles = Boolean(files.cf || files.cd);
+  const busy = step.at === "checking" || step.at === "applying";
   const plan = step.at === "review" || step.at === "applying" || step.at === "done" ? step.plan : null;
 
   function choose(slot: keyof DpdUploadFiles, file: File | null) {
@@ -110,6 +121,11 @@ function UploadFlow({
     // Different files mean a different plan: check again.
     setStep({ at: "choose" });
     setError(null);
+  }
+
+  function pick(slot: keyof DpdUploadFiles, on: boolean) {
+    setPicked((p) => ({ ...p, [slot]: on }));
+    if (!on) choose(slot, null);
   }
 
   async function check() {
@@ -140,18 +156,33 @@ function UploadFlow({
     }
   }
 
-  const fileBox = (slot: keyof DpdUploadFiles, title: string, hint: string) => (
-    <div className="rounded-md border border-[var(--aws-border)] px-3 py-2.5">
-      <label htmlFor={`${id}-${slot}`} className="block text-[12px] font-semibold text-[var(--text-primary)]">{title}</label>
-      <p className="text-[11px] text-[var(--text-muted)]">{hint}</p>
-      <input
-        id={`${id}-${slot}`}
-        type="file"
-        accept=".xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        disabled={step.at === "checking" || step.at === "applying"}
-        onChange={(e) => choose(slot, e.target.files?.[0] ?? null)}
-        className="mt-2 block w-full text-[12px] text-[var(--text-secondary)] file:mr-3 file:h-8 file:px-3 file:rounded-[2px] file:border file:border-[var(--aws-border-strong)] file:bg-white file:text-[12px] file:font-medium file:text-[var(--text-primary)] hover:file:bg-[var(--surface-subtle)]"
-      />
+  const companyBox = (slot: keyof DpdUploadFiles, name: string) => (
+    <div key={slot} className="rounded-md border border-[var(--aws-border)] px-3 py-2.5">
+      <label className="flex items-center gap-2 cursor-pointer text-[12px] font-semibold text-[var(--text-primary)]">
+        <input
+          type="checkbox"
+          checked={picked[slot]}
+          disabled={busy}
+          onChange={(e) => pick(slot, e.target.checked)}
+          className="w-4 h-4 accent-[var(--aws-orange)]"
+        />
+        {name}
+      </label>
+      {picked[slot] ? (
+        <>
+          <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">Replaces the {slot.toUpperCase()} rows of this tab only.</p>
+          <input
+            type="file"
+            aria-label={`${name} file`}
+            accept=".xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            disabled={busy}
+            onChange={(e) => choose(slot, e.target.files?.[0] ?? null)}
+            className="mt-2 block w-full text-[12px] text-[var(--text-secondary)] file:mr-3 file:h-8 file:px-3 file:rounded-[2px] file:border file:border-[var(--aws-border-strong)] file:bg-white file:text-[12px] file:font-medium file:text-[var(--text-primary)] hover:file:bg-[var(--surface-subtle)]"
+          />
+        </>
+      ) : (
+        <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">Not uploading: its rows stay as they are.</p>
+      )}
     </div>
   );
 
@@ -163,8 +194,8 @@ function UploadFlow({
           Replace the {label} DPD
         </h2>
         <p className="mt-0.5 text-[12px] leading-[17px] text-[var(--text-secondary)]">
-          In Tally: Sundry Debtors → Group Outstandings, with the ageing columns, exported to Excel. Nothing changes until
-          you confirm.
+          In Tally: Sundry Debtors → Group Outstandings, with the ageing columns, exported to Excel — the group report,
+          or the ledger list with a Sales person column. Nothing changes until you confirm.
         </p>
       </div>
 
@@ -173,16 +204,14 @@ function UploadFlow({
           <Done plan={step.plan} label={label} />
         ) : (
           <>
-            <div className={`grid gap-3 ${section === "cd-cf" ? "sm:grid-cols-2" : ""}`}>
-              {section === "cd-cf" ? (
-                <>
-                  {fileBox("cf", "Candor Foods (CF)", "Replaces the CF rows only.")}
-                  {fileBox("cd", "Candor Dates (CD)", "Replaces the CD rows only.")}
-                </>
-              ) : (
-                fileBox("apmc", "APMC + Non-APMC", "With the APMC groups expanded, so each customer is listed.")
-              )}
-            </div>
+            <fieldset className="space-y-2">
+              <legend className={H3}>Which company&rsquo;s file are you uploading?</legend>
+              <p className="text-[11px] leading-[16px] text-[var(--text-muted)]">
+                Tick one or both. A ledger list does not name its company, so the box it is in is taken as its company.
+                {section === "apmc" ? " A group report needs its APMC groups expanded, so each customer is listed." : ""}
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2">{COMPANIES.map((c) => companyBox(c.slot, c.name))}</div>
+            </fieldset>
             {error ? <p role="alert" className="text-[12px] text-[#b0280e]">{error}</p> : null}
             {step.at === "checking" ? <p role="status" className="text-[12px] text-[var(--text-secondary)]">Reading the files…</p> : null}
             {plan ? <Review plan={plan} include={include} setInclude={setInclude} /> : null}
@@ -226,7 +255,7 @@ function UploadFlow({
                 Replace the {label} DPD?
               </h2>
               <p className="mt-0.5 text-[12px] text-[var(--text-secondary)]">
-                {plan.files.map((f) => (f.division ? `${f.division}: ${f.period ?? "period not given"}` : f.period ?? "")).join(" · ")}
+                {plan.files.map((f) => `${f.division}: ${f.period ?? "period not given"}`).join(" · ")}
               </p>
             </div>
             <ul className="px-5 py-4 space-y-1.5 text-[13px] text-[var(--text-primary)]">
@@ -282,9 +311,12 @@ function Review({
     <div className="space-y-4">
       <div className="space-y-1">
         {plan.files.map((f) => (
-          <p key={f.division ?? "file"} className="text-[12px] text-[var(--text-secondary)]">
-            <span className="font-semibold text-[var(--text-primary)]">{f.company ?? "Company not given"}</span>
-            {`${f.period ? ` · ${f.period}` : ""} · ${f.rows} ledgers · adds up to Tally’s Grand Total ✓`}
+          <p key={f.division} className="text-[12px] text-[var(--text-secondary)]">
+            <span className="font-semibold text-[var(--text-primary)]">
+              {f.company ?? `${COMPANY_NAME[f.division]}, as you ticked: the file does not name its company`}
+            </span>
+            {`${f.period ? ` · ${f.period}` : ""} · ${f.rows} ledgers · `}
+            {f.total_checked ? "adds up to Tally’s Grand Total ✓" : "no Grand Total in the file; every row adds up to its own Pending Bills ✓"}
           </p>
         ))}
       </div>
@@ -329,8 +361,8 @@ function Review({
                       <span className="text-[13px] font-semibold tabular-nums text-[var(--text-primary)]">{formatInr(n.amounts.outstanding)}</span>
                     </span>
                     <span className="block text-[11px] text-[var(--text-muted)]">
-                      {[n.sales_person, n.type, n.broker].filter(Boolean).join(" · ")}
-                      {[n.sales_person, n.type, n.broker].some(Boolean) ? " — " : ""}
+                      {[n.sales_person, n.type].filter(Boolean).join(" · ")}
+                      {[n.sales_person, n.type].some(Boolean) ? " — " : ""}
                       {n.reason}
                     </span>
                   </span>
