@@ -11,7 +11,8 @@ import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { Breadcrumbs, NPD_DEV_ROOT } from "@/components/Breadcrumbs";
 import { useRequireAuth, useUserInitial, useHasPermission } from "@/lib/user";
-import { WAREHOUSES, getRequisition, type Warehouse } from "@/lib/sample";
+import { WAREHOUSES, getRequisition, listRequisitions, type Requisition, type Warehouse } from "@/lib/sample";
+import { linkCandidates, linkLabel, LINKABLE_STATUSES } from "@/lib/npd-link";
 import { createDevJobCard } from "@/lib/npd-dev";
 import {
   FormSection, ReviewRow, UomSelect,
@@ -98,6 +99,21 @@ export default function NewDevJobCardPage() {
     return () => { cancelled = true; };
   }, []);
 
+  // Opened from the menu rather than a request's Develop: offer the open requests, so a
+  // card built for one is still tied to it (63 of 98 cards had no request). Picking one
+  // reopens this page as ?req=<id>, which is exactly the Develop path and its prefill.
+  const [reqOptions, setReqOptions] = useState<Requisition[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled || new URLSearchParams(window.location.search).get("req")) return;
+      listRequisitions({ sample_types: "NPD,TRIAL", statuses: LINKABLE_STATUSES.join(","), limit: 200 })
+        .then((rows) => { if (!cancelled) setReqOptions(linkCandidates(rows)); })
+        .catch(() => { if (!cancelled) setReqOptions([]); });
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   // Default Expected dispatch date to today (client-only → no SSR hydration mismatch). Only
   // fills an EMPTY field, so a ?req prefill with its own date (set above) still wins.
   useEffect(() => {
@@ -177,7 +193,22 @@ export default function NewDevJobCardPage() {
         <h1 className="text-[20px] font-semibold text-[var(--text-primary)] mb-1">New development job card</h1>
         {linkedReq
           ? <p className="mb-4 text-[12px] text-[var(--text-secondary)]">Prefilled from approved request <span className="font-medium text-[var(--text-primary)]">{linkedReq}</span> — for each article, pick a base BOM and build its trial recipe.</p>
-          : <div className="mb-4" />}
+          : reqOptions && reqOptions.length > 0
+            ? (
+              <div className="mb-4 rounded-md border border-[var(--aws-border)] bg-white p-3">
+                <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">
+                  Developing this for a request? <span className="font-normal text-[var(--text-muted)]">(optional — prefills the card and links it)</span>
+                </label>
+                <select className="form-input" value="" aria-label="Request this card is for"
+                  onChange={(e) => {
+                    if (e.target.value) window.location.assign(`/modules/npd-development/job-cards/new?req=${e.target.value}`);
+                  }}>
+                  <option value="">No request — standalone R&amp;D card</option>
+                  {reqOptions.map((r) => <option key={r.id} value={r.id}>{linkLabel(r)}</option>)}
+                </select>
+              </div>
+            )
+            : <div className="mb-4" />}
 
         {error && <div className="mb-4 rounded-md border border-[#f0c7be] bg-[#fdf3f1] px-3 py-2 text-[13px] text-[#b1361e]">{error}</div>}
 
