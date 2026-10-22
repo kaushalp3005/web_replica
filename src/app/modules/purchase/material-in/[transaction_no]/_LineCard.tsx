@@ -9,7 +9,7 @@ import { useState } from "react";
 import { fmtNum } from "@/lib/po";
 import type { PurchaseLine } from "@/lib/purchase-receive";
 import { clamp3, type DraftState, type InwardAction, type PrintResolver } from "./_boxEngine";
-import { SectionEditor } from "./_SectionEditor";
+import { SectionEditor, type BoxActions } from "./_SectionEditor";
 
 export function LineCard({
   line,
@@ -21,6 +21,7 @@ export function LineCard({
   busy,
   onPrint,
   printedIds,
+  boxActions,
 }: {
   line: PurchaseLine;
   draft: DraftState;
@@ -31,6 +32,7 @@ export function LineCard({
   busy: string | null;
   onPrint: (resolve: PrintResolver) => void;
   printedIds: Set<string>;
+  boxActions: BoxActions;
 }) {
   const [open, setOpen] = useState(false);
   const carton = draft.cartonByLine[line.line_number] ?? "";
@@ -100,6 +102,7 @@ export function LineCard({
             busy={busy}
             onPrint={onPrint}
             printedIds={printedIds}
+            boxActions={boxActions}
           />
         </div>
       ) : null}

@@ -105,6 +105,9 @@ export interface BoxInputPayload {
   gross_weight?: number | null;
   lot_number?: string | null;
   count?: number | null;
+  // The draft box's key: a box already saved under it (one box at a time,
+  // createOneBox) is skipped instead of added again.
+  client_key?: string | null;
 }
 export interface AddSectionPayload {
   line_number: number;
@@ -267,5 +270,61 @@ export async function updateBoxes(txn: string, body: UpdateBoxesRequest): Promis
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await readError(res, "Failed to update boxes"));
+  return res.json();
+}
+
+// ── One box at a time (POST /{txn}/box, PUT | DELETE /{txn}/box/{box_id}) ─────
+// Material In's per-box print / Update / Delete. Each touches only that box.
+export interface SavedBox extends PurchaseBox {
+  transaction_no: string;
+  line_number: number;
+  section_number: number;
+}
+export interface OneBoxFields {
+  net_weight?: number | null;
+  gross_weight?: number | null;
+  lot_number?: string | null;
+  count?: number | null;
+}
+export interface OneBoxCreate extends OneBoxFields {
+  line_number: number;
+  // The saved section to add to; or, for a draft section not saved yet, its key
+  // (the first box saved from it makes the section, later ones join it).
+  section_number?: number | null;
+  section_key?: string | null;
+  section?: { lot_number?: string | null; manufacturing_date?: string | null; expiry_date?: string | null };
+  box_number?: number | null; // kept when free in the section
+  client_key?: string | null; // a retry returns the box the first try saved
+}
+export interface OneBoxResponse {
+  box: SavedBox;
+  created: boolean;
+}
+
+export async function createOneBox(txn: string, body: OneBoxCreate): Promise<OneBoxResponse> {
+  const res = await apiFetch(`/api/v1/purchase/${encodeURIComponent(txn)}/box`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res, "Failed to save the box"));
+  return res.json();
+}
+
+export async function updateOneBox(txn: string, boxId: string, body: OneBoxFields): Promise<OneBoxResponse> {
+  const res = await apiFetch(`/api/v1/purchase/${encodeURIComponent(txn)}/box/${encodeURIComponent(boxId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res, "Failed to update the box"));
+  return res.json();
+}
+
+export async function deleteOneBox(txn: string, boxId: string): Promise<{ box_id: string; deleted: boolean }> {
+  const res = await apiFetch(`/api/v1/purchase/${encodeURIComponent(txn)}/box/${encodeURIComponent(boxId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await readError(res, "Failed to delete the box"));
   return res.json();
 }

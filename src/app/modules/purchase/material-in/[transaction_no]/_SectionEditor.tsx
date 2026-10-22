@@ -23,6 +23,7 @@ import {
 } from "@/lib/purchase-receive";
 import {
   BOXES_PER_PAGE,
+  computeNet,
   existingKey,
   type DraftState,
   type DraftBox,
@@ -40,7 +41,25 @@ const BOX_DISPLAY_SIZE = 10; // boxes shown per page in the box table
 // The box table, its print controls and SecField are exported for Stores →
 // Production Indents' manual sticker print, which reuses this box format.
 export type BoxField = "gross_weight" | "net_weight" | "lot_number" | "count";
-export type BoxRow = { idKey: string | number; box_number: number; gross_weight: string; net_weight: string; lot_number: string; count: string };
+// idKey: an existing box's box_id, or a draft box's index. boxId: a draft box's
+// id once it is saved on its own (print / Update).
+export type BoxRow = { idKey: string | number; box_number: number; gross_weight: string; net_weight: string; lot_number: string; count: string; boxId?: string | null };
+
+// The box a row's print / Update / Delete acts on. The page saves, updates or
+// deletes just that box (createOneBox / updateOneBox / deleteOneBox).
+export type BoxTarget =
+  | { kind: "existing"; line: PurchaseLine; sectionNumber: number; boxId: string; row: BoxRow }
+  | { kind: "panel"; line: PurchaseLine; sectionNumber: number; key: string; index: number; box: DraftBox }
+  | { kind: "new"; line: PurchaseLine; section: NewSection; index: number; box: DraftBox };
+export interface BoxActions {
+  print: (t: BoxTarget) => void; // save (create or update) that box, then print its label
+  save: (t: BoxTarget) => void; // the row menu's Update / Save box
+  remove: (t: BoxTarget) => Promise<boolean>; // the row menu's Delete; true once the box is gone
+}
+
+function rowSaved(r: BoxRow): boolean {
+  return typeof r.idKey === "string" || !!r.boxId;
+}
 
 // The box table's editable columns, defined once: the same list drives the table
 // cells (md and up) and the labelled card fields (below md), so a box can never
@@ -182,23 +201,9 @@ export function PrintRangeControl({
   );
 }
 
-function toPrintBox(row: BoxRow, line: PurchaseLine, sectionNumber: number | null): PrintBox {
-  return {
-    box_id: typeof row.idKey === "string" ? row.idKey : null,
-    box_number: row.box_number,
-    net_weight: row.net_weight,
-    gross_weight: row.gross_weight,
-    lot_number: row.lot_number,
-    count: row.count,
-    line_number: line.line_number,
-    section_number: sectionNumber,
-    sku_name: line.sku_name ?? line.particulars ?? "",
-  };
-}
-
 function draftBoxToPrint(b: DraftBox, line: PurchaseLine): PrintBox {
   return {
-    box_id: null,
+    box_id: b.box_id ?? null, // a box saved on its own already has its id for the QR
     box_number: b.box_number,
     net_weight: b.net_weight,
     gross_weight: b.gross_weight,
@@ -210,8 +215,8 @@ function draftBoxToPrint(b: DraftBox, line: PurchaseLine): PrintBox {
   };
 }
 
-// DB box (from the print/list endpoint) → PrintBox.
-function purchaseBoxToPrint(b: PurchaseBox, line: PurchaseLine, sectionNumber: number): PrintBox {
+// DB box (from the print/list endpoint, or a box just saved on its own) → PrintBox.
+export function purchaseBoxToPrint(b: PurchaseBox, line: PurchaseLine, sectionNumber: number): PrintBox {
   return {
     box_id: b.box_id,
     box_number: b.box_number,
@@ -235,6 +240,7 @@ export function SectionEditor({
   busy,
   onPrint,
   printedIds,
+  boxActions,
 }: {
   line: PurchaseLine;
   draft: DraftState;
@@ -245,6 +251,7 @@ export function SectionEditor({
   busy: string | null;
   onPrint: (resolve: PrintResolver) => void;
   printedIds: Set<string>;
+  boxActions: BoxActions;
 }) {
   // Permission gates (UX only — server enforces). Adding boxes/sections →
   // material_in/create; updating existing boxes → material_in/edit.
@@ -304,11 +311,13 @@ export function SectionEditor({
           canAddBoxes={canAddBoxes}
           canUpdateBoxes={canUpdateBoxes}
           printedIds={printedIds}
+          boxActions={boxActions}
         />
       ))}
 
       {newForLine.map((sec) => (
-        <NewSectionCard key={sec.id} line={line} section={sec} carton={carton} dispatch={dispatch} onPrint={onPrint} canPrint={canPrintLabels} canPrintRange={canPrintRange} />
+        <NewSectionCard key={sec.id} line={line} section={sec} carton={carton} dispatch={dispatch} onPrint={onPrint} canPrint={canPrintLabels} canPrintRange={canPrintRange}
+          boxActions={boxActions} canAddBoxes={canAddBoxes} printedIds={printedIds} />
       ))}
 
       {existingSections.length === 0 && newForLine.length === 0 ? (
@@ -336,6 +345,7 @@ function ExistingSectionCard({
   canAddBoxes,
   canUpdateBoxes,
   printedIds,
+  boxActions,
 }: {
   line: PurchaseLine;
   section: PurchaseSection;
@@ -353,6 +363,7 @@ function ExistingSectionCard({
   canAddBoxes: boolean;
   canUpdateBoxes: boolean;
   printedIds: Set<string>;
+  boxActions: BoxActions;
 }) {
   const [boxesOpen, setBoxesOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -368,7 +379,9 @@ function ExistingSectionCard({
   const [boxErr, setBoxErr] = useState<string | null>(null);
 
   const key = existingKey(line.line_number, section.section_number);
-  const sectionTotal = section.total_boxes ?? section.box_count ?? 0;
+  // The server's count: starts from the PO and is refreshed whenever the boxes
+  // reload (after a box is deleted, say).
+  const sectionTotal = boxTotal;
   const uKey = `u:${line.line_number}:${section.section_number}`;
   const aKey = `a:${line.line_number}:${section.section_number}`;
   const e: ExistingSectionEdit = edit ?? { lot_number: "", manufacturing_date: "", expiry_date: "", boxes: {} };
@@ -434,7 +447,20 @@ function ExistingSectionCard({
 
   const addRows: BoxRow[] = (addBoxesRows ?? []).map((b, i) => ({
     idKey: i, box_number: b.box_number, gross_weight: b.gross_weight, net_weight: b.net_weight, lot_number: b.lot_number, count: b.count,
+    boxId: b.box_id,
   }));
+
+  // One box at a time. An existing box is its box_id; a panel box is its index.
+  const existingTarget = (r: BoxRow): BoxTarget =>
+    ({ kind: "existing", line, sectionNumber: section.section_number, boxId: String(r.idKey), row: r });
+  const panelTarget = (r: BoxRow): BoxTarget | null => {
+    const box = addBoxesRows?.[Number(r.idKey)];
+    return box ? { kind: "panel", line, sectionNumber: section.section_number, key, index: Number(r.idKey), box } : null;
+  };
+  async function deleteExisting(r: BoxRow) {
+    // Gone on the server: reload this page of boxes so the table and the count follow.
+    if (await boxActions.remove(existingTarget(r))) void loadChunk(neededChunk);
+  }
 
   // Fetch boxes for printing (all, or a box_number range) from the print endpoint.
   const resolvePrint = useCallback(
@@ -510,7 +536,9 @@ function ExistingSectionCard({
                   rows={rows}
                   greenIds={printedIds}
                   onField={(idKey, field, value) => dispatch({ type: "setExistingBoxField", key, boxId: String(idKey), field, value, carton })}
-                  onPrintRow={(r) => onPrint(async () => [toPrintBox(r, line, section.section_number)])}
+                  onPrintRow={(r) => boxActions.print(existingTarget(r))}
+                  onUpdateRow={canUpdateBoxes ? (r) => boxActions.save(existingTarget(r)) : undefined}
+                  onDeleteRow={canUpdateBoxes ? (r) => void deleteExisting(r) : undefined}
                 />
                 {displayPages > 1 ? (
                   <div className="flex flex-wrap items-center gap-2 text-[12px] mt-1">
@@ -579,8 +607,11 @@ function ExistingSectionCard({
           {addRows.length ? (
             <BoxTable
               rows={addRows}
+              greenIds={printedIds}
               onField={(idKey, field, value) => dispatch({ type: "setAddBoxField", key, boxIndex: Number(idKey), field, value, carton })}
-              onPrintRow={(r) => onPrint(async () => [toPrintBox(r, line, section.section_number)])}
+              onPrintRow={(r) => { const t = panelTarget(r); if (t) boxActions.print(t); }}
+              onUpdateRow={canAddBoxes ? (r) => { const t = panelTarget(r); if (t) boxActions.save(t); } : undefined}
+              onDeleteRow={(r) => { const t = panelTarget(r); if (t) void boxActions.remove(t); }}
             />
           ) : (
             <p className="text-[11px] text-[var(--text-muted)] italic">Enter a count and click Generate.</p>
@@ -600,6 +631,9 @@ function NewSectionCard({
   onPrint,
   canPrint,
   canPrintRange,
+  boxActions,
+  canAddBoxes,
+  printedIds,
 }: {
   line: PurchaseLine;
   section: NewSection;
@@ -608,6 +642,9 @@ function NewSectionCard({
   onPrint: (resolve: PrintResolver) => void;
   canPrint: boolean;
   canPrintRange: boolean;
+  boxActions: BoxActions;
+  canAddBoxes: boolean;
+  printedIds: Set<string>;
 }) {
   const generated = section.boxes;
   const total = generated?.length ?? 0;
@@ -623,7 +660,14 @@ function NewSectionCard({
     net_weight: b.net_weight,
     lot_number: b.lot_number,
     count: b.count,
+    boxId: b.box_id,
   }));
+
+  // One box at a time: a draft box is its index in the section.
+  const newTarget = (r: BoxRow): BoxTarget | null => {
+    const box = generated?.[Number(r.idKey)];
+    return box ? { kind: "new", line, section, index: Number(r.idKey), box } : null;
+  };
 
   const genMin = generated && generated.length ? generated[0].box_number : 0;
   const genMax = generated && generated.length ? generated[generated.length - 1].box_number : 0;
@@ -662,12 +706,23 @@ function NewSectionCard({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-2">
         <SecField label="Number of Boxes" type="number" mono value={section.box_count} placeholder="e.g. 100" onChange={(v) => dispatch({ type: "setNewSectionField", id: section.id, field: "box_count", value: v })} />
+        <SecField label="Gross Weight (kg)" type="number" mono value={section.gross_weight} placeholder="per box, e.g. 25.5" onChange={(v) => dispatch({ type: "setNewSectionField", id: section.id, field: "gross_weight", value: v })} />
         <SecField label="LOT Number" mono value={section.lot_number} placeholder="LOT-…" onChange={(v) => dispatch({ type: "setNewSectionField", id: section.id, field: "lot_number", value: v })} />
         <SecField label="MFG Date" type="date" value={section.mfg_date} onChange={(v) => dispatch({ type: "setNewSectionField", id: section.id, field: "mfg_date", value: v })} />
         <SecField label="EXP Date" type="date" value={section.exp_date} onChange={(v) => dispatch({ type: "setNewSectionField", id: section.id, field: "exp_date", value: v })} />
       </div>
+      {section.gross_weight ? (
+        <p className="text-[11px] text-[var(--text-secondary)] mb-2">
+          {computeNet(section.gross_weight, carton)
+            ? <>Each box: gross <span className="font-mono">{section.gross_weight}</span> kg, net{" "}
+                <span className="font-mono font-semibold text-[var(--text-primary)]">{computeNet(section.gross_weight, carton)}</span> kg
+                {carton ? <> (less <span className="font-mono">{carton}</span> kg Empty Carton + Laminate)</> : <> (no Empty Carton + Laminate entered for this article)</>}
+              </>
+            : <span className="text-[var(--aws-error)]">Gross must be more than the Empty Carton + Laminate ({carton || 0} kg).</span>}
+        </p>
+      ) : null}
 
       {generated ? (
         <div className="space-y-2">
@@ -682,8 +737,11 @@ function NewSectionCard({
           </div>
           <BoxTable
             rows={rows}
+            greenIds={printedIds}
             onField={(idKey, field, value) => dispatch({ type: "setNewBoxField", id: section.id, boxIndex: Number(idKey), field, value, carton })}
-            onPrintRow={(r) => onPrint(async () => [toPrintBox(r, line, null)])}
+            onPrintRow={(r) => { const t = newTarget(r); if (t) boxActions.print(t); }}
+            onUpdateRow={canAddBoxes ? (r) => { const t = newTarget(r); if (t) boxActions.save(t); } : undefined}
+            onDeleteRow={(r) => { const t = newTarget(r); if (t) void boxActions.remove(t); }}
           />
           {totalPages > 1 ? (
             <div className="flex flex-wrap items-center gap-2 text-[12px]">
@@ -722,7 +780,8 @@ export function SecField({
       {label}
       <input
         type={type}
-        value={value}
+        // Always controlled: a draft held over a hot reload can lack a newer field.
+        value={value ?? ""}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
         className={[
@@ -735,19 +794,30 @@ export function SecField({
 }
 
 // ── Shared editable box table ─────────────────────────────────────────────────
-// Two layouts over ONE set of rows: the table from md up (unchanged), and a card
-// per box below it, so a phone never drags the six columns sideways. Each row's
-// state and its controls are built once below and rendered by both, so the two
-// always carry the same values, handlers and tooltips.
-export function BoxTable({ rows, onField, onPrintRow, greenIds }: { rows: BoxRow[]; onField: (idKey: string | number, field: BoxField, value: string) => void; onPrintRow?: (row: BoxRow) => void; greenIds?: Set<string> }) {
+// Two layouts over ONE set of rows: the table from md up, and a card per box
+// below it, so a phone never drags the columns sideways. Each row's state and its
+// controls are built once below and rendered by both, so the two always carry
+// the same values, handlers and tooltips. Per row: a ⋮ menu beside the box number
+// (Update / Delete that one box) and, after Count, the print button.
+export function BoxTable({
+  rows, onField, onPrintRow, greenIds, onUpdateRow, onDeleteRow,
+}: {
+  rows: BoxRow[];
+  onField: (idKey: string | number, field: BoxField, value: string) => void;
+  onPrintRow?: (row: BoxRow) => void;
+  greenIds?: Set<string>;
+  onUpdateRow?: (row: BoxRow) => void;
+  onDeleteRow?: (row: BoxRow) => void;
+}) {
   const inputCls = "w-full h-6 px-1 text-[12px] font-mono rounded-[2px] border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e]";
   const th = "px-2 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap";
   // A card's field label reads as its table column header does.
   const cardLabel = "flex flex-col gap-0.5 text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]";
+  const hasMenu = !!(onUpdateRow || onDeleteRow);
 
   const views = rows.map((r) => ({
     row: r,
-    green: greenIds?.has(String(r.idKey)) ?? false,
+    green: (greenIds?.has(String(r.idKey)) ?? false) || (!!r.boxId && (greenIds?.has(r.boxId) ?? false)),
     fields: BOX_FIELDS.map((f) => ({
       field: f.field,
       label: f.label,
@@ -763,11 +833,12 @@ export function BoxTable({ rows, onField, onPrintRow, greenIds }: { rows: BoxRow
         />
       ),
     })),
+    menu: hasMenu ? <RowMenu row={r} onUpdate={onUpdateRow} onDelete={onDeleteRow} /> : null,
     printButton: onPrintRow ? (
       <button
         type="button"
-        title="Print this box"
-        aria-label="Print box"
+        title="Save this box and print its label"
+        aria-label={`Print box ${r.box_number}`}
         onClick={() => onPrintRow(r)}
         className="p-1 rounded hover:bg-[#eaf0fb] text-[var(--text-secondary)] hover:text-[#2c5fa8]"
       >
@@ -782,9 +853,9 @@ export function BoxTable({ rows, onField, onPrintRow, greenIds }: { rows: BoxRow
         <table className="w-full text-[12px] border-collapse">
           <thead className="bg-[var(--surface-subtle)]">
             <tr className="border-b border-[var(--aws-border)]">
-              {onPrintRow ? <th className={[th, "w-8"].join(" ")} aria-label="Print" /> : null}
               <th className={th}>Box #</th>
               {BOX_FIELDS.map((f) => <th key={f.field} className={th}>{f.label}</th>)}
+              {onPrintRow ? <th className={[th, "w-8"].join(" ")} aria-label="Print" /> : null}
             </tr>
           </thead>
           <tbody>
@@ -794,9 +865,11 @@ export function BoxTable({ rows, onField, onPrintRow, greenIds }: { rows: BoxRow
                 title={v.green ? "Saved & printed" : undefined}
                 className={["border-b border-[var(--aws-border)] last:border-b-0", v.green ? "bg-[#eaf6ed]" : ""].join(" ")}
               >
-                {v.printButton ? <td className="px-1.5 py-1">{v.printButton}</td> : null}
-                <td className="px-2 py-1 font-mono text-[var(--text-muted)] whitespace-nowrap">{v.row.box_number}</td>
+                <td className="px-2 py-1 font-mono text-[var(--text-muted)] whitespace-nowrap">
+                  <span className="inline-flex items-center gap-1">{v.row.box_number}{v.menu}</span>
+                </td>
                 {v.fields.map((f) => <td key={f.field} className={`px-2 py-1 ${f.width}`}>{f.input}</td>)}
+                {v.printButton ? <td className="px-1.5 py-1">{v.printButton}</td> : null}
               </tr>
             ))}
           </tbody>
@@ -812,7 +885,9 @@ export function BoxTable({ rows, onField, onPrintRow, greenIds }: { rows: BoxRow
             className={["border border-[var(--aws-border)] rounded-[2px] p-2.5", v.green ? "bg-[#eaf6ed]" : "bg-white"].join(" ")}
           >
             <div className="flex items-start justify-between gap-2">
-              <span className="font-mono text-[12px] font-semibold text-[var(--text-primary)]">Box #{v.row.box_number}</span>
+              <span className="inline-flex items-center gap-1 font-mono text-[12px] font-semibold text-[var(--text-primary)]">
+                Box #{v.row.box_number}{v.menu}
+              </span>
               {v.printButton}
             </div>
             <div className="mt-1.5 grid grid-cols-2 gap-2">
@@ -827,5 +902,105 @@ export function BoxTable({ rows, onField, onPrintRow, greenIds }: { rows: BoxRow
         ))}
       </ul>
     </div>
+  );
+}
+
+// The ⋮ beside a box number: Update (Save box, for one not saved yet) and Delete,
+// for that box only. The menu is fixed-positioned so the table's horizontal
+// scroll box can't clip it; it closes on a click elsewhere, Escape, scroll or resize.
+function RowMenu({ row, onUpdate, onDelete }: { row: BoxRow; onUpdate?: (r: BoxRow) => void; onDelete?: (r: BoxRow) => void }) {
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!pos) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (!menu.current?.contains(t) && !btn.current?.contains(t)) setPos(null);
+    };
+    const close = () => setPos(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPos(null);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [pos]);
+
+  const saved = rowSaved(row);
+  function toggle() {
+    if (pos) {
+      setPos(null);
+      return;
+    }
+    const r = btn.current?.getBoundingClientRect();
+    if (r) setPos({ top: r.bottom + 4, left: Math.max(8, Math.min(r.left, window.innerWidth - 168)) });
+  }
+  const item = "block w-full text-left px-3 py-1.5 text-[12px] font-sans hover:bg-[var(--surface-subtle)]";
+
+  return (
+    <>
+      <button
+        ref={btn}
+        type="button"
+        onClick={toggle}
+        aria-haspopup="menu"
+        aria-expanded={!!pos}
+        aria-label={`Box ${row.box_number} actions`}
+        title="Update or delete this box"
+        className="w-5 h-5 inline-flex items-center justify-center rounded hover:bg-[var(--surface-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+      >
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" aria-hidden>
+          <circle cx="12" cy="5" r="2" />
+          <circle cx="12" cy="12" r="2" />
+          <circle cx="12" cy="19" r="2" />
+        </svg>
+      </button>
+      {pos ? (
+        <div
+          ref={menu}
+          role="menu"
+          style={{ top: pos.top, left: pos.left }}
+          className="fixed z-40 w-40 bg-white border border-[var(--aws-border-strong)] rounded-[2px] shadow-lg py-1"
+        >
+          {onUpdate ? (
+            <button
+              type="button"
+              role="menuitem"
+              className={`${item} text-[var(--text-primary)]`}
+              title={saved ? "Save this box's changes — no other box is touched" : "Save this box now — no other box is touched"}
+              onClick={() => {
+                setPos(null);
+                onUpdate(row);
+              }}
+            >
+              {saved ? "Update" : "Save box"}
+            </button>
+          ) : null}
+          {onDelete ? (
+            <button
+              type="button"
+              role="menuitem"
+              className={`${item} text-[var(--aws-error)]`}
+              title="Delete this box — no other box is touched"
+              onClick={() => {
+                setPos(null);
+                onDelete(row);
+              }}
+            >
+              Delete
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </>
   );
 }

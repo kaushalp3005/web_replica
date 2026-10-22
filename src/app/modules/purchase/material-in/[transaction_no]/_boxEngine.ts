@@ -46,6 +46,11 @@ export interface DraftBox {
   net_weight: string;
   lot_number: string;
   count: string;
+  // `${section or panel clientKey}:${box_number}`. Sent when the box is saved on
+  // its own (print / Update → createOneBox) and with its section's POST, so the
+  // server never adds the same box twice.
+  key: string;
+  box_id: string | null; // set once the box is saved on its own
 }
 
 // Payload handed to the (pluggable) print handler for one box. box_id/
@@ -72,11 +77,17 @@ export interface NewSection {
   clientKey: string;
   line_number: number;
   box_count: string;
+  // Gross weight (kg) every box of the section starts with; net is it less the
+  // line's Empty Carton + Laminate. "" = boxes are weighed one by one.
+  gross_weight: string;
   lot_number: string;
   mfg_date: string;
   exp_date: string;
   page: number;
   boxes: DraftBox[] | null; // null until "Generate Boxes"
+  // The saved section, once a box of this draft is saved on its own (the first
+  // one makes it); the section's other boxes then append to it.
+  section_number: number | null;
 }
 export interface ExistingBoxEdit {
   gross_weight: string;
@@ -206,11 +217,13 @@ export function initDraft(
         clientKey: seed.clientKey,
         line_number: seed.line_number,
         box_count: "",
+        gross_weight: "",
         lot_number: seed.lot_number ?? "",
         mfg_date: "",
         exp_date: "",
         page: 1,
         boxes: null,
+        section_number: null,
       });
     }
   }
@@ -226,7 +239,7 @@ export type InwardAction =
   | {
       type: "setNewSectionField";
       id: string;
-      field: "box_count" | "lot_number" | "mfg_date" | "exp_date";
+      field: "box_count" | "gross_weight" | "lot_number" | "mfg_date" | "exp_date";
       value: string;
     }
   | { type: "generateBoxes"; id: string; line: PurchaseLine }
@@ -244,6 +257,14 @@ export type InwardAction =
   | { type: "hydrateSectionBoxes"; key: string; boxes: PurchaseBox[] }
   | { type: "clearAddBoxes"; key: string }
   | { type: "dropNewSections"; ids: string[] }
+  // One box saved on its own (print / Update): it now has a box_id, and a draft
+  // section knows the section its first saved box made.
+  | { type: "newBoxSaved"; id: string; boxIndex: number; boxId: string; sectionNumber: number }
+  | { type: "addBoxSaved"; key: string; boxIndex: number; boxId: string }
+  // One box deleted (or a draft box dropped): only that box leaves the draft.
+  | { type: "removeNewBox"; id: string; boxIndex: number }
+  | { type: "removeAddBox"; key: string; boxIndex: number }
+  | { type: "forgetExistingBox"; key: string; boxId: string }
   | { type: "reset"; po: PurchasePoDetail; prefill?: Partial<Record<LogisticsField, string>>; seeds?: SectionSeed[] };
 
 // Recompute net for one box draft given the (possibly new) carton weight.
@@ -292,41 +313,53 @@ export function inwardReducer(state: DraftState, action: InwardAction): DraftSta
         ...state,
         newSections: [
           ...state.newSections,
-          { id: action.id, clientKey: action.clientKey, line_number: action.line, box_count: "", lot_number: "", mfg_date: "", exp_date: "", page: 1, boxes: null },
+          { id: action.id, clientKey: action.clientKey, line_number: action.line, box_count: "", gross_weight: "", lot_number: "", mfg_date: "", exp_date: "", page: 1, boxes: null, section_number: null },
         ],
       };
 
     case "removeSection":
       return { ...state, newSections: state.newSections.filter((s) => s.id !== action.id) };
 
-    case "setNewSectionField":
+    case "setNewSectionField": {
+      const value = action.field === "gross_weight" ? clamp3(action.value) : action.value;
       return {
         ...state,
-        newSections: state.newSections.map((s) =>
-          s.id === action.id ? { ...s, [action.field]: action.value } : s,
-        ),
+        newSections: state.newSections.map((s) => {
+          if (s.id !== action.id) return s;
+          const next = { ...s, [action.field]: value };
+          // A new section gross re-fills the generated boxes still on the old one
+          // (blank included); a box weighed on its own keeps its weight.
+          if (action.field === "gross_weight" && s.boxes) {
+            const carton = state.cartonByLine[s.line_number] ?? "";
+            next.boxes = s.boxes.map((b) =>
+              b.gross_weight === s.gross_weight
+                ? { ...b, gross_weight: value, net_weight: computeNet(value, carton) }
+                : b,
+            );
+          }
+          return next;
+        }),
       };
+    }
 
     case "generateBoxes": {
       const sec = state.newSections.find((s) => s.id === action.id);
       if (!sec) return state;
       const boxCount = parseInt(sec.box_count, 10) || 0;
       if (boxCount < 1) return state;
-      const existingCount = countExistingBoxes(action.line);
-      // Boxes already generated in this line's OTHER new sections (reference 485-490).
-      let prevGenerated = 0;
-      for (const s of state.newSections) {
-        if (s.line_number === action.line.line_number && s.id !== action.id && s.boxes) {
-          prevGenerated += s.boxes.length;
-        }
-      }
-      const start = existingCount + prevGenerated + 1;
+      // Boxes are numbered within their section from 1, as the server stores
+      // them, so a box saved on its own keeps the number on screen.
+      // Every box starts on the section's gross, net = gross − Empty Carton + Laminate.
+      const gross = sec.gross_weight ?? ""; // a section from before the field (hot reload)
+      const net = computeNet(gross, state.cartonByLine[action.line.line_number] ?? "");
       const boxes: DraftBox[] = Array.from({ length: boxCount }, (_, i) => ({
-        box_number: start + i,
-        gross_weight: "",
-        net_weight: "",
+        box_number: i + 1,
+        gross_weight: gross,
+        net_weight: net,
         lot_number: sec.lot_number || "",
         count: "",
+        key: `${sec.clientKey}:${i + 1}`,
+        box_id: null,
       }));
       return { ...state, newSections: state.newSections.map((s) => (s.id === action.id ? { ...s, boxes, page: 1 } : s)) };
     }
@@ -385,6 +418,8 @@ export function inwardReducer(state: DraftState, action: InwardAction): DraftSta
         net_weight: "",
         lot_number: lotNumber,
         count: "",
+        key: `${action.clientKey}:${lastBoxNum + i + 1}`,
+        box_id: null,
       }));
       return { ...state, addBoxes: { ...state.addBoxes, [key]: { boxes, clientKey: action.clientKey } } };
     }
@@ -434,6 +469,55 @@ export function inwardReducer(state: DraftState, action: InwardAction): DraftSta
       return { ...state, newSections: state.newSections.filter((s) => !ids.has(s.id)) };
     }
 
+    case "newBoxSaved":
+      return {
+        ...state,
+        newSections: state.newSections.map((s) =>
+          s.id !== action.id || !s.boxes
+            ? s
+            : {
+                ...s,
+                section_number: action.sectionNumber,
+                boxes: s.boxes.map((b, i) => (i === action.boxIndex ? { ...b, box_id: action.boxId } : b)),
+              },
+        ),
+      };
+
+    case "addBoxSaved": {
+      const panel = state.addBoxes[action.key];
+      if (!panel) return state;
+      const boxes = panel.boxes.map((b, i) => (i === action.boxIndex ? { ...b, box_id: action.boxId } : b));
+      return { ...state, addBoxes: { ...state.addBoxes, [action.key]: { ...panel, boxes } } };
+    }
+
+    case "removeNewBox":
+      return {
+        ...state,
+        newSections: state.newSections.map((s) => {
+          if (s.id !== action.id || !s.boxes) return s;
+          // The rest keep their numbers; the count follows, so Save posts what is left.
+          const boxes = s.boxes.filter((_, i) => i !== action.boxIndex);
+          return { ...s, boxes, box_count: String(boxes.length) };
+        }),
+      };
+
+    case "removeAddBox": {
+      const panel = state.addBoxes[action.key];
+      if (!panel) return state;
+      return {
+        ...state,
+        addBoxes: { ...state.addBoxes, [action.key]: { ...panel, boxes: panel.boxes.filter((_, i) => i !== action.boxIndex) } },
+      };
+    }
+
+    case "forgetExistingBox": {
+      const sec = state.existing[action.key];
+      if (!sec || !sec.boxes[action.boxId]) return state;
+      const boxes = { ...sec.boxes };
+      delete boxes[action.boxId];
+      return { ...state, existing: { ...state.existing, [action.key]: { ...sec, boxes } } };
+    }
+
     default:
       return state;
   }
@@ -442,6 +526,23 @@ export function inwardReducer(state: DraftState, action: InwardAction): DraftSta
 // ── Payload builders ──────────────────────────────────────────────────────────
 function mintBase(nowMs: number): string {
   return String(nowMs).slice(-8);
+}
+
+// A weight field as the API's number; null when blank or not a number.
+function toKg(v: string): number | null {
+  const n = v ? parseFloat(v) : NaN;
+  return Number.isNaN(n) ? null : n;
+}
+
+// One box's editable fields as the API takes them (createOneBox / updateOneBox).
+export function boxApiFields(b: { gross_weight: string; net_weight: string; lot_number: string; count: string }) {
+  const count = b.count ? parseInt(b.count, 10) : NaN;
+  return {
+    net_weight: toKg(b.net_weight),
+    gross_weight: toKg(b.gross_weight),
+    lot_number: b.lot_number || null,
+    count: Number.isNaN(count) ? null : count,
+  };
 }
 
 // PUT /receive body (reference 1189-1234). Only carton-bearing lines included.
@@ -480,13 +581,12 @@ export function buildAddSections(state: DraftState, po: PurchasePoDetail, nowMs:
   let globalIdx = 0;
   const out: AddSectionPayload[] = [];
   for (const sec of state.newSections) {
-    const line = postTarget(sec, po);
-    if (!line) continue;
+    if (!postTarget(sec, po)) continue;
     const boxCount = parseInt(sec.box_count, 10);
-    const existingCount = countExistingBoxes(line);
     let boxes;
-    if (sec.boxes && sec.boxes.length) {
-      boxes = sec.boxes.map((b) => {
+    if (sec.boxes) {
+      // Boxes already saved on their own (print / Update) are left out.
+      boxes = sec.boxes.filter((b) => !b.box_id).map((b) => {
         globalIdx++;
         return {
           box_id: `${base}-${globalIdx}`,
@@ -495,35 +595,66 @@ export function buildAddSections(state: DraftState, po: PurchasePoDetail, nowMs:
           gross_weight: b.gross_weight ? parseFloat(b.gross_weight) : null,
           lot_number: b.lot_number || sec.lot_number || null,
           count: b.count ? parseInt(b.count, 10) : null,
+          client_key: b.key,
         };
       });
+      if (boxes.length === 0) continue;
     } else {
-      // Not generated — expand into placeholder boxes numbered after existing +
-      // prior new sections of this line (reference 1349-1366).
-      const prevForLine = out
-        .filter((s) => s.line_number === sec.line_number)
-        .reduce((n, s) => n + s.boxes.length, 0);
+      // Not generated — expand into placeholder boxes numbered 1… within the
+      // section (reference 1349-1366), each on the section's gross (if any) and
+      // its net.
+      const gross = toKg(sec.gross_weight);
+      const net = toKg(computeNet(sec.gross_weight, state.cartonByLine[sec.line_number] ?? ""));
       boxes = Array.from({ length: boxCount }, (_, i) => {
         globalIdx++;
         return {
           box_id: `${base}-${globalIdx}`,
-          box_number: existingCount + prevForLine + i + 1,
-          net_weight: null,
-          gross_weight: null,
+          box_number: i + 1,
+          net_weight: net,
+          gross_weight: gross,
           lot_number: sec.lot_number || null,
           count: null,
+          client_key: `${sec.clientKey}:${i + 1}`,
         };
       });
     }
     out.push({
       line_number: sec.line_number,
-      box_count: boxCount,
+      // A section its first saved box already made: append the rest to it.
+      section_number: sec.section_number,
+      box_count: boxes.length,
       lot_number: sec.lot_number || null,
       manufacturing_date: sec.mfg_date || null,
       expiry_date: sec.exp_date || null,
       client_key: sec.clientKey,
       boxes,
     });
+  }
+  return out;
+}
+
+// PUT /boxes body for draft boxes already saved on their own (print / Update):
+// a later edit of one reaches it on Save, by box_id, like an existing box.
+export function buildSavedDraftUpdates(state: DraftState): UpdateSectionPayload[] {
+  const out: UpdateSectionPayload[] = [];
+  const toUpdate = (b: DraftBox) => ({ box_id: b.box_id as string, ...boxApiFields(b) });
+  for (const sec of state.newSections) {
+    const saved = (sec.boxes ?? []).filter((b) => b.box_id);
+    if (sec.section_number == null || saved.length === 0) continue;
+    out.push({
+      line_number: sec.line_number,
+      section_number: sec.section_number,
+      lot_number: sec.lot_number || null,
+      manufacturing_date: sec.mfg_date || null,
+      expiry_date: sec.exp_date || null,
+      boxes: saved.map(toUpdate),
+    });
+  }
+  for (const [key, panel] of Object.entries(state.addBoxes)) {
+    const saved = panel.boxes.filter((b) => b.box_id);
+    if (saved.length === 0) continue;
+    const [line, section] = key.split("-").map(Number);
+    out.push({ line_number: line, section_number: section, boxes: saved.map(toUpdate) });
   }
   return out;
 }
@@ -567,7 +698,8 @@ export function buildAddBoxesPayload(
   nowMs: number,
 ): AddSectionPayload {
   const key = existingKey(line.line_number, sectionNumber);
-  const boxes = state.addBoxes[key]?.boxes ?? [];
+  // Boxes already saved on their own (print / Update) are left out.
+  const boxes = (state.addBoxes[key]?.boxes ?? []).filter((b) => !b.box_id);
   const base = mintBase(nowMs);
   const sec = (line.sections ?? []).find((s) => s.section_number === sectionNumber);
   return {
@@ -586,6 +718,7 @@ export function buildAddBoxesPayload(
       gross_weight: b.gross_weight ? parseFloat(b.gross_weight) : null,
       lot_number: b.lot_number || null,
       count: b.count ? parseInt(b.count, 10) : null,
+      client_key: b.key,
     })),
   };
 }

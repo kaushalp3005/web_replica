@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useHasPermission } from "@/lib/user";
+import { useHasPermission, useUserScope } from "@/lib/user";
 import {
   type PoListItem,
   type PoLineOut,
@@ -33,23 +33,27 @@ import {
   arrivalsSummary,
 } from "@/lib/qc";
 import { SendIntimationModal } from "./_SendIntimationModal";
+import { ALL_SITES, initialChoice, seesEverySite, siteChoices, siteSectionLabel, sitesFor } from "./_siteSection";
 
 // ── QC status helpers ─────────────────────────────────────────────────────────
 
-// ── Section grouping (Today / Pending / Completed) ─────────────────────────────
+// ── Section grouping (Site / Pending / Completed) ──────────────────────────────
 // The listing is split into three sections for the receiving desk:
-//   • Today's PO   — po_date is today (local), whatever its QC status
-//   • Pending PO   — not yet completed (pending arrival or arrived), not dated today
-//   • Completed PO — QC completed, not dated today
-// The partition is mutually exclusive with Today taking priority (a PO dated
-// today shows under Today regardless of status). It is decided SERVER-SIDE via
-// the `section` list param, and each section is fetched + paginated independently
+//   • Site PO      — no box received yet, consignee address is for the user's
+//                    plant (W202 / A185 / A68 …, read off the address; _siteSection)
+//   • Pending PO   — no box received yet, addressed elsewhere or not at all
+//   • Completed PO — a box has been received, whatever the site
+// The partition is mutually exclusive and decided SERVER-SIDE via the `section`
+// + `site` list params; each section is fetched + paginated independently
 // (page_size 20), so counts and pages are accurate over the whole dataset.
 
-type GroupKey = "today" | "pending" | "completed";
+type GroupKey = "site" | "pending" | "completed";
+
+// Remembers the site picked in the site section (per browser; a convenience).
+const SITE_CHOICE_KEY = "material-in.site-section";
 
 const GROUP_META: { key: GroupKey; label: string; accent: string; bg: string }[] = [
-  { key: "today",     label: "Today's PO",   accent: "var(--aws-orange)",   bg: "#fff5ec" },
+  { key: "site",      label: "Site PO",      accent: "var(--aws-orange)",   bg: "#fff5ec" },
   { key: "pending",   label: "Pending PO",   accent: "#9a5b00",             bg: "#fbf3e7" },
   { key: "completed", label: "Completed PO", accent: "var(--text-success)", bg: "#eef7f0" },
 ];
@@ -70,15 +74,6 @@ type SectionState = {
 
 function loadingSection(): SectionState {
   return { items: [], total: 0, page: 1, totalPages: 1, loading: true, loaded: false, error: null };
-}
-
-// Local YYYY-MM-DD for "today" — built from local date parts so it doesn't drift
-// a day vs a naive UTC toISOString() near midnight.
-function todayYmd(): string {
-  const d = new Date();
-  const m = `${d.getMonth() + 1}`.padStart(2, "0");
-  const day = `${d.getDate()}`.padStart(2, "0");
-  return `${d.getFullYear()}-${m}-${day}`;
 }
 
 // Map a single arrival qc_state to its display label.
@@ -121,14 +116,39 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
 
   // ── Per-section state (each section fetched + paginated independently) ──────
   const [sections, setSections] = useState<Record<GroupKey, SectionState>>(() => ({
-    today: loadingSection(),
+    site: loadingSection(),
     pending: loadingSection(),
     completed: loadingSection(),
   }));
   const [refetchNonce, setRefetchNonce] = useState(0);
-  // "today" boundary — computed once (local date), sent to the backend so the
-  // today/pending/completed split matches the user's calendar day.
-  const [today] = useState(() => todayYmd());
+
+  // ── Site section: which consignee sites it shows ───────────────────────────
+  // The warehouses in the user's access (admins and unlocked users: all). With
+  // several, the user picks one or all; the pick is remembered per browser.
+  // Other sites' POs are kept out of every section server side (po_site_scope).
+  const { isAdmin, warehouses } = useUserScope();
+  const everySite = seesEverySite(isAdmin, warehouses);
+  const choices = siteChoices(isAdmin, warehouses);
+  const [siteChoice, setSiteChoice] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem(SITE_CHOICE_KEY) ?? ALL_SITES;
+    } catch {
+      return ALL_SITES;
+    }
+  });
+  const effectiveChoice = initialChoice(siteChoice, choices);
+  const siteParam = sitesFor(effectiveChoice, choices).join(",");
+  const siteLabel = siteSectionLabel(effectiveChoice, choices, everySite);
+  function chooseSite(v: string) {
+    setSiteChoice(v);
+    try {
+      window.localStorage.setItem(SITE_CHOICE_KEY, v);
+    } catch {
+      // storage blocked: the pick just isn't remembered
+    }
+  }
+  const siteRef = useRef(siteParam);
+  siteRef.current = siteParam;
 
   // ── Send intimation modal ──────────────────────────────────────────────────
   const [sendTxn, setSendTxn] = useState<string | null>(null);
@@ -179,8 +199,8 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
   const queryRef = useRef(query);
   queryRef.current = query;
 
-  // Fetch one section's page (page_size 20). Section membership (today / pending
-  // / completed) is decided server-side via the `section` + `today_date` params.
+  // Fetch one section's page (page_size 20). Section membership (site / pending
+  // / completed) is decided server-side via the `section` + `site` params.
   const loadSectionPage = useCallback(
     async (key: GroupKey, page: number, signal?: AbortSignal) => {
       setSections((prev) => ({ ...prev, [key]: { ...prev[key], loading: true, error: null } }));
@@ -190,7 +210,7 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
       delete base.page_size;
       try {
         const resp = await listPos(
-          { ...base, section: key, today_date: today, page, page_size: SECTION_PAGE_SIZE },
+          { ...base, section: key, site: siteRef.current, page, page_size: SECTION_PAGE_SIZE },
           signal,
         );
         if (signal?.aborted) return;
@@ -219,20 +239,21 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
         }));
       }
     },
-    [today],
+    [],
   );
 
-  // Reload all three sections (page 1) whenever the base filters/sort change.
+  // Reload all three sections (page 1) whenever the base filters/sort or the
+  // site section's sites change.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const controller = new AbortController();
-    setSections({ today: loadingSection(), pending: loadingSection(), completed: loadingSection() });
-    (["today", "pending", "completed"] as GroupKey[]).forEach((k) => {
+    setSections({ site: loadingSection(), pending: loadingSection(), completed: loadingSection() });
+    (["site", "pending", "completed"] as GroupKey[]).forEach((k) => {
       void loadSectionPage(k, 1, controller.signal);
     });
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseQueryFp, refetchNonce, loadSectionPage]);
+  }, [baseQueryFp, refetchNonce, siteParam, loadSectionPage]);
 
   // ── Lazy line fetch ────────────────────────────────────────────────────────
   const fetchLines = useCallback(async (txn: string) => {
@@ -323,7 +344,7 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
   // All rows across the three section pages currently on screen — drives the
   // per-row QC summary + article-line fetches.
   const allVisible = [
-    ...sections.today.items,
+    ...sections.site.items,
     ...sections.pending.items,
     ...sections.completed.items,
   ];
@@ -440,9 +461,10 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
   const sendLinesState = sendTxn ? linesCache.get(sendTxn) : undefined;
 
   // ── Aggregate load/error state across the three sections ───────────────────
-  const anyLoaded = sections.today.loaded || sections.pending.loaded || sections.completed.loaded;
-  const anyLoading = sections.today.loading || sections.pending.loading || sections.completed.loading;
-  const firstError = sections.today.error ?? sections.pending.error ?? sections.completed.error ?? null;
+  const anyLoaded = sections.site.loaded || sections.pending.loaded || sections.completed.loaded;
+  const anyLoading = sections.site.loading || sections.pending.loading || sections.completed.loading;
+  const firstError = sections.site.error ?? sections.pending.error ?? sections.completed.error ?? null;
+  const groups = GROUP_META.map((g) => (g.key === "site" ? { ...g, label: siteLabel } : g));
 
   return (
     <div>
@@ -454,7 +476,7 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
         onRefresh={() => setRefetchNonce((n) => n + 1)}
       />
 
-      {/* Dashboard sections (Today / Pending / Completed) */}
+      {/* Dashboard sections (Site / Pending / Completed) */}
       {!anyLoaded && anyLoading ? (
         <div className="bg-white border border-[var(--aws-border)] rounded-md p-10 text-center text-[var(--text-secondary)]">
           <span className="inline-flex items-center gap-2 text-[13px]">
@@ -468,7 +490,7 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
         <>
           {/* KPI strip — one tile per section; click a tile to collapse/expand it */}
           <div className="grid grid-cols-3 gap-2 sm:gap-3 mb-4">
-            {GROUP_META.map((g) => {
+            {groups.map((g) => {
               const sec = sections[g.key];
               return (
                 <button
@@ -493,11 +515,25 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
           </div>
 
           {/* Section panels */}
-          {GROUP_META.map((g) => (
+          {groups.map((g) => (
             <SectionPanel
               key={g.key}
               meta={g}
               section={sections[g.key]}
+              headerExtra={g.key === "site" && choices.length > 1 ? (
+                <select
+                  value={effectiveChoice}
+                  onChange={(e) => chooseSite(e.target.value)}
+                  aria-label="Consignee site"
+                  className="h-6 px-1 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[var(--text-primary)]"
+                >
+                  <option value={ALL_SITES}>{everySite ? "All sites" : "All my sites"}</option>
+                  {choices.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+              ) : undefined}
+              emptyText={g.key !== "site" ? undefined : choices.length === 0
+                ? "Your access has no warehouse, so no PO is matched to a site."
+                : "No unreceived PO is addressed to this site. POs uploaded without a Consignee Address stay under Pending."}
               sort={currentSort()}
               onSort={handleSort}
               collapsed={collapsedGroups.has(g.key)}
@@ -1072,6 +1108,9 @@ function ReceivingStatusBadge({ status, pendingLabel }: { status?: string | null
   const pill = (bg: string, color: string, border: string, text: string) => (
     <span className="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-sm whitespace-nowrap" style={{ background: bg, color, border: `1px solid ${border}` }}>{text}</span>
   );
+  // Set on every box change (backend services/receipt_match.py): fully received
+  // once every article's received quantity matches the order.
+  if (s === "fully received") return pill("#eaf6ed", "var(--text-success)", "#b6dbb1", "Fully received");
   if (s === "extra received") return pill("#fbe7d6", "#9a5b00", "#f0cfa0", "Extra received");
   if (s === "partially received") return pill("#eaf0fb", "#2c5fa8", "#c3d4f0", "Partially received");
   if (pendingLabel) return pill("var(--surface-disabled)", "var(--text-secondary)", "var(--aws-border)", pendingLabel);
@@ -1257,7 +1296,7 @@ function ActionBtns({
   );
 }
 
-// ── Section panel (dashboard card: Today / Pending / Completed) ───────────────
+// ── Section panel (dashboard card: Site / Pending / Completed) ────────────────
 // A self-contained card: a coloured header bar (title + count + collapse toggle)
 // over its own responsive body — a desktop table and a mobile card stack for the
 // rows in that section. Empty sections still render (with a hint) so the three
@@ -1270,12 +1309,14 @@ type ArrivalsState = { arrivals?: ArrivalItem[]; loading: boolean; error?: strin
 type ReceiptState = { summary?: ReceiptSummary; loading: boolean; error?: string };
 
 function SectionPanel({
-  meta, section, sort, onSort, collapsed, onToggle, onPage, onRetry,
+  meta, section, headerExtra, emptyText, sort, onSort, collapsed, onToggle, onPage, onRetry,
   expanded, onToggleExpand, onSendClick, onInward, canSend,
   linesCache, qcSummary, arrivalsCache, receiptCache,
 }: {
   meta: GroupMeta;
   section: SectionState;
+  headerExtra?: React.ReactNode; // a control beside the count (the site picker)
+  emptyText?: string;
   sort: { col: string; dir: "asc" | "desc" };
   onSort: (col: string) => void;
   collapsed: boolean;
@@ -1295,23 +1336,22 @@ function SectionPanel({
   const rows = section.items;
   return (
     <section className="mb-4 bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] overflow-hidden">
-      {/* Header bar */}
-      <button
-        type="button"
-        onClick={onToggle}
-        className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left"
+      {/* Header bar: the title toggles the section; the picker sits outside the button */}
+      <div
+        className="w-full flex items-center justify-between gap-2 px-3 py-2.5"
         style={{ background: meta.bg, borderLeft: `4px solid ${meta.accent}` }}
       >
-        <span className="inline-flex items-center gap-2">
+        <button type="button" onClick={onToggle} className="flex-1 min-w-0 inline-flex items-center gap-2 text-left">
           <span className={["text-[10px] text-[var(--text-muted)] transition-transform inline-block", collapsed ? "" : "rotate-90"].join(" ")} aria-hidden>▸</span>
           <span className="w-2 h-2 rounded-full inline-block" style={{ background: meta.accent }} aria-hidden />
           <span className="text-[13px] font-bold uppercase tracking-wide" style={{ color: meta.accent }}>{meta.label}</span>
           {section.loading ? (
             <span className="inline-block w-3 h-3 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" aria-hidden />
           ) : null}
-        </span>
+        </button>
+        {headerExtra}
         <span className="inline-flex items-center justify-center min-w-[24px] h-[20px] px-2 text-[11px] rounded-full font-bold text-white" style={{ background: meta.accent }}>{section.total}</span>
-      </button>
+      </div>
 
       {collapsed ? null : section.error ? (
         <div className="px-3 py-6 text-center border-t border-[var(--aws-border)]">
@@ -1327,7 +1367,7 @@ function SectionPanel({
         </div>
       ) : rows.length === 0 ? (
         <div className="px-3 py-6 text-center text-[12px] text-[var(--text-muted)] border-t border-[var(--aws-border)]">
-          No POs in this section.
+          {emptyText ?? "No POs in this section."}
         </div>
       ) : (
         <>
@@ -1339,6 +1379,7 @@ function SectionPanel({
                   <Th width={32}>{null}</Th>
                   <Th sortable col="transaction_no" sort={sort} onSort={onSort}>Transaction No</Th>
                   <Th>Entity</Th>
+                  <Th>Site</Th>
                   <Th sortable col="po_number" sort={sort} onSort={onSort}>PO Number</Th>
                   <Th sortable col="vendor_supplier_name" sort={sort} onSort={onSort}>Vendor</Th>
                   <Th>Articles</Th>
@@ -1439,6 +1480,9 @@ function MaterialInTableRow({
           {row.transaction_no || "—"}
         </td>
         <td className="px-3 py-2 whitespace-nowrap"><EntityPill entity={row.entity} /></td>
+        <td className="px-3 py-2 whitespace-nowrap font-mono text-[12px]" title={row.consignee_address ?? ""}>
+          {row.consignee_site || "—"}
+        </td>
         <td className="px-3 py-2 font-mono text-[12px] whitespace-nowrap">
           {row.po_number || "—"}
         </td>
@@ -1460,7 +1504,7 @@ function MaterialInTableRow({
       </tr>
       {isOpen ? (
         <tr className="border-b border-[var(--aws-border)] bg-[var(--surface-subtle)]">
-          <td colSpan={8} className="px-3 py-3" style={{ borderLeft: "3px solid var(--aws-orange)" }}>
+          <td colSpan={9} className="px-3 py-3" style={{ borderLeft: "3px solid var(--aws-orange)" }}>
             <MaterialInDetailPanel key={row.transaction_no} linesState={linesState} arrivalsState={arrivalsState} receiptState={receiptState} />
           </td>
         </tr>
@@ -1505,6 +1549,9 @@ function MaterialInMobileCard({
               {row.transaction_no || "—"}
             </span>
             <EntityPill entity={row.entity} />
+            {row.consignee_site ? (
+              <span className="font-mono text-[11px] text-[var(--text-secondary)]" title={row.consignee_address ?? ""}>{row.consignee_site}</span>
+            ) : null}
           </div>
           {/* Row 2: PO Number */}
           <p className="text-[11px] text-[var(--text-muted)] mb-0.5">

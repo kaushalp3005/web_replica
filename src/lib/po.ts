@@ -9,7 +9,7 @@ import * as XLSX from "xlsx-js-style";
 export interface PoListItem {
   transaction_no: string;
   entity: string;
-  status?: string | null; // pending | partially received | extra received
+  status?: string | null; // pending | partially received | fully received | extra received
   po_number?: string | null;
   po_date?: string | null;
   voucher_type?: string | null;
@@ -17,6 +17,7 @@ export interface PoListItem {
   narration?: string | null;
   vendor_supplier_name?: string | null;
   consignee_address?: string | null;
+  consignee_site?: string | null; // plant the address is for: W202, A185, A68
   supplier_id?: string | null;
   gross_total?: number | null;
   total_amount?: number | null;
@@ -161,9 +162,10 @@ export interface PoListQuery {
   voucher_type?: string;
   po_date_from?: string;
   po_date_to?: string;
-  // Material In dashboard section partition (server-side today/pending/completed).
-  section?: "today" | "pending" | "completed";
-  today_date?: string; // client local YYYY-MM-DD, defines the "today" boundary
+  // Material In dashboard section partition (server-side site/pending/completed).
+  section?: "site" | "today" | "pending" | "completed";
+  site?: string;       // consignee sites for the site section, comma-separated ("W202,A185")
+  today_date?: string; // older date partition: client local YYYY-MM-DD for "today"
 }
 
 function toQuery(q: PoListQuery): string {
@@ -245,7 +247,7 @@ export interface ReceiptSummary {
   entity?: string | null;
   consignee_address?: string | null;
   completed: boolean; // received qty fully matches ordered on weight + count
-  status?: string; // pending | partially received | extra received
+  status?: string; // pending | partially received | fully received | extra received
   total_lines: number;
   lines: ReceiptLine[];
 }

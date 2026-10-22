@@ -9,10 +9,11 @@ import { useRouter } from "next/navigation";
 import { BackLink } from "@/components/BackLink";
 import { useUserScope, useHasPermission } from "@/lib/user";
 import { fmtNum, fmtDate } from "@/lib/po";
-import { getPurchasePo, addBoxes, updateBoxes, saveReceive, newClientKey, type PurchasePoDetail, type PurchaseLine } from "@/lib/purchase-receive";
+import { getPurchasePo, addBoxes, updateBoxes, saveReceive, newClientKey, createOneBox, updateOneBox, deleteOneBox, type PurchasePoDetail, type PurchaseLine, type SavedBox } from "@/lib/purchase-receive";
 import { listArrivals, type ArrivalItem } from "@/lib/qc";
-import { inwardReducer, buildReceiveRequest, buildUpdateSections, buildAddSections, buildAddBoxesPayload, postedNewSectionIds, existingKey, type DraftState, type LogisticsField, type InwardAction, type SectionSeed, type PrintResolver } from "./_boxEngine";
+import { inwardReducer, buildReceiveRequest, buildUpdateSections, buildAddSections, buildAddBoxesPayload, buildSavedDraftUpdates, boxApiFields, postedNewSectionIds, existingKey, type DraftState, type LogisticsField, type InwardAction, type SectionSeed, type PrintResolver } from "./_boxEngine";
 import { LineCard } from "./_LineCard";
+import { purchaseBoxToPrint, type BoxActions, type BoxTarget } from "./_SectionEditor";
 import { printLabels } from "./_labelPrint";
 import { inwardWarehouseChoices, lockedWarehouse } from "./_warehouses";
 import { SendIntimationModal } from "../_SendIntimationModal";
@@ -198,7 +199,8 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
     // batches. Then update existing boxes + add new sections in parallel (they
     // touch disjoint rows).
     await saveReceive(transactionNo, buildReceiveRequest(draft, po));
-    const updates = buildUpdateSections(draft, po);
+    // Existing boxes, plus draft boxes already saved on their own (by box_id).
+    const updates = [...buildUpdateSections(draft, po), ...buildSavedDraftUpdates(draft)];
     const news = buildAddSections(draft, po, Date.now());
     const postedIds = postedNewSectionIds(draft, po);
     const [updated, added] = await Promise.allSettled([
@@ -269,6 +271,122 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
     }
   }
 
+  // ── One box at a time: a box row's print, Update and Delete ────────────────
+  // Each acts on that box only. A box not saved yet is created on the PO
+  // (POST /{txn}/box: the first box of a draft section makes the section, later
+  // ones join it); a saved box is updated by its box_id (PUT /{txn}/box/{id}).
+  // Either way the reply carries the box_id the label's QR needs. Nothing else on
+  // the page is saved and the draft is not reloaded, so unsaved work stays.
+  async function saveOneBox(t: BoxTarget): Promise<{ box: SavedBox; created: boolean }> {
+    if (t.kind === "existing") return updateOneBox(transactionNo, t.boxId, boxApiFields(t.row));
+    const fields = boxApiFields(t.box);
+    if (t.box.box_id) return updateOneBox(transactionNo, t.box.box_id, fields);
+    // A new box's stock is booked to the PO's warehouse: save the one picked here first.
+    const warehouse = draft.header.warehouse.trim();
+    if (warehouse && warehouse !== (po?.warehouse ?? "")) {
+      await saveReceive(transactionNo, { header: { warehouse }, lines: [] });
+      setPo((p) => (p ? { ...p, warehouse } : p));
+    }
+    if (t.kind === "panel") {
+      const r = await createOneBox(transactionNo, {
+        line_number: t.line.line_number, section_number: t.sectionNumber,
+        box_number: t.box.box_number, client_key: t.box.key, ...fields,
+      });
+      dispatch({ type: "addBoxSaved", key: t.key, boxIndex: t.index, boxId: r.box.box_id });
+      return r;
+    }
+    const s = t.section;
+    const r = await createOneBox(transactionNo, {
+      line_number: t.line.line_number,
+      section_number: s.section_number,
+      section_key: s.clientKey,
+      section: { lot_number: s.lot_number || null, manufacturing_date: s.mfg_date || null, expiry_date: s.exp_date || null },
+      box_number: t.box.box_number,
+      client_key: t.box.key,
+      ...fields,
+      lot_number: fields.lot_number ?? (s.lot_number || null),
+    });
+    dispatch({ type: "newBoxSaved", id: s.id, boxIndex: t.index, boxId: r.box.box_id, sectionNumber: r.box.section_number });
+    return r;
+  }
+
+  function boxNumberOf(t: BoxTarget): number {
+    return t.kind === "existing" ? t.row.box_number : t.box.box_number;
+  }
+
+  async function handlePrintBox(t: BoxTarget) {
+    if (!po) return;
+    setToast(null);
+    setPrinting({ label: `Saving box ${boxNumberOf(t)}…`, done: 0, total: 0 });
+    try {
+      const { box } = await saveOneBox(t);
+      setPrinting({ label: "Rendering label…", done: 0, total: 1 });
+      await printLabels({
+        entity: po.entity,
+        transaction_no: po.transaction_no,
+        boxes: [purchaseBoxToPrint(box, t.line, box.section_number)],
+        onProgress: (done, total) => setPrinting({ label: "Rendering label…", done, total }),
+      });
+      setPrintedIds((prev) => new Set([...prev, box.box_id]));
+      setToast({ kind: "ok", text: `Box ${box.box_number} saved & sent to print.` });
+    } catch (e) {
+      setToast({ kind: "err", text: e instanceof Error ? e.message : "Save / print failed" });
+    } finally {
+      setPrinting(null);
+    }
+  }
+
+  async function handleSaveBox(t: BoxTarget) {
+    setToast(null);
+    setPrinting({ label: `Saving box ${boxNumberOf(t)}…`, done: 0, total: 0 });
+    try {
+      const { box, created } = await saveOneBox(t);
+      setToast({ kind: "ok", text: `Box ${box.box_number} ${created ? "saved" : "updated"}.` });
+    } catch (e) {
+      setToast({ kind: "err", text: e instanceof Error ? e.message : "Failed to save the box" });
+    } finally {
+      setPrinting(null);
+    }
+  }
+
+  async function handleDeleteBox(t: BoxTarget): Promise<boolean> {
+    const n = boxNumberOf(t);
+    const boxId = t.kind === "existing" ? t.boxId : t.box.box_id;
+    const ok = window.confirm(
+      boxId
+        ? `Delete box ${n}? Only this box is removed (its stock is written off); no other box changes.`
+        : `Remove box ${n} from this draft? It hasn't been saved; the other boxes keep their numbers.`,
+    );
+    if (!ok) return false;
+    setToast(null);
+    if (boxId) {
+      setPrinting({ label: `Deleting box ${n}…`, done: 0, total: 0 });
+      try {
+        await deleteOneBox(transactionNo, boxId);
+      } catch (e) {
+        setToast({ kind: "err", text: e instanceof Error ? e.message : "Failed to delete the box" });
+        return false;
+      } finally {
+        setPrinting(null);
+      }
+    }
+    if (t.kind === "existing") {
+      dispatch({ type: "forgetExistingBox", key: existingKey(t.line.line_number, t.sectionNumber), boxId: t.boxId });
+    } else if (t.kind === "panel") {
+      dispatch({ type: "removeAddBox", key: t.key, boxIndex: t.index });
+    } else {
+      dispatch({ type: "removeNewBox", id: t.section.id, boxIndex: t.index });
+    }
+    setToast({ kind: "ok", text: boxId ? `Box ${n} deleted.` : `Box ${n} removed from the draft.` });
+    return true;
+  }
+
+  const boxActions: BoxActions = {
+    print: (t) => void handlePrintBox(t),
+    save: (t) => void handleSaveBox(t),
+    remove: handleDeleteBox,
+  };
+
   if (loading) return <Shell><Centered>Loading Purchase Order…</Centered></Shell>;
   if (error) return <Shell><Centered tone="err">{error}</Centered></Shell>;
   if (!po || !draft) return <Shell><Centered>Preparing…</Centered></Shell>;
@@ -332,6 +450,7 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
               busy={busy}
               onPrint={handlePrint}
               printedIds={printedIds}
+              boxActions={boxActions}
             />
           ))
         )}
