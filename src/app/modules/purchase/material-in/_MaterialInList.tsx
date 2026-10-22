@@ -583,6 +583,7 @@ function MaterialInToolbar({
     query.vendor_supplier_name_contains,
     query.order_reference_no_contains,
     query.narration_contains,
+    query.consignee_address_contains,
     query.supplier_id,
     query.voucher_type,
   ].filter((v) => v && v.length > 0).length;
@@ -725,6 +726,7 @@ const ADV_FIELDS: { key: keyof PoListQuery; label: string; placeholder: string }
   { key: "vendor_supplier_name_contains", label: "Vendor name contains", placeholder: "e.g. acme" },
   { key: "order_reference_no_contains",   label: "Order ref contains",   placeholder: "e.g. REF-9912" },
   { key: "narration_contains",            label: "Narration contains",   placeholder: "e.g. urgent" },
+  { key: "consignee_address_contains",    label: "Consignee address contains", placeholder: "e.g. A-185" },
   { key: "supplier_id",                   label: "Supplier ID (exact)",  placeholder: "e.g. 4471" },
   { key: "voucher_type",                  label: "Voucher type (exact)", placeholder: "e.g. PURCH" },
 ];

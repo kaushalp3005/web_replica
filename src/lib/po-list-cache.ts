@@ -12,10 +12,11 @@ export interface PoListCache {
   entity: "" | "cfpl" | "cdpl";
   dateFrom: string;
   dateTo: string;
-  adv: {                          // the five advanced fields from po-view.js
+  adv: {                          // the advanced filter fields
     vendor_supplier_name_contains: string;
     order_reference_no_contains: string;
     narration_contains: string;
+    consignee_address_contains?: string; // optional: caches saved before it existed lack it
     supplier_id: string;
     voucher_type: string;
   };

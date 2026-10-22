@@ -52,6 +52,7 @@ export interface PurchasePoDetail {
   po_number?: string | null;
   voucher_type?: string | null;
   vendor_supplier_name?: string | null;
+  consignee_address?: string | null;
   gross_total?: number | null;
   total_amount?: number | null;
   status?: string | null;

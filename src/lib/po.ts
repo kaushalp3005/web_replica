@@ -16,6 +16,7 @@ export interface PoListItem {
   order_reference_no?: string | null;
   narration?: string | null;
   vendor_supplier_name?: string | null;
+  consignee_address?: string | null;
   supplier_id?: string | null;
   gross_total?: number | null;
   total_amount?: number | null;
@@ -84,6 +85,7 @@ export interface PreviewHeader {
   order_reference_no?: string | null;
   narration?: string | null;
   vendor_supplier_name?: string | null;
+  consignee_address?: string | null;
   supplier_id?: string | null;
   gross_total?: number | null;
   total_amount?: number | null;
@@ -154,6 +156,7 @@ export interface PoListQuery {
   vendor_supplier_name_contains?: string;
   order_reference_no_contains?: string;
   narration_contains?: string;
+  consignee_address_contains?: string;
   supplier_id?: string;
   voucher_type?: string;
   po_date_from?: string;
@@ -240,6 +243,7 @@ export interface ReceiptLine {
 export interface ReceiptSummary {
   transaction_no: string;
   entity?: string | null;
+  consignee_address?: string | null;
   completed: boolean; // received qty fully matches ordered on weight + count
   status?: string; // pending | partially received | extra received
   total_lines: number;
@@ -354,6 +358,7 @@ export const PO_EXPORT_COLUMNS: { key: keyof PoListItem; label: string }[] = [
   { key: "order_reference_no", label: "Order Ref" },
   { key: "narration", label: "Narration" },
   { key: "vendor_supplier_name", label: "Vendor" },
+  { key: "consignee_address", label: "Consignee Address" },
   { key: "supplier_id", label: "Supplier ID" },
   { key: "entity", label: "Entity" },
   { key: "gross_total", label: "Gross Total" },

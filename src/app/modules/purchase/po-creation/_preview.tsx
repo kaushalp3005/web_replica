@@ -575,6 +575,10 @@ function PreviewCard({
               <strong className="text-[var(--text-primary)]">Supplier</strong>{" "}
               {String(header.vendor_supplier_name || header.supplier_id || "—")}
             </span>
+            <span className="max-w-[420px] truncate" title={String(header.consignee_address || "")}>
+              <strong className="text-[var(--text-primary)]">Consignee Address</strong>{" "}
+              {String(header.consignee_address || "—")}
+            </span>
             <span>
               <strong className="text-[var(--text-primary)]">Date</strong>{" "}
               {String(header.po_date || "—")}
@@ -664,6 +668,7 @@ const HEADER_FIELDS: HeaderField[] = [
   { f: "po_date",       label: "PO Date",        type: "date" },
   { f: "delivery_date", label: "Delivery Date",  type: "date" },
   { f: "vendor_supplier_name", label: "Supplier" },
+  { f: "consignee_address", label: "Consignee Address", wide: true },
   { f: "remarks",       label: "Remarks",        wide: true },
 ];
 

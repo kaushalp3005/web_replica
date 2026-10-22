@@ -537,6 +537,7 @@ function SummaryGrid({ po }: { po: PurchasePoDetail }) {
       {cell("Voucher Type", po.voucher_type || "—")}
       {cell("Lines", fmtNum(po.total_lines), true)}
       {cell("Status", po.status || "pending")}
+      <div className="col-span-2 md:col-span-5">{cell("Consignee Address", po.consignee_address || "—")}</div>
     </div>
   );
 }
