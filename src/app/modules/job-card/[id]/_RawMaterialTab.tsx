@@ -281,7 +281,10 @@ export function RawMaterialTab({
   }, [flashToast]);
 
   return (
-    <div className="space-y-4">
+    // data-unsaved-ignore: a scan / manual print saves at once, so typing here
+    // is never "unsaved" for the job card page's leave-without-saving prompt.
+    // Covers the Boxes tab too (BoxScanPanel is this component).
+    <div className="space-y-4" data-unsaved-ignore>
       <QrScanner onResult={handleScan} warning={dupWarn} title={scanTitle} />
 
       {/* Manual print takes this panel's place on the Raw Material tab. Elsewhere:
