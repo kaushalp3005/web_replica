@@ -216,6 +216,85 @@ export async function commitPo(body: { entity: string; mode: CommitMode; pos: Co
   return res.json();
 }
 
+// ── Batched commit ──────────────────────────────────────────────────────────
+// A whole PO Book (2,500+ POs) in one /commit body is over the proxy's request
+// size limit (HTTP 413) and would outlast its timeout too. The server commits
+// each PO in its own transaction, so the selection goes in batches.
+export const COMMIT_BATCH_POS = 100;
+const COMMIT_BATCH_BYTES = 500_000;
+
+// What /commit reads of a preview PO (po_commit.commit): header, lines and the
+// keys -- not the preview's echo of the header, the existing PO, the diff, the
+// warnings, or each line's matched master row.
+export function commitPayload(po: CommitPo): CommitPo {
+  const lines = (po.lines ?? []).map((l) => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { matched_item, ...rest } = l as Record<string, unknown>;
+    return rest;
+  });
+  return { duplicate_key: po.duplicate_key ?? null, transaction_no: po.transaction_no ?? null, header: po.header, lines };
+}
+
+// Consecutive batches of at most `maxPos` POs and about `maxBytes` of JSON
+// (one PO bigger than that still goes, alone).
+export function commitBatches(pos: CommitPo[], maxPos = COMMIT_BATCH_POS, maxBytes = COMMIT_BATCH_BYTES): CommitPo[][] {
+  const out: CommitPo[][] = [];
+  let cur: CommitPo[] = [];
+  let bytes = 0;
+  for (const po of pos) {
+    const size = JSON.stringify(po).length;
+    if (cur.length > 0 && (cur.length >= maxPos || bytes + size > maxBytes)) {
+      out.push(cur);
+      cur = [];
+      bytes = 0;
+    }
+    cur.push(po);
+    bytes += size;
+  }
+  if (cur.length > 0) out.push(cur);
+  return out;
+}
+
+// A batch failed after earlier ones went through: what they committed, and the
+// duplicate_keys of their POs, so the page can leave those out of a retry.
+export class CommitBatchError extends Error {
+  constructor(message: string, readonly partial: CommitResponse, readonly committedKeys: string[]) {
+    super(message);
+  }
+}
+
+export async function commitPoInBatches(
+  body: { entity: string; mode: CommitMode; pos: CommitPo[] },
+  onProgress?: (done: number, total: number) => void,
+): Promise<CommitResponse> {
+  const out: CommitResponse = { created: [], updated: [], skipped_duplicates: [], skipped_missing: [], errors: [] };
+  const committed: string[] = [];
+  const total = body.pos.length;
+  let done = 0;
+  for (const batch of commitBatches(body.pos.map(commitPayload))) {
+    let r: CommitResponse;
+    try {
+      r = await commitPo({ ...body, pos: batch });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Commit failed";
+      throw new CommitBatchError(
+        done > 0 ? `${msg} — ${done} of ${total} POs were committed before it; Retry commits the rest.` : msg,
+        out,
+        committed,
+      );
+    }
+    out.created.push(...r.created);
+    out.updated.push(...r.updated);
+    out.skipped_duplicates.push(...r.skipped_duplicates);
+    out.skipped_missing.push(...r.skipped_missing);
+    out.errors.push(...r.errors);
+    for (const p of batch) if (p.duplicate_key) committed.push(p.duplicate_key);
+    done += batch.length;
+    onProgress?.(done, total);
+  }
+  return out;
+}
+
 export async function listPos(q: PoListQuery, signal?: AbortSignal): Promise<PoListResponse> {
   const res = await apiFetch(`/api/v1/po?${toQuery(q)}`, { signal });
   if (!res.ok) throw new Error(await readError(res, "Failed to load POs"));
