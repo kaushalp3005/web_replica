@@ -37,6 +37,12 @@ import { ALL_SITES, initialChoice, seesEverySite, siteChoices, siteSectionLabel,
 
 // ── QC status helpers ─────────────────────────────────────────────────────────
 
+// QC status is hidden for now (user, 2026-10-23): no QC badge on the rows or
+// in the expanded articles, and the QC arrivals aren't fetched. The receiving
+// status (Partially / Fully / Extra received) still shows. Set true to bring
+// the QC status back.
+const SHOW_QC_STATUS = false;
+
 // ── Section grouping (Site / Pending / Completed) ──────────────────────────────
 // The listing is split into three sections for the receiving desk:
 //   • Site PO      — no box received yet, consignee address is for the user's
@@ -355,7 +361,7 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
   // call (mirrors the post-load linesCache effect). AbortController guards
   // setState; we defer with Promise.resolve() to dodge set-state-in-effect.
   useEffect(() => {
-    if (allVisible.length === 0) return;
+    if (!SHOW_QC_STATUS || allVisible.length === 0) return;
     const txns = allVisible.map((r) => r.transaction_no).filter((t): t is string => !!t);
     if (txns.length === 0) return;
     const controller = new AbortController();
@@ -423,6 +429,7 @@ export function MaterialInList(props: MaterialInListProps): React.JSX.Element {
   // ── Fetch QC arrivals for expanded rows (per-article QC status) ───────────
   // Same retry-on-re-expand semantics as the lines effect above.
   useEffect(() => {
+    if (!SHOW_QC_STATUS) return;
     for (const txn of expanded) {
       const entry = arrivalsCache.get(txn);
       if (!entry || (!entry.loading && entry.error && !entry.arrivals)) {
@@ -1383,7 +1390,7 @@ function SectionPanel({
                   <Th sortable col="po_number" sort={sort} onSort={onSort}>PO Number</Th>
                   <Th sortable col="vendor_supplier_name" sort={sort} onSort={onSort}>Vendor</Th>
                   <Th>Articles</Th>
-                  <Th>QC Status</Th>
+                  <Th>{SHOW_QC_STATUS ? "QC Status" : "Status"}</Th>
                   <Th width={72}>{null}</Th>
                 </tr>
               </thead>
@@ -1494,7 +1501,7 @@ function MaterialInTableRow({
         </td>
         <td className="px-3 py-2 whitespace-nowrap">
           <div className="flex flex-col items-start gap-1">
-            <QcTxnBadge summary={qcSummaryItem} />
+            {SHOW_QC_STATUS ? <QcTxnBadge summary={qcSummaryItem} /> : null}
             <ReceivingStatusBadge status={row.status} />
           </div>
         </td>
@@ -1565,9 +1572,9 @@ function MaterialInMobileCard({
           <div className="text-[12px] text-[var(--text-secondary)]">
             <ArticlesSummary linesState={linesState} />
           </div>
-          {/* Row 5: QC status + receiving status badges */}
+          {/* Row 5: QC status (while shown) + receiving status badges */}
           <div className="mt-1 flex flex-wrap gap-1">
-            <QcTxnBadge summary={qcSummaryItem} />
+            {SHOW_QC_STATUS ? <QcTxnBadge summary={qcSummaryItem} /> : null}
             <ReceivingStatusBadge status={row.status} />
           </div>
         </div>
@@ -1624,7 +1631,9 @@ function MaterialInDetailPanel({
                   <th className="px-3 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">Article</th>
                   <th className="px-3 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">Pack</th>
                   <th className="px-3 py-1 text-right text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">Weight</th>
-                  <th className="px-3 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">QC Status</th>
+                  {SHOW_QC_STATUS ? (
+                    <th className="px-3 py-1 text-left text-[10px] font-bold uppercase tracking-wide text-[var(--text-secondary)] whitespace-nowrap">QC Status</th>
+                  ) : null}
                 </tr>
               </thead>
               <tbody>
@@ -1636,15 +1645,17 @@ function MaterialInDetailPanel({
                     </td>
                     <td className="px-3 py-1 text-right font-mono tabular-nums whitespace-nowrap">{fmtNum(l.pack_count)}</td>
                     <td className="px-3 py-1 text-right font-mono tabular-nums whitespace-nowrap">{fmtNum(l.po_weight)}</td>
-                    <td className="px-3 py-1 whitespace-nowrap">
-                      {arrivalsState?.loading ? (
-                        <span className="text-[var(--text-muted)] text-[11px]">…</span>
-                      ) : arrivalsState?.error ? (
-                        <span className="text-[var(--text-muted)] text-[11px]">—</span>
-                      ) : (
-                        <QcArticleBadge states={arrivalsForLine(l, arrivalsState?.arrivals ?? [])} />
-                      )}
-                    </td>
+                    {SHOW_QC_STATUS ? (
+                      <td className="px-3 py-1 whitespace-nowrap">
+                        {arrivalsState?.loading ? (
+                          <span className="text-[var(--text-muted)] text-[11px]">…</span>
+                        ) : arrivalsState?.error ? (
+                          <span className="text-[var(--text-muted)] text-[11px]">—</span>
+                        ) : (
+                          <QcArticleBadge states={arrivalsForLine(l, arrivalsState?.arrivals ?? [])} />
+                        )}
+                      </td>
+                    ) : null}
                   </tr>
                 ))}
               </tbody>
