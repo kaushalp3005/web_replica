@@ -11,7 +11,7 @@
 // Field set + categories + computed Process Loss % match the fragments line
 // for line so the operator sees the same form on web as on mobile.
 
-import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { Fragment, type FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import {
   consumptionStateFromDetail,
@@ -27,8 +27,12 @@ import {
 } from "./outputAccounting";
 import { useParams, useRouter } from "next/navigation";
 import { apiFetch, readApiErrorMessage, userStore } from "@/lib/auth";
-import { useHasPermission, useIsAdmin, useMe, useRequireAuth, useUserInitial } from "@/lib/user";
+import { useHasPermission, useHasRole, useIsAdmin, useMe, useRequireAuth, useUserInitial } from "@/lib/user";
 import { BALANCE_TOLERANCE_KG, WEIGHT_SAMPLE_COUNT } from "@/lib/constants";
+import { allowedDifferenceKg, isWithinBalance, toleranceFraction } from "@/lib/job-card-balance";
+import { cleanReason, completeAnywayPrompt, MIN_REASON_LEN, readOverrideOffer } from "@/lib/job-card-override";
+import { REFRESH_RETRY_MS, refreshFailureView } from "@/lib/job-card-refresh";
+import { unsavedPrompt } from "@/lib/job-card-unsaved";
 import { classifyProcess, classifySteps, isPmBearingStage, STAGE_CREATE_WIP } from "@/lib/processCatalog";
 import { friendlyApiError } from "@/lib/apiErrors";
 import { hasBomChanges, type BomChanges } from "@/lib/job-card-bom-rules";
@@ -523,12 +527,12 @@ function computeBatchSummary(
   const balanceDiffPct = balanceDiff != null && totalInput > 0
     ? Math.abs(balanceDiff / totalInput) * 100
     : null;
+  // The server's rule and the BOM's tolerance — not a screen-only 50 g / 0.10 %
+  // (that said "balanced" on small batches the server then refused).
+  const tolFrac = toleranceFraction(detail.accounting?.allowed_balance_tolerance_pct);
   const isBalanced = batch.is_balanced != null
     ? batch.is_balanced
-    : balanceDiff != null
-      ? Math.abs(balanceDiff) < BALANCE_TOLERANCE_KG
-        || (balanceDiffPct != null && balanceDiffPct <= 0.10)
-      : null;
+    : isWithinBalance(balanceDiff, totalInput, tolFrac);
   // Loss percentages — denominator is FG output (operator rule).
   const denom = fgOutKg;
   const pct = (n: number) => denom > 0 ? (n / denom) * 100 : null;
@@ -549,7 +553,8 @@ function computeBatchSummary(
     balanceDiff,
     balanceDiffPct,
     isBalanced,
-    tolerancePct: 0.10,
+    tolerancePct: tolFrac * 100,
+    allowedKg: balanceDiff != null ? allowedDifferenceKg(totalInput, tolFrac) : null,
     inputBasis,
   };
 }
@@ -796,6 +801,14 @@ function JobCardDetailPageBody() {
   const [chain, setChain] = useState<ChainStep[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // A failed REFRESH of a card already on screen (patchy Wi-Fi): the page and
+  // everything typed in it stay, a strip says so, and it retries. `error`
+  // (the full-page message) is only for a first load that fails or a card
+  // that's gone — see job-card-refresh.ts.
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  // The card that last loaded successfully — so a failed load of a DIFFERENT
+  // card (jump along the chain) still gets the error page, not the old card.
+  const loadedIdRef = useRef<number | null>(null);
   const [tab, setTab] = useState<TabKey>("chain");
   const initial = useUserInitial();
 
@@ -805,14 +818,48 @@ function JobCardDetailPageBody() {
   const [reloadKey, setReloadKey] = useState(0);
   const reload = () => setReloadKey((k) => k + 1);
 
+  // Unsaved entries per tab (job-card-unsaved.ts). A tab is unmounted when
+  // another opens, so typing in it but not saving is lost. Typing in a tab
+  // marks it (scanner boxes save on scan and are excluded: data-unsaved-ignore,
+  // search boxes too); that tab's own successful save clears it. Switching
+  // tabs, jumping to another card or leaving the page asks first.
+  const unsavedTabsRef = useRef<Set<TabKey>>(new Set());
+  const confirmLeaveUnsaved = useCallback((): boolean => {
+    const open = [...unsavedTabsRef.current];
+    if (open.length === 0) return true;
+    const labels = open.map((k) => TABS.find((t) => t.key === k)?.label ?? k);
+    if (!window.confirm(unsavedPrompt(labels))) return false;
+    unsavedTabsRef.current.clear();
+    return true;
+  }, []);
+  const changeTab = (next: TabKey) => {
+    if (next === tab || !confirmLeaveUnsaved()) return;
+    setTab(next);
+  };
+  const jumpToCard = (id: number) => {
+    if (confirmLeaveUnsaved()) router.push(`/modules/job-card/${id}`);
+  };
+  const markUnsaved = (e: FormEvent<HTMLDivElement>) => {
+    const el = e.target as HTMLElement | null;
+    if (!el || el.closest("[data-unsaved-ignore]")) return;
+    if (el instanceof HTMLInputElement && el.type === "search") return;
+    unsavedTabsRef.current.add(tab);
+  };
+  // Tabs call onReload after a successful save — so that tab is saved.
+  const reloadAfterTabSave = () => {
+    unsavedTabsRef.current.delete(tab);
+    reload();
+  };
+
   // Cross-tab jump: the Accounting batch table's "Print QR" button switches to
   // the Boxes-printing tab and asks it to open+scroll to that batch's section.
   // Cleared by the Boxes tab once it's consumed the focus (one-shot).
   const [focusBatchId, setFocusBatchId] = useState<number | null>(null);
   const jumpToBoxes = useCallback((batchId: number) => {
+    if (!confirmLeaveUnsaved()) return;
     setFocusBatchId(batchId);
     setTab("sfgboxes");
-  }, []);
+  }, [confirmLeaveUnsaved]);
   const clearFocusBatch = useCallback(() => setFocusBatchId(null), []);
 
   // Boot-time auth gate — drops the inline tokenStore check that used to
@@ -869,9 +916,16 @@ function JobCardDetailPageBody() {
         if (controller.signal.aborted) return;
         setDetail(detailJson);
         setChain(chainJson);
+        loadedIdRef.current = jcId;
+        setRefreshError(null);
       } catch (e) {
         if (controller.signal.aborted) return;
-        setError(friendlyApiError(e));
+        const msg = friendlyApiError(e);
+        if (refreshFailureView({ loadedBefore: loadedIdRef.current === jcId, notFound: false }) === "keep-page") {
+          setRefreshError(msg);
+        } else {
+          setError(msg);
+        }
       } finally {
         if (!controller.signal.aborted) setLoading(false);
       }
@@ -920,6 +974,35 @@ function JobCardDetailPageBody() {
     // `authed` only. Capturing reload itself would re-bind the listener
     // every render because setReloadKey returns a new identity each call.
   }, [authed]);
+
+  // Closing or reloading the browser tab with unsaved entries asks first.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (unsavedTabsRef.current.size === 0) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, []);
+  // A different card (e.g. browser Back along the chain) starts with nothing unsaved.
+  useEffect(() => {
+    unsavedTabsRef.current.clear();
+  }, [jcId]);
+
+  // A failed refresh retries on its own: after REFRESH_RETRY_MS, or at once
+  // when the browser says the connection is back. The page stays meanwhile.
+  useEffect(() => {
+    if (!refreshError || typeof window === "undefined") return;
+    const retry = () => setReloadKey((k) => k + 1);
+    const timer = setTimeout(retry, REFRESH_RETRY_MS);
+    window.addEventListener("online", retry);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("online", retry);
+    };
+  }, [refreshError]);
 
   return (
     <div className="min-h-screen flex flex-col bg-[var(--background)]">
@@ -971,10 +1054,29 @@ function JobCardDetailPageBody() {
           </div>
         ) : detail ? (
           <>
+            {refreshError ? (
+              <div
+                role="status"
+                className="mb-3 px-3 py-2 rounded border text-[12px] bg-[#fff8e6] border-[#ffe69c] text-[#664d03] flex flex-wrap items-center gap-2"
+              >
+                <span className="flex-1 min-w-0">
+                  <strong>Connection problem.</strong> Couldn&apos;t refresh this job card ({refreshError}).
+                  Your entries on this page are kept; retrying automatically.
+                </span>
+                <button
+                  type="button"
+                  onClick={reload}
+                  disabled={loading}
+                  className="h-8 px-3 text-[12px] rounded-[2px] border border-[#e0c56e] bg-white hover:border-[#664d03] disabled:opacity-50"
+                >
+                  {loading ? "Retrying…" : "Retry now"}
+                </button>
+              </div>
+            ) : null}
             <PageHeader
               detail={detail}
               chain={chain}
-              onJump={(id) => router.push(`/modules/job-card/${id}`)}
+              onJump={jumpToCard}
               onReload={reload}
             />
             <ActionBar detail={detail} onReload={reload} reloading={loading} />
@@ -993,17 +1095,19 @@ function JobCardDetailPageBody() {
             ) : null}
             {/* R13 — the batch-closure controls + table now live inside the
                 Accounting Summary card (Output & Accounting tab), not here. */}
-            <TabStrip value={tab} onChange={setTab} />
-            <TabPanel
-              detail={detail}
-              chain={chain}
-              tab={tab}
-              onReload={reload}
-              onJumpJc={(id) => router.push(`/modules/job-card/${id}`)}
-              onJumpToBoxes={jumpToBoxes}
-              focusBatchId={focusBatchId}
-              onFocusConsumed={clearFocusBatch}
-            />
+            <TabStrip value={tab} onChange={changeTab} />
+            <div onInput={markUnsaved}>
+              <TabPanel
+                detail={detail}
+                chain={chain}
+                tab={tab}
+                onReload={reloadAfterTabSave}
+                onJumpJc={jumpToCard}
+                onJumpToBoxes={jumpToBoxes}
+                focusBatchId={focusBatchId}
+                onFocusConsumed={clearFocusBatch}
+              />
+            </div>
           </>
         ) : null}
       </main>
@@ -1248,6 +1352,46 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
     }
   }
 
+  // COMPLETE — like callAction, except that when the job card doesn't balance
+  // and the server says this user may complete it anyway (admins and floor
+  // managers: override_available), it asks for the reason and tries once more
+  // with it. The server records the reason as a remark on the card.
+  async function completeJobCard() {
+    if (!window.confirm("Complete Production\n\nMark this job card as completed? End time will be recorded.")) return;
+    const path = `/api/v1/production/job-cards-v2/${detail.job_card_id}/complete`;
+    setBusy(true);
+    try {
+      let res = await apiFetch(path, { method: "PUT" });
+      let okMessage = "Production completed.";
+      if (!res.ok) {
+        const offer = readOverrideOffer(await res.clone().json().catch(() => null));
+        if (offer.code === "unbalanced" && offer.overrideAvailable) {
+          let reason: string | null = null;
+          while (reason == null) {
+            const typed = window.prompt(
+              completeAnywayPrompt(offer.message ?? "This job card doesn't balance."), "");
+            if (typed == null) { onReload(); return; }   // cancelled: nothing changed
+            reason = cleanReason(typed);
+            if (reason == null) window.alert(`Please type a reason of at least ${MIN_REASON_LEN} characters.`);
+          }
+          res = await apiFetch(path, { method: "PUT", body: JSON.stringify({ override_reason: reason }) });
+          okMessage = "Production completed. The reason is recorded in Remarks.";
+        }
+      }
+      if (!res.ok) {
+        const msg = await readApiErrorMessage(res, `HTTP ${res.status}`);
+        onReload();
+        throw new Error(msg);
+      }
+      window.alert(okMessage);
+      onReload();
+    } catch (e) {
+      window.alert(friendlyJobCardError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // Decide which button to show.
   let label: string | null = null;
   let onClick: (() => void) | null = null;
@@ -1267,13 +1411,7 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
   } else if (status === "in_progress") {
     label = "COMPLETE";
     allowed = canComplete;
-    onClick = () => callAction({
-      confirmTitle: "Complete Production",
-      confirmMessage: "Mark this job card as completed? End time will be recorded.",
-      method: "PUT",
-      path: `/api/v1/production/job-cards-v2/${detail.job_card_id}/complete`,
-      okMessage: "Production completed.",
-    });
+    onClick = () => { void completeJobCard(); };
   } else if (status === "completed") {
     const fgKg = num(String(detail.section_5_output?.fg_actual_kg ?? 0));
     const sentKg = num(String(detail.dispatched_to_next_kg ?? 0));
@@ -4091,6 +4229,10 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   // Not sticky: it resets on every render of a fresh form, so an override is a
   // deliberate act per completion rather than a mode someone leaves switched on.
   const [allowUnbalanced, setAllowUnbalanced] = useState(false);
+  // The override is for admins and floor managers (useHasRole counts admins),
+  // and only with a reason the server records on the card's Remarks.
+  const canOverrideBalance = useHasRole("floor_manager");
+  const [overrideReason, setOverrideReason] = useState("");
   // Marks a dirty section like every other tracked input. Without this, a save
   // where the dispatch qty is the ONLY thing the operator changed is rejected
   // as "Nothing changed" and the typed value is silently discarded -- and it
@@ -4469,17 +4611,9 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   //   2. After a save, AccountingTab refetches GET /accounting and we
   //      prefer the server's authoritative R9 row whenever it's present
   //      in detail.accounting.
-  const tolerancePctFromServer =
-    effectiveAccounting?.allowed_balance_tolerance_pct != null
-      ? Number(effectiveAccounting.allowed_balance_tolerance_pct)
-      : null;
-  // Server stores tolerance as a fraction (0.001 = 0.1 %). Fall back to
-  // 0.001 when the backend hasn't surfaced it yet; convert to %-units for
-  // comparison against balanceDiffPct.
-  const allowedToleranceFrac =
-    tolerancePctFromServer != null && Number.isFinite(tolerancePctFromServer)
-      ? tolerancePctFromServer
-      : 0.001;
+  // Server stores tolerance as a fraction (0.001 = 0.1 %); the designed 0.1 %
+  // when the backend hasn't surfaced it yet. %-units for the summary display.
+  const allowedToleranceFrac = toleranceFraction(effectiveAccounting?.allowed_balance_tolerance_pct);
   const allowedTolerancePctUnits = allowedToleranceFrac * 100;
 
   const carriedInKg = num(String(effectiveAccounting?.carried_in_kg ?? detail.carried_qty_kg ?? 0));
@@ -4572,10 +4706,10 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     const balanceDiffPct = balanceDiff != null && totalInput > 0
       ? Math.abs(balanceDiff / totalInput) * 100
       : null;
-    const isBalanced = balanceDiff != null
-      ? Math.abs(balanceDiff) < BALANCE_TOLERANCE_KG
-        || (balanceDiffPct != null && balanceDiffPct <= allowedTolerancePctUnits)
-      : null;
+    // The server's rule (job-card-balance.ts) — the 50 g floor it used to
+    // add passed small batches the server then refused.
+    const isBalanced = isWithinBalance(balanceDiff, totalInput, allowedToleranceFrac);
+    const allowedKg = balanceDiff != null ? allowedDifferenceKg(totalInput, allowedToleranceFrac) : null;
 
     // Loss percentages anchor on FG Actual Kg (operator rule).
     // egaAbsKg above is the truth source — used by both the % strip
@@ -4644,11 +4778,12 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       balanceDiffPct,
       isBalanced,
       tolerancePct:     allowedTolerancePctUnits,
+      allowedKg,
       inputBasis,
     };
   }, [
     fgActualKg, processLoss, balance, rejections, controlSampleKg, rmIssuedKg,
-    carriedInKg, egaLossPctFromServer, allowedTolerancePctUnits, effectiveAccounting,
+    carriedInKg, egaLossPctFromServer, allowedToleranceFrac, allowedTolerancePctUnits, effectiveAccounting,
     consumption, extraGiveawayQty, additives,
   ]);
 
@@ -4695,10 +4830,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     const balanceDiffPct = balanceDiff != null && totalInput > 0
       ? Math.abs(balanceDiff / totalInput) * 100
       : null;
-    const isBalanced = balanceDiff != null
-      ? Math.abs(balanceDiff) < BALANCE_TOLERANCE_KG
-        || (balanceDiffPct != null && balanceDiffPct <= allowedTolerancePctUnits)
-      : null;
+    const isBalanced = isWithinBalance(balanceDiff, totalInput, allowedToleranceFrac);
     const denom = fgOutKg;
     const pct = (n: number) => denom > 0 ? (n / denom) * 100 : null;
     return {
@@ -4713,9 +4845,10 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       balanceDiffPct,
       isBalanced,
       tolerancePct: allowedTolerancePctUnits,
+      allowedKg: balanceDiff != null ? allowedDifferenceKg(totalInput, allowedToleranceFrac) : null,
       inputBasis: totalInput > 0 ? "indent" : "none",
     };
-  }, [perBatchSummaries, allowedTolerancePctUnits]);
+  }, [perBatchSummaries, allowedToleranceFrac, allowedTolerancePctUnits]);
 
   // Off-Grade row mutators ─────────────────────────────────────────────────
   // markDirty() guards the auto-poll resync; markSectionDirty("byproducts")
@@ -5204,6 +5337,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                     extra_give_away_qty: num(extraGiveawayQty) || 0,
                     is_balanced: accForClose?.is_balanced ?? null,
                     allow_unbalanced: allowUnbalanced,
+                    override_reason: allowUnbalanced ? overrideReason : null,
                     balance_difference_qty: accForClose?.balance_difference_qty != null
                       ? Number(accForClose.balance_difference_qty) : null,
                     // Omitted (null) means "dispatch the whole produced qty" —
@@ -5221,7 +5355,18 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                     completion_blocked?: { message?: string } }
                 | null;
               if (cRes.ok && cJson?.completed) {
-                setFeedback({ kind: "ok", msg: "Output saved and batch completed." });
+                // The server records the override (and the reason) only when the
+                // saved accounting really doesn't balance — the same verdict as
+                // accForClose.is_balanced from this save.
+                setFeedback({
+                  kind: "ok",
+                  msg: allowUnbalanced && accForClose?.is_balanced !== true
+                    ? "Output saved and batch completed although it doesn't balance. Your reason is recorded in Remarks."
+                    : "Output saved and batch completed.",
+                });
+                // An override is a deliberate act per completion, not a mode.
+                setAllowUnbalanced(false);
+                setOverrideReason("");
                 await refetchBatches();
               } else if (cRes.ok && cJson?.completion_blocked) {
                 // Saved but NOT completed — the batch is unbalanced. This
@@ -6280,26 +6425,49 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
           </>
         ) : null}
 
-        {/* Admin-only balance override. Rendered for admins regardless of the
-            current balance state so it is discoverable before the save that
-            gets blocked, rather than only after. */}
-        {isAdmin ? (
-          <label className="mt-3 flex items-start gap-2 text-[11px] text-[var(--text-secondary)]">
-            <input
-              type="checkbox"
-              className="accent-[var(--aws-orange)] w-4 h-4 mt-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
-              checked={allowUnbalanced}
-              onChange={(e) => setAllowUnbalanced(e.target.checked)}
-              disabled={inputsDisabled}
-            />
-            <span>
-              Complete even if the accounting is unbalanced
-              <span className="block text-[10px] text-[var(--text-muted)] italic">
-                Admin override. The batch closes and dispatches downstream with
-                a recorded balance difference.
+        {/* Balance override for admins and floor managers. Rendered regardless
+            of the current balance state so it is discoverable before the save
+            that gets blocked, rather than only after. Needs a reason, which
+            the server records on the card's Remarks. */}
+        {canOverrideBalance ? (
+          <div className="mt-3">
+            <label className="flex items-start gap-2 text-[11px] text-[var(--text-secondary)]">
+              <input
+                type="checkbox"
+                className="accent-[var(--aws-orange)] w-4 h-4 mt-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                checked={allowUnbalanced}
+                onChange={(e) => setAllowUnbalanced(e.target.checked)}
+                disabled={inputsDisabled}
+              />
+              <span>
+                Complete even if it doesn&apos;t balance
+                <span className="block text-[10px] text-[var(--text-muted)] italic">
+                  Admins and floor managers. The batch closes and dispatches
+                  downstream; your reason and how far off it was are recorded in
+                  the job card&apos;s Remarks.
+                </span>
               </span>
-            </span>
-          </label>
+            </label>
+            {allowUnbalanced ? (
+              <label className="mt-2 block">
+                <span className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">
+                  Reason <span className="text-[var(--aws-error)]">*</span>
+                </span>
+                <input
+                  value={overrideReason}
+                  onChange={(e) => setOverrideReason(e.target.value)}
+                  disabled={inputsDisabled}
+                  placeholder={`Why it can be completed anyway (at least ${MIN_REASON_LEN} characters)`}
+                  className="w-full h-9 px-2 text-[16px] sm:text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] disabled:opacity-50"
+                />
+                {overrideReason.trim() !== "" && cleanReason(overrideReason) == null ? (
+                  <span className="block mt-1 text-[10px] text-[var(--aws-error)]">
+                    At least {MIN_REASON_LEN} characters.
+                  </span>
+                ) : null}
+              </label>
+            ) : null}
+          </div>
         ) : null}
       </Panel>
 
@@ -6619,6 +6787,10 @@ type SummaryCardData = {
    *  surface it as a number like 0.10 so the SummaryCard can render
    *  "Tolerance: 0.10 %" alongside Is Balanced. */
   tolerancePct: number;
+  /** How far off (kg) still counts as balanced for this input — the
+   *  server's rule (job-card-balance.ts); null when there's no difference
+   *  to judge. Shown beside "Not balanced" so the gap is plain. */
+  allowedKg: number | null;
   /** Which input source the balance check is using. "indent" =
    *  canonical rm_issued + carried_in. "consumption" = operator-typed
    *  sum of RM consumption_lines (fallback when no indent). "none" =
@@ -6759,6 +6931,11 @@ function SummaryTable({ summary, rows, additives }:
                         {summary.isBalanced ? "✓ Balanced" : "✗ Not balanced"}
                       </span>
                     )}
+                    {summary.isBalanced === false && summary.balanceDiff != null && summary.allowedKg != null ? (
+                      <span className="block text-[10px] font-normal text-[#b1361e] mt-0.5">
+                        Off by {Math.abs(summary.balanceDiff).toFixed(3)} kg · {summary.allowedKg.toFixed(3)} kg allowed
+                      </span>
+                    ) : null}
                   </td>
                 ) : null}
                 {i === 0 ? (
@@ -7037,8 +7214,15 @@ function AccountingSummaryCard({
                       ? "bg-[#eaf6ed] text-[#1d8102]"
                       : "bg-[#fdf3f1] text-[#b1361e]",
                   ].join(" ")}
+                  title={!bs.isBalanced && bs.balanceDiff != null && bs.allowedKg != null
+                    ? `Off by ${Math.abs(bs.balanceDiff).toFixed(3)} kg · ${bs.allowedKg.toFixed(3)} kg allowed`
+                    : undefined}
                 >
-                  {bs.isBalanced ? "Balanced" : "Not balanced"}
+                  {bs.isBalanced
+                    ? "Balanced"
+                    : bs.balanceDiff != null
+                      ? `Not balanced · off by ${Math.abs(bs.balanceDiff).toFixed(3)} kg`
+                      : "Not balanced"}
                 </span>
               ) : null}
             </summary>
