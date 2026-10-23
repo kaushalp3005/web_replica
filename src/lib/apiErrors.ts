@@ -99,10 +99,13 @@ export function friendlyApiError(raw: unknown): string {
     case "open_segment_exists":
       return compose("start a new shift", "an earlier shift segment is still open. Stop it first.");
     case "unbalanced":
+    case "batch_unbalanced":
       return compose(
         "complete",
-        "accounting is unbalanced. The conservation identity (RM Issued + Carried In = FG + losses + balance + EGA) doesn't add up within tolerance. Adjust the totals, or request a maker-checker unbalanced-close override.",
+        "it doesn't balance within the allowed amount. Correct the figures in Accounting, or an admin or floor manager can complete it anyway with a reason.",
       );
+    case "override_reason_required":
+      return fromBackend || "Type a reason (at least 5 characters) for completing it although it doesn't balance.";
     case "no_accounting":
       return compose(
         "complete",
