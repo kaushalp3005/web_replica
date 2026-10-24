@@ -10,7 +10,6 @@
 import { useEffect, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { useParams, useRouter } from "next/navigation";
-import { userStore } from "@/lib/auth";
 import { useRequireAuth, useUserInitial, useIsAdmin, useHasPermission } from "@/lib/user";
 import { friendlyApiError } from "@/lib/apiErrors";
 import { approveSummary, retireSummary } from "@/lib/plan-outcome";
@@ -128,14 +127,13 @@ export default function PlanDetailPage() {
 
   async function onApprove() {
     if (!detail) return;
-    const me = userStore.load();
-    const approvedBy = me?.full_name?.trim() || me?.phone || "user";
     setBusy(true);
     setToast(null);
     try {
       // Refused (nothing approved) when an article has no steps or a step has
-      // no floor — the error names them.
-      const r = await approvePlan(detail.plan_id, { approved_by: approvedBy });
+      // no floor — the error names them. The approver is the logged-in user,
+      // set by the server; the page used to send `full_name || phone || "user"`.
+      const r = await approvePlan(detail.plan_id);
       setToast(approveSummary(r));
       setConfirm(null);
       setReload((k) => k + 1);
@@ -173,15 +171,11 @@ export default function PlanDetailPage() {
       setToast("Reason is required to delete an approved plan.");
       return;
     }
-    const me = userStore.load();
-    const deletedBy = me?.full_name?.trim() || me?.phone || "user";
     setBusy(true);
     setToast(null);
     try {
-      const r = await deletePlan(detail.plan_id, {
-        reason: reason.trim(),
-        deleted_by: deletedBy,
-      });
+      // The deleter is the logged-in user, set by the server.
+      const r = await deletePlan(detail.plan_id, { reason: reason.trim() });
       const adminCount = r.admin_email_count ?? 0;
       setToast(
         retireSummary(r, "deleted") + (adminCount > 0

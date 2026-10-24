@@ -35,6 +35,25 @@ export function approveSummary(result: unknown): string {
   return parts.join(" · ");
 }
 
+/** Appended after Create Job Card / a merged run: what carding the plan's last
+ *  article did to the plan. It used to approve it unseen, for anyone allowed to
+ *  card; now only someone who may approve plans does ("approved"), and for
+ *  anyone else it waits ("awaits_approval"). A merge reports per plan id. */
+export function planReleaseNote(release: unknown): string {
+  const say = (outcome: unknown, plan?: string) => {
+    const which = plan ? `plan ${plan}` : "the plan";
+    if (outcome === "approved") return `every article is carded, so ${which} is now approved`;
+    if (outcome === "awaits_approval") return `every article is carded; ${which} now waits for a planner to approve it`;
+    return "";
+  };
+  if (typeof release === "string") {
+    const s = say(release);
+    return s ? ` · ${s}.` : "";
+  }
+  const parts = Object.entries(asObj(release)).map(([plan, outcome]) => say(outcome, plan)).filter(Boolean);
+  return parts.length ? ` · ${parts.join("; ")}.` : "";
+}
+
 /** After Cancel ("cancelled") or Delete ("deleted"). */
 export function retireSummary(result: unknown, verb: "cancelled" | "deleted"): string {
   const r = asObj(result);

@@ -8,6 +8,7 @@
 
 import { useEffect, useState } from "react";
 import { friendlyApiError } from "@/lib/apiErrors";
+import { planReleaseNote } from "@/lib/plan-outcome";
 import {
   type PlanRow,
   validateProcessMerge,
@@ -245,7 +246,7 @@ export function MergeProcessModal({ planIds, onClose, onDone }: {
           qty_units: null,
         })),
       });
-      onDone(`Merged ${res.packaging.length} products into one process run · ${res.merged_qty_kg} kg · ${res.count} job cards.`);
+      onDone(`Merged ${res.packaging.length} products into one process run · ${res.merged_qty_kg} kg · ${res.count} job cards${planReleaseNote(res.plan_release) || "."}`);
     } catch (e) {
       setErr(friendlyApiError(e));
     } finally {

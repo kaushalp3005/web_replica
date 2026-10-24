@@ -7,6 +7,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { friendlyApiError } from "@/lib/apiErrors";
+import { planReleaseNote } from "@/lib/plan-outcome";
 import {
   type PlanRow,
   type PlanBomLine,
@@ -110,7 +111,7 @@ export async function submitJobCardWizard(
         const mergedNote = p.mergePlanLineIds.length
           ? ` (merged ${p.mergePlanLineIds.length + 1} SOs)`
           : "";
-        return { ok: true, message: `Created ${r.count} job card${r.count === 1 ? "" : "s"} for ${article}${mergedNote} · dispatched to floors.` };
+        return { ok: true, message: `Created ${r.count} job card${r.count === 1 ? "" : "s"} for ${article}${mergedNote} · dispatched to floors${planReleaseNote(r.plan_release) || "."}` };
       }
     }
   } catch (e) {
