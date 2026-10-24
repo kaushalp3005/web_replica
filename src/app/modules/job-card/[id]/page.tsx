@@ -26,7 +26,7 @@ import {
   type RejectionRow,
 } from "./outputAccounting";
 import { useParams, useRouter } from "next/navigation";
-import { apiFetch, readApiErrorMessage, userStore } from "@/lib/auth";
+import { apiFetch, readApiErrorMessage } from "@/lib/auth";
 import { useHasPermission, useHasRole, useIsAdmin, useMe, useRequireAuth, useUserInitial } from "@/lib/user";
 import { BALANCE_TOLERANCE_KG, WEIGHT_SAMPLE_COUNT } from "@/lib/constants";
 import { allowedDifferenceKg, isWithinBalance, toleranceFraction } from "@/lib/job-card-balance";
@@ -748,23 +748,21 @@ function num(v: string | null | undefined): number {
 // every LockBanner instance below. Hoisted to module scope so the banner CTA
 // runs the EXACT same prompts + PUT /force-unlock call as the page-header
 // menu (previously the banner only scroll-to-top'd, which sent the operator
-// to the menu without actually triggering the flow). authority + reason are
-// collected via window.prompt — matching the legacy Android dialog UX — and
-// a successful unlock fires the caller's onReload so the JC payload refetches
-// and `is_locked` flips off.
+// to the menu without actually triggering the flow). The reason is collected
+// via window.prompt — matching the legacy Android dialog UX — and a successful
+// unlock fires the caller's onReload so the JC payload refetches and
+// `is_locked` flips off. The server records the logged-in user as the one who
+// unlocked it; it used to ask for a typed "authority" name and store that.
 async function runForceUnlockJc(
   jobCardId: number,
-  defaultAuthority: string,
   onReload: () => void,
 ): Promise<void> {
-  const authority = window.prompt("Force unlock — authority (e.g. plant manager name):", defaultAuthority);
-  if (authority == null || !authority.trim()) return;
-  const reason = window.prompt("Force unlock — reason:");
+  const reason = window.prompt("Force unlock — reason (recorded under your name):");
   if (reason == null || !reason.trim()) return;
   try {
     const res = await apiFetch(`/api/v1/production/job-cards-v2/${jobCardId}/force-unlock`, {
       method: "PUT",
-      body: JSON.stringify({ authority: authority.trim(), reason: reason.trim() }),
+      body: JSON.stringify({ reason: reason.trim() }),
     });
     if (!res.ok) {
       // W4-HIGH-2 — share the canonical envelope reader so a JSON error body
@@ -1999,7 +1997,7 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
     // Delegates to the module-scope shared runner so the LockBanner CTA
     // hits the SAME prompts + RPC path — no behavioural drift between the
     // two entry points (C3-H1 + H2).
-    void runForceUnlockJc(detail.job_card_id, me?.full_name ?? "", onReload);
+    void runForceUnlockJc(detail.job_card_id, onReload);
   }
   function cancelJc() {
     const reason = window.prompt("Cancel Job Card — reason:");
@@ -3324,7 +3322,6 @@ function RemarksTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
           // PUT /force-unlock the page-header OverflowMenu uses.
           onForceUnlockClick={() => void runForceUnlockJc(
             detail.job_card_id,
-            userStore.load()?.full_name ?? "",
             onReload,
           )}
         />
@@ -3376,33 +3373,30 @@ function SignOffsTab({ detail, onReload }: { detail: JobCardDetail; onReload: ()
   const isSigned = !!signedBy.trim();
   const status = detail.status ?? "";
   const canSign = status === "completed";
-  // Fine-grained permission gate (UX only; server still enforces).
-  const canSignOff = useHasPermission("production", "job_cards", "sign_offs", "create");
+  // Fine-grained permission gate (UX only; server still enforces): the
+  // Production Head sign-off is given by floor managers and admins
+  // (useHasRole counts admins and every role the user holds).
+  const maySignOffs = useHasPermission("production", "job_cards", "sign_offs", "create");
+  const isFloorManager = useHasRole("floor_manager");
+  const canSignOff = maySignOffs && isFloorManager;
 
-  // C1 (Wave 4) — useMe() so the cached name re-renders the form when
-  // /me refreshes (admin renamed the operator, etc.).
+  // C1 (Wave 4) — useMe() so the cached name re-renders when /me refreshes
+  // (admin renamed the operator, etc.). The server records the logged-in
+  // user; it used to take a typed name, so anyone's name could be signed.
   const me = useMe();
-  const defaultName = me?.full_name?.trim() ?? "";
+  const myName = me?.full_name?.trim() || "you";
 
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
 
   async function promptAndSign() {
-    const name = window.prompt("Sign off as Production Head — your name:", defaultName);
-    if (name == null) return;
-    if (!name.trim()) {
-      setFeedback({ kind: "err", msg: "Name is required." });
-      return;
-    }
+    if (!window.confirm(`Sign off as Production Head as ${myName}?`)) return;
     setSubmitting(true);
     setFeedback(null);
     try {
       const res = await apiFetch(`/api/v1/production/job-cards-v2/${detail.job_card_id}/sign-off`, {
         method: "POST",
-        // SignOffRequest field is `signed_by_name` (NOT `signed_by`) — backend
-        // ignores unknown fields silently, so sending the wrong key would
-        // discard the operator's typed name and fall back to the JWT user.
-        body: JSON.stringify({ role: SIGNOFF_ROLE, signed_by_name: name.trim() }),
+        body: JSON.stringify({ role: SIGNOFF_ROLE }),
       });
       if (!res.ok) {
         let txt: string;
@@ -5667,7 +5661,6 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
         jcId={detail.job_card_id}
         onForceUnlockClick={() => void runForceUnlockJc(
           detail.job_card_id,
-          userStore.load()?.full_name ?? "",
           onReload,
         )}
       />
@@ -7795,25 +7788,19 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
         method: "POST",
       });
       const data = (await res.json().catch(() => null)) as
-        | { dispatched?: number; failed?: number; warning?: string; message?: string; error?: string }
+        | { dispatched?: number; failed?: number; message?: string; error?: string }
         | null;
       if (!res.ok) {
+        // Nobody reached is an error (409 qc_not_reached) naming why — it used
+        // to come back as "N dispatched" while the hook sent nothing.
         const msg = (data && (data.message || data.error)) || `HTTP ${res.status}`;
         throw new Error(String(msg));
       }
-      const dispatched = typeof data?.dispatched === "number" ? data.dispatched : 0;
-      const failed     = typeof data?.failed     === "number" ? data.failed     : 0;
-      if (data?.warning === "no_qc_recipients_in_scope") {
-        setNotifyFeedback({
-          kind: "warn",
-          msg: "Notification sent but no QC inspector is scoped to this JC.",
-        });
-      } else {
-        setNotifyFeedback({
-          kind: "ok",
-          msg: `Notify QC: ${dispatched} dispatched, ${failed} failed`,
-        });
-      }
+      const failed = typeof data?.failed === "number" ? data.failed : 0;
+      setNotifyFeedback({
+        kind: failed > 0 ? "warn" : "ok",
+        msg: data?.message || "QC was emailed.",
+      });
     } catch (e) {
       setNotifyFeedback({
         kind: "err",
@@ -7997,7 +7984,6 @@ function QualityTab({ detail, onReload }: { detail: JobCardDetail; onReload: () 
         jcId={detail.job_card_id}
         onForceUnlockClick={() => void runForceUnlockJc(
           detail.job_card_id,
-          userStore.load()?.full_name ?? "",
           onReload,
         )}
       />

@@ -1,5 +1,5 @@
 // node src/lib/plan-outcome.test.ts
-import { approveSummary, retireSummary } from "./plan-outcome.ts";
+import { approveSummary, planReleaseNote, retireSummary } from "./plan-outcome.ts";
 
 let failures = 0;
 function check(name: string, got: unknown, want: unknown) {
@@ -27,6 +27,14 @@ check("no SO link", retireSummary({ job_cards_cancelled: 1, released: { kg: 0, u
   "Plan deleted · 1 job card cancelled with it · nothing was reserved on a sales order");
 check("not an object", retireSummary(null, "cancelled"),
   "Plan cancelled · nothing was reserved on a sales order");
+
+// Carding the last article: approved only for someone who may approve plans.
+check("approved", planReleaseNote("approved"), " · every article is carded, so the plan is now approved.");
+check("waits", planReleaseNote("awaits_approval"),
+  " · every article is carded; the plan now waits for a planner to approve it.");
+check("nothing", planReleaseNote(undefined), "");
+check("merge, per plan", planReleaseNote({ "4101": "approved", "4102": "awaits_approval" }),
+  " · every article is carded, so plan 4101 is now approved; every article is carded; plan 4102 now waits for a planner to approve it.");
 
 if (failures) { console.error(`${failures} failed`); process.exit(1); }
 console.log("plan-outcome: all passed");

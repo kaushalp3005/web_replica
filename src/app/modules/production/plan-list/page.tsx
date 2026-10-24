@@ -18,6 +18,7 @@ import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
 import { useRequireAuth, useUserInitial, useRequireModuleAccess } from "@/lib/user";
 import { friendlyApiError } from "@/lib/apiErrors";
+import { planReleaseNote } from "@/lib/plan-outcome";
 import { BackLink } from "@/components/BackLink";
 import {
   type PlanRow,
@@ -461,7 +462,7 @@ export default function PlanListPage() {
                   const mergedNote = p.mergePlanLineIds.length
                     ? ` (merged ${p.mergePlanLineIds.length + 1} SOs)`
                     : "";
-                  setToast(`Created ${r.count} job card${r.count === 1 ? "" : "s"} for ${article}${mergedNote} · dispatched to floors.`);
+                  setToast(`Created ${r.count} job card${r.count === 1 ? "" : "s"} for ${article}${mergedNote} · dispatched to floors${planReleaseNote(r.plan_release) || "."}`);
                 }
               }
               reload();
@@ -1588,7 +1589,7 @@ function MergeProcessModal({ planIds, onClose, onDone }: {
           qty_units: null,
         })),
       });
-      onDone(`Merged ${res.packaging.length} products into one process run · ${res.merged_qty_kg} kg · ${res.count} job cards.`);
+      onDone(`Merged ${res.packaging.length} products into one process run · ${res.merged_qty_kg} kg · ${res.count} job cards${planReleaseNote(res.plan_release) || "."}`);
     } catch (e) {
       setErr(friendlyApiError(e));
     } finally {

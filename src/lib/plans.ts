@@ -231,6 +231,8 @@ export interface CreateJobCardResult {
   plan_line_id: number;
   job_card_ids: number[];
   count: number;
+  /** Set when this create carded the plan's last article (planReleaseNote). */
+  plan_release?: "approved" | "awaits_approval";
 }
 
 export async function createLineJobCards(
@@ -326,6 +328,8 @@ export interface ProcessMergeCreateResult {
     qty_kg: number; pkg_floor: string; pkg_process: string;
   }[];
   count: number;
+  /** Per plan id, when the merge carded that plan's last article (planReleaseNote). */
+  plan_release?: Record<string, "approved" | "awaits_approval">;
 }
 
 export async function createMergedProcessRun(
@@ -890,7 +894,7 @@ export async function deletePlan(
 }
 
 export interface ApprovePlanBody {
-  approved_by: string;          // required by PlanV2Approve
+  approved_by?: string;         // ignored: the server records the logged-in user
 }
 
 export interface ApprovePlanResponse {
@@ -911,7 +915,7 @@ export interface ApprovePlanResponse {
 
 export async function approvePlan(
   planId: number,
-  body: ApprovePlanBody,
+  body: ApprovePlanBody = {},
 ): Promise<ApprovePlanResponse> {
   const res = await apiFetch(`/api/v1/production/plans-v2/${planId}/approve`, {
     method: "POST",
