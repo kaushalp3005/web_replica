@@ -522,6 +522,17 @@ export interface DispatchBatch {
   status?: string | null;
   qty_kg: number;
   qty_units: number;
+  /** The packaging job card this batch belongs to — an article carded in
+   *  several partial chains has one packaging card per chain. */
+  job_card_id?: number | null;
+  job_card_number?: string | null;
+}
+
+export interface DispatchPackagingCard {
+  job_card_id: number;
+  job_card_number?: string | null;
+  status?: string | null;
+  floor?: string | null;
 }
 
 export interface LineDispatchInfo {
@@ -538,6 +549,9 @@ export interface LineDispatchInfo {
   uom?: string | null;
   packaging_status?: string;
   packaging_completed?: boolean;
+  /** Every chain's packaging card (the header fields above are the first's). */
+  packaging_cards?: DispatchPackagingCard[];
+  /** The batches of every packaging card, each tagged with its card. */
   batches?: DispatchBatch[];
   to_roles?: string[];
   cc_roles?: string[];
