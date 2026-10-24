@@ -764,6 +764,7 @@ const PlanRowDesktop = memo(function PlanRowDesktop({
   // line still has balance to card, incl. any un-carded line (show Create).
   // A partially-carded plan shows BOTH buttons side by side.
   const { anyCarded, anyRemaining } = planRowFlags(row);
+  const cancelled = (row.status ?? "").toLowerCase() === "cancelled";
   // Memoise the row-bound adapters so the per-row buttons / rowclick
   // don't churn their own listeners on every render either.
   const handleToggle = useCallback(() => onToggleExpand(row), [onToggleExpand, row]);
@@ -856,6 +857,7 @@ const PlanRowDesktop = memo(function PlanRowDesktop({
       </td>
       <td className="px-2.5 py-1.5 text-right">
         <RowActions
+          cancelled={cancelled}
           anyCarded={anyCarded}
           anyRemaining={anyRemaining}
           onOpen={handleOpen}
@@ -891,6 +893,7 @@ const PlanMobileCard = memo(function PlanMobileCard({
   // line still has balance to card, incl. any un-carded line (show Create).
   // A partially-carded plan shows BOTH buttons side by side.
   const { anyCarded, anyRemaining } = planRowFlags(row);
+  const cancelled = (row.status ?? "").toLowerCase() === "cancelled";
   const handleToggle = useCallback(() => onToggleExpand(row), [onToggleExpand, row]);
   const handleOpen = useCallback(() => onOpen(row), [onOpen, row]);
   const handleCreateJobCard = useCallback(
@@ -963,8 +966,9 @@ const PlanMobileCard = memo(function PlanMobileCard({
         />
         <div className="flex items-center gap-2 mt-2">
           <RowActions
+            cancelled={cancelled}
             anyCarded={anyCarded}
-          anyRemaining={anyRemaining}
+            anyRemaining={anyRemaining}
             onOpen={handleOpen}
             onCreateJobCard={handleCreateJobCard}
             onDispatch={handleDispatch}

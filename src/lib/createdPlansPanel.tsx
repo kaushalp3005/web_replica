@@ -282,6 +282,7 @@ function PlansCreated({ planIds, onDismiss }: {
                       </td>
                       <td className={`${GRID_TD} whitespace-nowrap`} onClick={(e) => e.stopPropagation()}>
                         <RowActions
+                          cancelled={(row.status ?? "").toLowerCase() === "cancelled"}
                           anyCarded={anyCarded}
                           anyRemaining={anyRemaining}
                           onOpen={() => router.push(`${PLAN_PAGE}/${id}`)}

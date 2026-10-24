@@ -23,8 +23,12 @@ import {
 } from "@/lib/plans";
 
 export function RowActions({
-  anyCarded, anyRemaining, onOpen, onCreateJobCard, onDispatch,
+  cancelled = false, anyCarded, anyRemaining, onOpen, onCreateJobCard, onDispatch,
 }: {
+  /** A cancelled plan: its job cards went with it and its SO qty is pending
+   *  again, so only Open is offered (Create Job Card used to stay, and the
+   *  server accepted it). */
+  cancelled?: boolean;
   anyCarded: boolean;
   anyRemaining: boolean;
   onOpen: () => void;
@@ -37,7 +41,7 @@ export function RowActions({
           shows Create (start a fresh / additional partial chain); a plan with
           any carded line shows Edit. A partially-carded plan shows BOTH, so the
           operator can card the next portion or edit what exists. */}
-      {anyRemaining ? (
+      {anyRemaining && !cancelled ? (
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onCreateJobCard("create"); }}
@@ -50,7 +54,7 @@ export function RowActions({
           Create Job Card
         </button>
       ) : null}
-      {anyCarded ? (
+      {anyCarded && !cancelled ? (
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onCreateJobCard("edit"); }}
@@ -85,17 +89,19 @@ export function RowActions({
       </button>
       {/* Dispatch to — only meaningful once an article's packaging stage is
           done; the modal/server confirm readiness per batch. */}
-      <button
-        type="button"
-        onClick={(e) => { e.stopPropagation(); onDispatch(); }}
-        title="Dispatch a completed packaging batch (notify billing / operations / stores)"
-        className="h-7 px-2.5 text-[11px] rounded-[2px] border border-[var(--aws-border)] bg-white text-[#1d8102] hover:border-[#1d8102] inline-flex items-center gap-1"
-      >
-        <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-          <rect x="1" y="3" width="15" height="13" /><polygon points="16 8 20 8 23 11 23 16 16 16 16 8" /><circle cx="5.5" cy="18.5" r="2.5" /><circle cx="18.5" cy="18.5" r="2.5" />
-        </svg>
-        Dispatch
-      </button>
+      {!cancelled ? (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onDispatch(); }}
+          title="Dispatch a completed packaging batch (notify billing / operations / stores)"
+          className="h-7 px-2.5 text-[11px] rounded-[2px] border border-[var(--aws-border)] bg-white text-[#1d8102] hover:border-[#1d8102] inline-flex items-center gap-1"
+        >
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <rect x="1" y="3" width="15" height="13" /><polygon points="16 8 20 8 23 11 23 16 16 16 16 8" /><circle cx="5.5" cy="18.5" r="2.5" /><circle cx="18.5" cy="18.5" r="2.5" />
+          </svg>
+          Dispatch
+        </button>
+      ) : null}
     </div>
   );
 }

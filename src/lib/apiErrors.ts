@@ -85,7 +85,7 @@ export function friendlyApiError(raw: unknown): string {
   const compose = (verb: string, fallback: string) =>
     fromBackend ? `Cannot ${verb} — ${fromBackend}` : `Cannot ${verb} — ${fallback}`;
   switch (code) {
-    // ── Admin gates (R10 — applied to JC cancel + plan cancel/delete) ──
+    // ── Admin gates (R10 — JC cancel; plan cancel/delete follow role permissions now) ──
     case "admin_only":
       return fromBackend || "Only admin users can perform this action.";
     // ── JC lifecycle ────────────────────────────────────────────────
