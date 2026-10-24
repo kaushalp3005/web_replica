@@ -566,6 +566,10 @@ function DispatchModal({
   }, [selectedLineId]);
 
   const batch = (info?.batches ?? []).find((b) => b.batch_id === batchId) ?? null;
+  // An article carded in several partial chains has one packaging card per
+  // chain: each batch names its card, and the details below follow the batch.
+  const severalCards = (info?.packaging_cards?.length ?? 0) > 1;
+  const batchCard = (info?.packaging_cards ?? []).find((c) => c.job_card_id === batch?.job_card_id) ?? null;
   const canSend = selectedLineId != null && info?.exists === true && batchId != null && !sending;
 
   async function send() {
@@ -705,7 +709,7 @@ function DispatchModal({
                   >
                     {(info.batches ?? []).map((b) => (
                       <option key={b.batch_id} value={b.batch_id}>
-                        Batch {b.batch_number}{b.status ? ` · ${b.status}` : ""} — {fmtPlanKg(b.qty_kg)} kg{b.qty_units ? ` / ${fmtPlanUnits(b.qty_units)} pcs` : ""}
+                        {severalCards && b.job_card_number ? `${b.job_card_number} · ` : ""}Batch {b.batch_number}{b.status ? ` · ${b.status}` : ""} — {fmtPlanKg(b.qty_kg)} kg{b.qty_units ? ` / ${fmtPlanUnits(b.qty_units)} pcs` : ""}
                       </option>
                     ))}
                   </select>
@@ -714,12 +718,12 @@ function DispatchModal({
 
               {/* Auto-filled job card details (read-only) */}
               <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[12px] bg-[var(--surface-subtle)] border border-[var(--aws-border)] rounded p-2.5">
-                <DispatchKV label="Job card" value={info.job_card_number} mono />
+                <DispatchKV label="Job card" value={batch?.job_card_number ?? info.job_card_number} mono />
                 <DispatchKV label="Phase / batch" value={batch ? `#${batch.batch_number}` : undefined} />
                 <DispatchKV label="Qty (kg)" value={batch ? `${fmtPlanKg(batch.qty_kg)} kg` : undefined} />
                 <DispatchKV label="Qty (units)" value={batch && batch.qty_units ? `${fmtPlanUnits(batch.qty_units)} pcs` : "—"} />
                 <DispatchKV label="Warehouse" value={info.warehouse} />
-                <DispatchKV label="Floor" value={info.floor} />
+                <DispatchKV label="Floor" value={batchCard?.floor ?? info.floor} />
                 <DispatchKV label="Customer" value={info.customer_name} />
               </dl>
 

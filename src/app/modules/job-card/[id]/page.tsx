@@ -33,6 +33,7 @@ import { allowedDifferenceKg, isWithinBalance, toleranceFraction } from "@/lib/j
 import { cleanReason, completeAnywayPrompt, MIN_REASON_LEN, readOverrideOffer } from "@/lib/job-card-override";
 import { REFRESH_RETRY_MS, refreshFailureView } from "@/lib/job-card-refresh";
 import { unsavedPrompt } from "@/lib/job-card-unsaved";
+import { distributeSummary, sentOnNote } from "@/lib/job-card-handoff";
 import { classifyProcess, classifySteps, isPmBearingStage, STAGE_CREATE_WIP } from "@/lib/processCatalog";
 import { friendlyApiError } from "@/lib/apiErrors";
 import { hasBomChanges, type BomChanges } from "@/lib/job-card-bom-rules";
@@ -1321,6 +1322,9 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
     path: string;
     body?: unknown;
     okMessage: string;
+    /** Build the success message from the server's reply instead (e.g. what a
+     *  close sent on to the next stage). */
+    okMessageFrom?: (reply: unknown) => string;
   }) {
     if (!window.confirm(`${opts.confirmTitle}\n\n${opts.confirmMessage}`)) return;
     setBusy(true);
@@ -1343,7 +1347,9 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
         onReload();
         throw new Error(msg);
       }
-      window.alert(opts.okMessage);
+      window.alert(opts.okMessageFrom
+        ? opts.okMessageFrom(await res.json().catch(() => null))
+        : opts.okMessage);
       onReload();
     } catch (e) {
       window.alert(friendlyJobCardError(e));
@@ -1357,7 +1363,9 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
   // managers: override_available), it asks for the reason and tries once more
   // with it. The server records the reason as a remark on the card.
   async function completeJobCard() {
-    if (!window.confirm("Complete Production\n\nMark this job card as completed? End time will be recorded.")) return;
+    if (!window.confirm(
+      "Complete Production\n\nMark this job card as completed? End time will be recorded, "
+      + "and anything produced but not yet dispatched is sent on to the next stage.")) return;
     const path = `/api/v1/production/job-cards-v2/${detail.job_card_id}/complete`;
     setBusy(true);
     try {
@@ -1383,8 +1391,46 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
         onReload();
         throw new Error(msg);
       }
-      window.alert(okMessage);
+      // What completing sent on to the next stage (sent_on), if anything.
+      window.alert(okMessage + sentOnNote(await res.json().catch(() => null)));
       onReload();
+    } catch (e) {
+      window.alert(friendlyJobCardError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // DISTRIBUTE TO PACKAGING — shares the merged run's whole remaining output
+  // across its packaging cards and says what actually happened (it used to say
+  // "Distributed" even when nothing moved). If every packaging card is already
+  // finished, nothing can move: offer to close this card instead of looping.
+  async function distributeToPackaging(remainingKg: number) {
+    if (!window.confirm(
+      `Distribute to packaging\n\nShare the remaining ${remainingKg.toFixed(2)} kg of the shared process `
+      + "output across every product's packaging card, in proportion to their planned quantity?")) return;
+    const base = `/api/v1/production/job-cards-v2/${detail.job_card_id}`;
+    setBusy(true);
+    try {
+      const res = await apiFetch(`${base}/dispatch-group`, { method: "POST" });
+      if (res.ok) {
+        window.alert(distributeSummary(await res.json().catch(() => null)));
+        onReload();
+        return;
+      }
+      const refusal = readOverrideOffer(await res.clone().json().catch(() => null));
+      if (refusal.code === "no_open_packaging" && canClose) {
+        if (window.confirm(`${refusal.message ?? "Nothing more can be sent on."}\n\nClose this job card now? The remaining output stays recorded on it.`)) {
+          const closed = await apiFetch(`${base}/close`, { method: "PUT" });
+          if (!closed.ok) throw new Error(await readApiErrorMessage(closed, `HTTP ${closed.status}`));
+          window.alert("Job card closed.");
+        }
+        onReload();
+        return;
+      }
+      const msg = await readApiErrorMessage(res, `HTTP ${res.status}`);
+      onReload();
+      throw new Error(msg);
     } catch (e) {
       window.alert(friendlyJobCardError(e));
     } finally {
@@ -1457,22 +1503,17 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
     ) {
       label = "DISTRIBUTE TO PACKAGING";
       allowed = canComplete;
-      onClick = () => callAction({
-        confirmTitle: "Distribute to packaging",
-        confirmMessage: `Fan out ${remaining.toFixed(2)} kg of the shared process output to every product's packaging card in this merged group? Each packaging card unlocks and receives its share.`,
-        method: "POST",
-        path: `/api/v1/production/job-cards-v2/${detail.job_card_id}/dispatch-group`,
-        okMessage: "Distributed — every product's packaging is now unlocked and fed.",
-      });
+      onClick = () => { void distributeToPackaging(remaining); };
     } else {
       label = "CLOSE JC";
       allowed = canClose;
       onClick = () => callAction({
         confirmTitle: "Close Job Card",
-        confirmMessage: "Close this job card after sign-offs? It will become read-only.",
+        confirmMessage: "Close this job card after sign-offs? It will become read-only, and anything produced but not yet dispatched is sent on to the next stage.",
         method: "PUT",
         path: `/api/v1/production/job-cards-v2/${detail.job_card_id}/close`,
         okMessage: "Job card closed.",
+        okMessageFrom: (reply) => "Job card closed." + sentOnNote(reply),
       });
     }
   }
