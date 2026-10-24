@@ -857,13 +857,21 @@ export async function deletePlanStep(stepId: number): Promise<unknown> {
 
 export interface DeletePlanBody {
   reason: string;                 // required — surfaces in the admin email
-  deleted_by?: string;            // operator identity (defaults to "" server-side)
+  deleted_by?: string;            // ignored: the server names the logged-in user
+}
+
+/** What a plan cancel / delete gave back to the sales order. */
+export interface PlanReleased {
+  kg: number;
+  units: number;
 }
 
 export interface DeletePlanResponse {
   plan_id?: number;
   status?: string;
   admin_email_count?: number;     // how many admins were notified
+  job_cards_cancelled?: number;   // the plan's (unstarted) cards go with it
+  released?: PlanReleased;
   [k: string]: unknown;
 }
 
@@ -888,12 +896,15 @@ export interface ApprovePlanBody {
 export interface ApprovePlanResponse {
   plan_id?: number;
   status?: string;
-  // The backend auto-generates per-floor job cards on approve. Shape varies;
-  // the original frontend reads job_cards.lines[*].job_card_ids.
+  // The backend generates per-floor job cards on approve for every article
+  // that has none yet; articles already carded are skipped.
+  job_card_count?: number;
+  articles_carded?: number;
+  articles_already_carded?: number;
   job_cards?: {
     error?: string;
     count?: number;
-    lines?: Array<{ job_card_ids?: number[] }>;
+    lines?: Array<{ job_card_ids?: number[]; skipped?: string }>;
   };
   [k: string]: unknown;
 }
@@ -913,10 +924,17 @@ export async function approvePlan(
 }
 
 export interface CancelPlanBody {
-  reason?: string;              // defaults to "" server-side
+  reason: string;               // required — kept on the plan and its cancelled cards
 }
 
-export async function cancelPlan(planId: number, body: CancelPlanBody): Promise<unknown> {
+export interface CancelPlanResponse {
+  cancelled?: boolean;
+  job_cards_cancelled?: number;
+  released?: PlanReleased;
+  [k: string]: unknown;
+}
+
+export async function cancelPlan(planId: number, body: CancelPlanBody): Promise<CancelPlanResponse> {
   const res = await apiFetch(`/api/v1/production/plans-v2/${planId}/cancel`, {
     method: "POST",
     body: JSON.stringify(body),
@@ -924,7 +942,7 @@ export async function cancelPlan(planId: number, body: CancelPlanBody): Promise<
   if (!res.ok) {
     throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
   }
-  return await res.json();
+  return (await res.json()) as CancelPlanResponse;
 }
 
 // ── Formatters reused by the page ───────────────────────────────────────

@@ -1140,6 +1140,7 @@ const PlanRowDesktop = memo(function PlanRowDesktop({
     (l) => (l.job_card_count ?? 0) === 0
       || numOr0(l.planned_qty_kg) - numOr0(l.carded_qty_kg) > 0.001,
   );
+  const cancelled = (row.status ?? "").toLowerCase() === "cancelled";
   // Memoise the row-bound adapters so the per-row buttons / rowclick
   // don't churn their own listeners on every render either.
   const handleToggle = useCallback(() => onToggleExpand(row), [onToggleExpand, row]);
@@ -1232,6 +1233,7 @@ const PlanRowDesktop = memo(function PlanRowDesktop({
       </td>
       <td className="px-2.5 py-1.5 text-right">
         <RowActions
+          cancelled={cancelled}
           anyCarded={anyCarded}
           anyRemaining={anyRemaining}
           onOpen={handleOpen}
@@ -1272,6 +1274,7 @@ const PlanMobileCard = memo(function PlanMobileCard({
     (l) => (l.job_card_count ?? 0) === 0
       || numOr0(l.planned_qty_kg) - numOr0(l.carded_qty_kg) > 0.001,
   );
+  const cancelled = (row.status ?? "").toLowerCase() === "cancelled";
   const handleToggle = useCallback(() => onToggleExpand(row), [onToggleExpand, row]);
   const handleOpen = useCallback(() => onOpen(row), [onOpen, row]);
   const handleCreateJobCard = useCallback(
@@ -1344,8 +1347,9 @@ const PlanMobileCard = memo(function PlanMobileCard({
         />
         <div className="flex items-center gap-2 mt-2">
           <RowActions
+            cancelled={cancelled}
             anyCarded={anyCarded}
-          anyRemaining={anyRemaining}
+            anyRemaining={anyRemaining}
             onOpen={handleOpen}
             onCreateJobCard={handleCreateJobCard}
             onDispatch={handleDispatch}
@@ -1362,8 +1366,12 @@ const PlanMobileCard = memo(function PlanMobileCard({
 });
 
 function RowActions({
-  anyCarded, anyRemaining, onOpen, onCreateJobCard, onDispatch,
+  cancelled, anyCarded, anyRemaining, onOpen, onCreateJobCard, onDispatch,
 }: {
+  /** A cancelled plan: its job cards went with it and its SO qty is pending
+   *  again, so only Open is offered (Create Job Card used to stay, and the
+   *  server accepted it). */
+  cancelled: boolean;
   anyCarded: boolean;
   anyRemaining: boolean;
   onOpen: () => void;
@@ -1376,7 +1384,7 @@ function RowActions({
           shows Create (start a fresh / additional partial chain); a plan with
           any carded line shows Edit. A partially-carded plan shows BOTH, so the
           operator can card the next portion or edit what exists. */}
-      {anyRemaining ? (
+      {anyRemaining && !cancelled ? (
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onCreateJobCard("create"); }}
@@ -1389,7 +1397,7 @@ function RowActions({
           Create Job Card
         </button>
       ) : null}
-      {anyCarded ? (
+      {anyCarded && !cancelled ? (
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onCreateJobCard("edit"); }}
@@ -1424,17 +1432,19 @@ function RowActions({
       </button>
       {/* Dispatch to — only meaningful once an article's packaging stage is
           done; the modal/server confirm readiness per batch. */}
-      <button
-        type="button"
-        onClick={(e) => { e.stopPropagation(); onDispatch(); }}
-        title="Dispatch a completed packaging batch (notify billing / operations / stores)"
-        className="h-7 px-2.5 text-[11px] rounded-[2px] border border-[var(--aws-border)] bg-white text-[#1d8102] hover:border-[#1d8102] inline-flex items-center gap-1"
-      >
-        <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-          <rect x="1" y="3" width="15" height="13" /><polygon points="16 8 20 8 23 11 23 16 16 16 16 8" /><circle cx="5.5" cy="18.5" r="2.5" /><circle cx="18.5" cy="18.5" r="2.5" />
-        </svg>
-        Dispatch
-      </button>
+      {!cancelled ? (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onDispatch(); }}
+          title="Dispatch a completed packaging batch (notify billing / operations / stores)"
+          className="h-7 px-2.5 text-[11px] rounded-[2px] border border-[var(--aws-border)] bg-white text-[#1d8102] hover:border-[#1d8102] inline-flex items-center gap-1"
+        >
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+            <rect x="1" y="3" width="15" height="13" /><polygon points="16 8 20 8 23 11 23 16 16 16 16 8" /><circle cx="5.5" cy="18.5" r="2.5" /><circle cx="18.5" cy="18.5" r="2.5" />
+          </svg>
+          Dispatch
+        </button>
+      ) : null}
     </div>
   );
 }

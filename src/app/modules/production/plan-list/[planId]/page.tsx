@@ -11,8 +11,9 @@ import { useEffect, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { useParams, useRouter } from "next/navigation";
 import { userStore } from "@/lib/auth";
-import { useRequireAuth, useUserInitial, useIsAdmin } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useIsAdmin, useHasPermission } from "@/lib/user";
 import { friendlyApiError } from "@/lib/apiErrors";
+import { approveSummary, retireSummary } from "@/lib/plan-outcome";
 import { BackLink } from "@/components/BackLink";
 import {
   type PlanDetail,
@@ -119,6 +120,11 @@ export default function PlanDetailPage() {
   // gate on step writes by plan status), so the wire shape is unchanged
   // for the audit log.
   const isAdmin = useIsAdmin();
+  // Cancel / Delete follow the role permissions the server checks — admins and
+  // planners (within their own factory, enforced server-side). They used to be
+  // admin-only, while the step editor told planners to cancel and re-plan.
+  const canCancel = useHasPermission("production", "plans", "cancel", "create");
+  const canDelete = useHasPermission("production", "plans", null, "delete");
 
   async function onApprove() {
     if (!detail) return;
@@ -127,17 +133,10 @@ export default function PlanDetailPage() {
     setBusy(true);
     setToast(null);
     try {
+      // Refused (nothing approved) when an article has no steps or a step has
+      // no floor — the error names them.
       const r = await approvePlan(detail.plan_id, { approved_by: approvedBy });
-      const jcCount = (r.job_cards?.lines || [])
-        .reduce((n, ln) => n + (ln.job_card_ids?.length || 0), 0);
-      const alreadyExisted = r.job_cards?.error === "job_cards_already_exist";
-      setToast(
-        jcCount > 0
-          ? `Plan approved · ${jcCount} job card${jcCount === 1 ? "" : "s"} generated`
-          : alreadyExisted
-            ? `Plan approved · job cards already exist (${r.job_cards?.count ?? "?"})`
-            : "Plan approved",
-      );
+      setToast(approveSummary(r));
       setConfirm(null);
       setReload((k) => k + 1);
     } catch (e) {
@@ -149,11 +148,15 @@ export default function PlanDetailPage() {
 
   async function onCancel() {
     if (!detail) return;
+    if (!reason.trim()) {
+      setToast("Say why the plan is being cancelled.");
+      return;
+    }
     setBusy(true);
     setToast(null);
     try {
-      await cancelPlan(detail.plan_id, { reason: reason.trim() });
-      setToast("Plan cancelled · reserved fulfillment qty released.");
+      const r = await cancelPlan(detail.plan_id, { reason: reason.trim() });
+      setToast(retireSummary(r, "cancelled"));
       setConfirm(null);
       setReason("");
       setReload((k) => k + 1);
@@ -181,9 +184,9 @@ export default function PlanDetailPage() {
       });
       const adminCount = r.admin_email_count ?? 0;
       setToast(
-        adminCount > 0
-          ? `Plan deleted · ${adminCount} admin${adminCount === 1 ? "" : "s"} notified.`
-          : "Plan deleted · no admin emails on file to notify.",
+        retireSummary(r, "deleted") + (adminCount > 0
+          ? ` · ${adminCount} admin${adminCount === 1 ? "" : "s"} notified.`
+          : " · no admin emails on file to notify."),
       );
       setConfirm(null);
       setReason("");
@@ -328,7 +331,7 @@ export default function PlanDetailPage() {
           </button>
           {isDraft ? (
             <>
-              {isAdmin ? (
+              {canCancel ? (
                 <button
                   onClick={() => setConfirm("cancel")}
                   disabled={busy}
@@ -346,7 +349,7 @@ export default function PlanDetailPage() {
               </button>
             </>
           ) : null}
-          {isApproved && isAdmin ? (
+          {isApproved && canDelete ? (
             <button
               onClick={() => setConfirm("delete")}
               disabled={busy}
@@ -411,12 +414,12 @@ function PlanHeader({
   const status = (detail.status ?? "").toLowerCase();
   const isDraft = status === "draft";
   const isApproved = status === "approved";
-  // R10 — Cancel Plan + Delete Plan are admin-only on the server (router
-  // gates wrap both POST /plans-v2/{id}/cancel and /delete). Mirror that
-  // here so non-admin operators don't see the buttons at all; the
-  // alternative (showing them + letting them 403) is bad UX. Approve
-  // remains visible to non-admins since multiple roles may approve plans.
-  const isAdmin = useIsAdmin();
+  // Cancel Plan + Delete Plan follow the same role permissions the server
+  // checks (plans › cancel, plans › delete — admins and planners), so a user
+  // without them doesn't see the buttons at all rather than hitting a 403.
+  // Approve remains visible since multiple roles may approve plans.
+  const canCancel = useHasPermission("production", "plans", "cancel", "create");
+  const canDelete = useHasPermission("production", "plans", null, "delete");
   // Header fields (plan_date, date_from, date_to, plan_type) are editable
   // while the plan hasn't been executed / cancelled — drafts AND approved
   // plans both qualify. Once a plan is approved, downstream JCs are tied
@@ -506,7 +509,7 @@ function PlanHeader({
           ) : null}
           {isDraft ? (
             <>
-              {isAdmin ? (
+              {canCancel ? (
                 <button
                   onClick={onOpenCancel}
                   className="h-8 px-3 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[var(--aws-error)] hover:border-[var(--aws-error)]"
@@ -522,10 +525,10 @@ function PlanHeader({
               </button>
             </>
           ) : null}
-          {isApproved && isAdmin ? (
+          {isApproved && canDelete ? (
             <button
               onClick={onOpenDelete}
-              title="Delete an approved plan — admins are notified by email"
+              title="Delete an approved plan with its job cards — admins are notified by email"
               className="h-8 px-3 text-[12px] rounded-[2px] border border-[var(--aws-error)] bg-white text-[var(--aws-error)] hover:bg-[#fdf3f1] inline-flex items-center gap-1.5"
             >
               <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
@@ -1072,16 +1075,16 @@ function LineCardEdit({
     }
 
     // Approved-plan path: route line-field changes through the R8
-    // plan_field_change amendment. Step changes are blocked entirely on
-    // approved plans because the amendment scope only covers line fields
-    // — operator must cancel + recreate the plan if step structure needs
-    // editing.
+    // plan_field_change amendment. Step changes are blocked here on approved
+    // plans because the amendment scope only covers line fields — the steps
+    // live on the job cards by then (Edit Job Card), or the plan is deleted
+    // (planners may, until work starts) and planned again.
     if (requireApproval) {
       const stepsTouched = patches.length > 0 || deletes.length > 0
         || newSteps.length > 0 || orderChanged;
       if (stepsTouched) {
         onMessage(
-          "Step edits aren't supported on approved plans yet. Cancel the plan and create a new revision, or revert the step changes and resubmit only line-level edits.",
+          "Steps can't be changed here on an approved plan. Change them with Edit Job Card on the Plan List, or — if the plan itself is wrong — Delete plan (allowed until work starts on its job cards) and plan the article again. To save only the line fields, revert the step changes.",
         );
         return;
       }
@@ -1647,10 +1650,10 @@ function ConfirmModal({
     :                       (busy ? "Deleting…"  : "Delete plan");
 
   const isDestructive = kind === "cancel" || kind === "delete";
-  // Both cancel and delete need a reason. Approve doesn't.
+  // Both cancel and delete need a non-empty reason (server enforces too) — it
+  // is kept on the plan and on every job card cancelled with it. Approve doesn't.
   const needsReason = isDestructive;
-  // Delete requires a non-empty reason (server enforces too).
-  const submitDisabled = busy || (kind === "delete" && reason.trim().length === 0);
+  const submitDisabled = busy || (isDestructive && reason.trim().length === 0);
 
   return (
     <div
@@ -1681,19 +1684,24 @@ function ConfirmModal({
           </p>
           {kind === "approve" ? (
             <p className="text-[12px] text-[var(--text-secondary)]">
-              Approving locks the plan and auto-generates per-floor job cards from the BOM process route.
-              This cannot be reverted directly — to void an approved plan, cancel each generated job card.
+              Approving makes per-floor job cards for every article that has none yet, from its
+              process steps; articles already carded are left as they are. Every step needs a
+              floor — if an article has no steps or a step has no floor, nothing is approved and
+              those articles are listed.
             </p>
           ) : kind === "cancel" ? (
             <p className="text-[12px] text-[var(--text-secondary)] mb-2">
-              Cancellation releases the reserved fulfillment quantity back to pending. Only valid while the plan is in <strong>draft</strong>.
+              Cancelling puts the plan&apos;s quantity back to pending on the sales order and cancels
+              its job cards. If work has started on any of them, the cancel is refused — stop or
+              finish those job cards first.
             </p>
           ) : (
             // delete
             <div className="text-[12px] text-[var(--text-secondary)] space-y-2 mb-2">
               <p>
-                Deletion releases the reserved fulfillment quantity back to pending and marks
-                the plan as cancelled with an audit reason.
+                Deleting puts the plan&apos;s quantity back to pending on the sales order, cancels its
+                job cards and marks the plan cancelled with your reason. If work has started on any
+                job card, the delete is refused — stop or finish those job cards first.
               </p>
               <div className="border border-[var(--aws-error)] bg-[#fdf3f1] rounded-sm px-2.5 py-2 text-[11px] text-[var(--text-primary)] flex items-start gap-2">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-[var(--aws-error)] mt-0.5">
@@ -1703,8 +1711,7 @@ function ConfirmModal({
                 </svg>
                 <span>
                   <strong>Admin notification:</strong> every active admin will receive an email
-                  with the plan id, warehouse, your name, and the reason below. Per-floor job cards
-                  already generated are <strong>NOT</strong> auto-cancelled — review them separately.
+                  with the plan id, warehouse, your name, and the reason below.
                 </span>
               </div>
             </div>
@@ -1712,7 +1719,7 @@ function ConfirmModal({
           {needsReason ? (
             <label className="block">
               <span className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">
-                Reason {kind === "delete" ? <span className="text-[var(--aws-error)]">*</span> : null}
+                Reason <span className="text-[var(--aws-error)]">*</span>
               </span>
               <textarea
                 value={reason}
