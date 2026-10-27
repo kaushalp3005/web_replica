@@ -215,7 +215,8 @@ export function ScanMaterialDialog({
           ) : null}
         </div>
 
-        <QrScanner onResult={handleScan} warning={dupWarn} title="Scan box QR" />
+        {/* The scanner shows `warning` as given; this dialog keeps the box id. */}
+        <QrScanner onResult={handleScan} warning={dupWarn ? `Duplicate box scanned — ${dupWarn}` : null} title="Scan box QR" />
 
         <ManualPrint
           requisition={r}

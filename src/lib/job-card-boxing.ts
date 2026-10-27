@@ -118,7 +118,10 @@ export function rollupBoxesByBatch(boxes: readonly BoxingBoxRow[]): BoxingBatch[
  *
  * Rules run in order and the first failure wins, so the operator is told the
  * one thing to do next rather than a list: close the batch, then account it,
- * then box the rest of it, then print the labels.
+ * then box the rest of it, then print the labels. (Boxing may also come first:
+ * a batch's FG kg follows its boxes, and boxes added after the save raise it —
+ * server fg_from_boxes. Lighter boxes leave FG as it is, which is the "still to
+ * box" this reports.)
  *
  * A status that is neither 'open' nor 'cancelled' counts as closed — including
  * a missing one, which would otherwise let an unknown state pass every gate.

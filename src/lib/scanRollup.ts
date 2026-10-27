@@ -96,7 +96,7 @@ export type VarianceBaseline = {
 /** Spellings of a kilogram we accept on a BOM line's uom. bom_line.uom is
  *  free-form text, so this mirrors the server's set (floor_requisition/rules
  *  _KG) rather than guessing. */
-const KG_UOMS = new Set(["", "kg", "kgs", "kilogram", "kilograms"]);
+export const KG_UOMS: ReadonlySet<string> = new Set(["", "kg", "kgs", "kilogram", "kilograms"]);
 
 /**
  * Which quantity Accounting compares the typed consumption against.
