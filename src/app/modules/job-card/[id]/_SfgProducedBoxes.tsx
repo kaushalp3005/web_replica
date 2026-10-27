@@ -35,15 +35,33 @@ export type BatchOpt = {
 function batchOptLabel(b: BatchOpt): string {
   return b.batch_label?.trim() || `Batch ${b.batch_number}`;
 }
-// The accounting kg a batch's boxes must not exceed (produced → input → planned,
-// first > 0); null when the batch has no accounting weight yet (no cap).
+// The kg an OPEN batch's boxes must not exceed: what it was opened with (input,
+// else planned, first > 0); null for no cap. FG kg comes from the boxes
+// (server fg_from_boxes, 2026-10-27), so the saved FG is no cap: boxes added to
+// a completed batch can raise it, up to its process loss — only the server
+// knows that loss and whether the next stage has finished, so it judges those.
 function batchCapKg(opt?: BatchOpt): number | null {
-  if (!opt) return null;
-  for (const v of [opt.produced_qty_kg, opt.input_qty_kg, opt.planned_qty_kg]) {
+  if (!opt || opt.status !== "open") return null;
+  for (const v of [opt.input_qty_kg, opt.planned_qty_kg]) {
     const n = v == null ? 0 : Number(v);
     if (Number.isFinite(n) && n > 0) return n;
   }
   return null;
+}
+// A completed batch's FG kg (raised by its boxes, never lowered by them).
+function batchFgKg(opt?: BatchOpt): number | null {
+  if (!opt || opt.status !== "closed") return null;
+  for (const v of [opt.fg_actual_kg, opt.produced_qty_kg]) {
+    const n = v == null ? NaN : Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+// What a box save says when it raised completed batches' FG (server fg_raised).
+function raisedNote(data: unknown): string {
+  const raised = (data as { fg_raised?: { message?: string }[] } | null)?.fg_raised ?? [];
+  const lines = raised.map((r) => r.message).filter(Boolean);
+  return lines.length ? ` ${lines.join(" ")}` : "";
 }
 // Matches the backend WEIGHT_TOLERANCE_KG (scale-rounding slack).
 const WEIGHT_TOLERANCE_KG = 0.5;
@@ -218,10 +236,11 @@ function BatchGroupCard({
   const minNum = nums.length ? Math.min(...nums) : 0;
   const maxNum = nums.length ? Math.max(...nums) : 0;
 
-  // Accounting weight cap for this batch, current Σ box net (with pending edits),
-  // and the Σ that a pending "Add Boxes" draft would push it to.
+  // An open batch's cap, a completed batch's FG, current Σ box net (with pending
+  // edits), and the Σ that a pending "Add Boxes" draft would push it to.
   const capOpt = group.batchId != null ? batches.find((x) => x.batch_id === group.batchId) : undefined;
   const capKg = batchCapKg(capOpt);
+  const fgKg = batchFgKg(capOpt);
   const sumNet = gboxes.reduce((s, b) => s + (Number(edits[b.box_id]?.net ?? b.net_weight) || 0), 0);
   const addNet = (addRows ?? []).reduce((s, r) => s + (Number(r.net) || 0), 0);
   const overCap = capKg != null && sumNet > capKg + WEIGHT_TOLERANCE_KG;
@@ -280,7 +299,7 @@ function BatchGroupCard({
       .filter((b) => Number.isFinite(b.net_weight) && b.net_weight > 0);
     if (payload.length === 0) { setMsg({ kind: "err", text: "No edited boxes with a valid net weight to update." }); return; }
     if (payload.some((p) => p.batch_id == null)) { setMsg({ kind: "err", text: "Every box must be linked to a batch — pick a batch for the box(es) you cleared." }); return; }
-    if (overCap) { setMsg({ kind: "err", text: `This batch's box net (${sumNet.toFixed(3)} kg) exceeds its accounting ${capKg} kg. Reduce weights first.` }); return; }
+    if (overCap) { setMsg({ kind: "err", text: `This batch's box net (${sumNet.toFixed(3)} kg) exceeds the ${capKg} kg it was opened with. Reduce weights first.` }); return; }
     setBusy("update");
     setMsg(null);
     try {
@@ -292,7 +311,7 @@ function BatchGroupCard({
       const nUp = data.updated?.length ?? 0;
       const nSk = data.skipped?.length ?? 0;
       setEdits({});
-      setMsg({ kind: "ok", text: `Updated ${nUp} box(es)${nSk ? ` · ${nSk} skipped (locked)` : ""}.` });
+      setMsg({ kind: "ok", text: `Updated ${nUp} box(es)${nSk ? ` · ${nSk} skipped (locked)` : ""}.${raisedNote(data)}` });
       onReload();
     } catch (e) {
       setMsg({ kind: "err", text: friendlyApiError(e) });
@@ -367,7 +386,7 @@ function BatchGroupCard({
       }))
       .filter((r) => Number.isFinite(r.net_weight) && r.net_weight > 0);
     if (rows.length === 0) { setMsg({ kind: "err", text: "Enter at least one box with net weight > 0." }); return; }
-    if (addOverCap) { setMsg({ kind: "err", text: `Adding these boxes pushes this batch to ${(sumNet + addNet).toFixed(3)} kg, over its accounting ${capKg} kg.` }); return; }
+    if (addOverCap) { setMsg({ kind: "err", text: `Adding these boxes pushes this batch to ${(sumNet + addNet).toFixed(3)} kg, over the ${capKg} kg it was opened with.` }); return; }
     setBusy("add");
     setMsg(null);
     try {
@@ -377,7 +396,7 @@ function BatchGroupCard({
       if (!res.ok) { setMsg({ kind: "err", text: await readApiErrorMessage(res, "Could not add boxes") }); return; }
       const data = (await res.json()) as { box_ids?: string[] };
       setAddRows(null); setAddCount(""); setAddOpen(false);
-      setMsg({ kind: "ok", text: `Added ${data.box_ids?.length ?? rows.length} box(es).` });
+      setMsg({ kind: "ok", text: `Added ${data.box_ids?.length ?? rows.length} box(es).${raisedNote(data)}` });
       onReload();
     } catch (e) {
       setMsg({ kind: "err", text: friendlyApiError(e) });
@@ -468,6 +487,10 @@ function BatchGroupCard({
           {capKg != null ? (
             <span className={`text-[11px] font-normal ${overCap ? "text-[#b1361e] font-semibold" : "text-[var(--text-muted)]"}`}>
               · Σ net {sumNet.toFixed(3)} / {capKg.toFixed(3)} kg
+            </span>
+          ) : fgKg != null ? (
+            <span className="text-[11px] font-normal text-[var(--text-muted)]" title="FG follows the boxes: more boxes raise it (out of the batch's process loss); lighter ones leave it as it is.">
+              · Σ net {sumNet.toFixed(3)} kg · FG {fgKg.toFixed(3)} kg
             </span>
           ) : null}
         </button>

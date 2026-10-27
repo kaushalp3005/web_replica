@@ -150,3 +150,25 @@ export function rmArticleOptions(
   }
   return names;
 }
+
+/** A refused scan, sorted for the scanner: only a box already recorded is a
+ *  "duplicate". Every 409 used to be shown as one — including a code that
+ *  matches boxes in several tables, which is not a duplicate at all. */
+export type ScanRefusal = { kind: "duplicate" | "ambiguous" | "other"; message: string };
+
+export function readScanRefusal(status: number, body: unknown, fallback: string): ScanRefusal {
+  const detail = body && typeof body === "object" ? (body as { detail?: unknown }).detail : undefined;
+  if (detail && typeof detail === "object") {
+    const d = detail as { error?: unknown; message?: unknown };
+    const message = typeof d.message === "string" && d.message ? d.message : fallback;
+    if (d.error === "duplicate_box") return { kind: "duplicate", message };
+    if (d.error === "ambiguous_box") return { kind: "ambiguous", message };
+    return { kind: "other", message };
+  }
+  if (typeof detail === "string" && detail) {
+    // An older server sends text; its duplicate refusal starts like this.
+    const dup = status === 409 && /^Duplicate box scanned/i.test(detail);
+    return { kind: dup ? "duplicate" : status === 409 ? "ambiguous" : "other", message: detail };
+  }
+  return { kind: "other", message: fallback };
+}

@@ -46,7 +46,7 @@ import { BarcodeFormat, DecodeHintType } from "@zxing/library";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
 import { rollupByArticle, type ArticleIssue } from "@/lib/scanRollup";
 import { friendlyApiError } from "@/lib/apiErrors";
-import { printedLabel, storedMessage, storesRefLabel, type PrintedRef, type StoresRef } from "@/lib/box-scan";
+import { printedLabel, readScanRefusal, storedMessage, storesRefLabel, type PrintedRef, type StoresRef } from "@/lib/box-scan";
 import { PrinterIcon } from "@/app/modules/purchase/material-in/[transaction_no]/_SectionEditor";
 import { printJobCardStickers, RmManualPrint } from "./_RmManualPrint";
 
@@ -150,7 +150,9 @@ export function RawMaterialTab({
   const [count, setCount] = useState("");
   const [toast, setToast] = useState<Toast>(null);
   const [busy, setBusy] = useState<string | null>(null); // box id mid-delete
-  const [dupWarn, setDupWarn] = useState<string | null>(null); // last redundant box id → red banner below the QR
+  // The last "already recorded" refusal, worded by the server with the card the
+  // box is on → the chip over the camera and the banner under the scanner.
+  const [dupWarn, setDupWarn] = useState<string | null>(null);
   // Guards a double-tap double-submit while a store round-trip is in flight.
   const inFlightRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
@@ -221,14 +223,18 @@ export function RawMaterialTab({
           body: JSON.stringify(body),
         });
         if (!res.ok) {
-          if (res.status === 409) {
-            setDupWarn(code); // redundant box — persistent red banner below the QR
-          } else if (manualPrint && (await isArticleRequired(res))) {
+          if (manualPrint && (await isArticleRequired(res))) {
             // No article field here to fill in — the box needs a sticker instead.
             flashToast({ kind: "err", text: `Box ${code} isn't in any box table. Print it a sticker with Manual print below.` });
-          } else {
-            flashToast({ kind: "err", text: await readApiErrorMessage(res, `Couldn't store ${code}`) });
+            return;
           }
+          // Only a box already recorded is a duplicate (and the message says
+          // which card has it). Every 409 used to read "Duplicate box scanned",
+          // a code matching several box tables included.
+          const refusal = readScanRefusal(
+            res.status, await res.json().catch(() => null), `Couldn't store ${code}`);
+          if (refusal.kind === "duplicate") setDupWarn(refusal.message);
+          else flashToast({ kind: "err", text: refusal.message });
           return;
         }
         // The stored row says whether Stores sent this box. The box is stored
@@ -245,6 +251,8 @@ export function RawMaterialTab({
   }, [jcId, article, netW, grossW, count, manualPrint, flashToast, refresh]);
 
   const deleteBox = useCallback(async (code: string) => {
+    // A 28 px ✕ next to the reprint button removed the box on the first tap.
+    if (!window.confirm(`Remove box ${code} from this job card?\n\nThe box itself isn't deleted — scanning its sticker records it again.`)) return;
     setBusy(code);
     try {
       const res = await apiFetch(
@@ -286,6 +294,25 @@ export function RawMaterialTab({
     // Covers the Boxes tab too (BoxScanPanel is this component).
     <div className="space-y-4" data-unsaved-ignore>
       <QrScanner onResult={handleScan} warning={dupWarn} title={scanTitle} />
+
+      {/* The refusal under the scanner too: the chip over the camera shows
+          only while it runs, so a code typed by hand got no answer at all. */}
+      {dupWarn ? (
+        <div
+          role="alert"
+          className="px-3 py-2 text-[13px] rounded-[2px] border bg-[#fdecea] border-[#f5c6c2] text-[var(--text-danger)] flex items-start justify-between gap-3"
+        >
+          <span className="break-words">⚠ {dupWarn}</span>
+          <button
+            type="button"
+            onClick={() => setDupWarn(null)}
+            aria-label="Dismiss"
+            className="shrink-0 text-[15px] leading-none text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+          >
+            ✕
+          </button>
+        </div>
+      ) : null}
 
       {/* Manual print takes this panel's place on the Raw Material tab. Elsewhere:
           detail applied to the NEXT scan, auto-filled for a known box; for a new
@@ -924,10 +951,11 @@ export function QrScanner({ onResult, warning, title = "Scan Raw Material QR" }:
           </div>
         ) : null}
 
-        {/* Duplicate-box warning — a chip above the ROI box (mirrors the tap chip). */}
+        {/* Already-recorded warning — a chip above the ROI box (mirrors the tap
+            chip). `warning` is the server's own sentence, naming the card. */}
         {live && warning ? (
           <span className="pointer-events-none absolute top-3 left-1/2 z-20 -translate-x-1/2 max-w-[92%] rounded-full bg-[#c0392b] px-3 py-1 text-center text-[12px] font-semibold text-white shadow">
-            ⚠ Duplicate box scanned — {warning}
+            ⚠ {warning}
           </span>
         ) : null}
 

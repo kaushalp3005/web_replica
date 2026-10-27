@@ -22,9 +22,15 @@
 //   - Text wraps on narrow screens; CTA stacks below message
 //   - No fixed widths or overflow — the banner reflows cleanly at 360px
 
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import { userStore } from "@/lib/auth";
 import { lockBannerId, userMayForceUnlock } from "./_useLockState";
+
+/** What a locked card is waiting on, worded by the job card page (which has the
+ *  chain) for every banner inside its tabs (which don't) — e.g. "Waiting on job
+ *  card PLAN-7-L1-S1 (Sorting, in progress) to send its material…". Null when
+ *  the page can't tell; the banner keeps its general wording then. */
+export const WaitingOnContext = createContext<string | null>(null);
 
 export interface LockBannerProps {
   isLocked: boolean;
@@ -60,6 +66,7 @@ export function LockBanner({
   // (e.g. an admin grants the operator inventory_manager while the JC is
   // open) flips the CTA visibility without a page reload.
   const [canUnlock, setCanUnlock] = useState(false);
+  const waitingOn = useContext(WaitingOnContext);
   useEffect(() => {
     queueMicrotask(() => setCanUnlock(userMayForceUnlock(userStore.load())));
     const unsubscribe = userStore.subscribe((next) => {
@@ -71,9 +78,12 @@ export function LockBanner({
   if (!isLocked) return null;
 
   const reason = (lockedReason ?? "").trim();
-  const reasonText = reason
-    ? humaniseReason(reason)
-    : "This job card is locked. Operational entries are disabled until it's unlocked.";
+  // Waiting on the previous stage names that stage when the page knows it.
+  const reasonText = reason === "awaiting_previous_stage" && waitingOn
+    ? waitingOn
+    : reason
+      ? humaniseReason(reason)
+      : "This job card is locked. Operational entries are disabled until it's unlocked.";
   const id = jcId != null ? lockBannerId(jcId) : undefined;
 
   // Hide the CTA when we don't have a handler — clicking a button that
