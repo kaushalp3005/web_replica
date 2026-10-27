@@ -34,11 +34,13 @@ import { cleanReason, completeAnywayPrompt, MIN_REASON_LEN, readOverrideOffer } 
 import { REFRESH_RETRY_MS, refreshFailureView } from "@/lib/job-card-refresh";
 import { unsavedPrompt } from "@/lib/job-card-unsaved";
 import { distributeSummary, sentOnNote } from "@/lib/job-card-handoff";
+import { lifecycleHint, refusalCode, savedButOpenNote, upstreamCard, waitingText } from "@/lib/job-card-guidance";
+import { boxedFg, calculatedConsumption, followsCalculation, qtyText, type BatchBoxes } from "@/lib/job-card-calculated";
 import { classifyProcess, classifySteps, isPmBearingStage, STAGE_CREATE_WIP } from "@/lib/processCatalog";
 import { friendlyApiError } from "@/lib/apiErrors";
 import { hasBomChanges, type BomChanges } from "@/lib/job-card-bom-rules";
 import { BackLink } from "@/components/BackLink";
-import { LockBanner } from "../_LockBanner";
+import { LockBanner, WaitingOnContext } from "../_LockBanner";
 import { lockBannerId, useLockState, userMayForceUnlock } from "../_useLockState";
 // C10 / C11 (Wave 4) — canonical role-gated action button + amendments tab.
 import { ActionButton, LockableButton } from "../_ActionButton";
@@ -337,10 +339,12 @@ const TABS: { key: TabKey; label: string; short?: string }[] = [
   { key: "allocation", label: "Material allocation and requisition", short: "Allocation" },
   { key: "rawmaterial", label: "Raw Material" },
   { key: "accounting", label: "Accounting" },
+  // Closing needs the Production Head's sign-off, so it sits right after
+  // Accounting — as the 8th tab it was off-screen on a phone (2026-10-26).
+  { key: "signoffs",   label: "Sign-offs" },
   // Printing follows accounting in the flow, so it sits beside it.
   { key: "sfgboxes",   label: "Boxes printing", short: "Boxes" },
   { key: "quality",    label: "Quality" },
-  { key: "signoffs",   label: "Sign-offs" },
   { key: "remarks",    label: "Remarks" },
   // Amendments tab hidden per operator request. The 'amendments' route
   // case is kept below so a stale ?tab=amendments URL doesn't 404, and
@@ -1003,8 +1007,23 @@ function JobCardDetailPageBody() {
     };
   }, [refreshError]);
 
+  // The stage this card waits on (from the chain) and the strip above the tabs
+  // before START (lib/job-card-guidance).
+  const upstream = detail ? upstreamCard(chain, detail) : null;
+  const hint = detail
+    ? lifecycleHint({
+      status: detail.status,
+      locked: !!detail.is_locked && !detail.force_unlocked,
+      lockedReason: detail.locked_reason,
+      upstream,
+    })
+    : null;
+
   return (
-    <div className="min-h-screen flex flex-col bg-[var(--background)]">
+    // Below md every input, select and textarea is 16 px: iPhones zoom the page
+    // in when a field under 16 px is tapped (the form's 13 px fields did), and
+    // the operator then has to pinch back out after every entry.
+    <div className="min-h-screen flex flex-col bg-[var(--background)] max-md:[&_input]:text-[16px] max-md:[&_select]:text-[16px] max-md:[&_textarea]:text-[16px]">
       {/* Gutter tracks <main> below (px-4 sm:px-6) so the brand lockup and the
           avatar line up with the card edges on a phone. */}
       <header className="bg-[var(--aws-navy)] h-[45px] flex items-center px-4 sm:px-6 gap-4">
@@ -1078,35 +1097,49 @@ function JobCardDetailPageBody() {
               onJump={jumpToCard}
               onReload={reload}
             />
-            <ActionBar detail={detail} onReload={reload} reloading={loading} />
+            <ActionBar detail={detail} onReload={reload} reloading={loading} onOpenTab={changeTab} />
             {/* R10 — lifecycle hint: production hasn't started yet. The
                 Overview tab stays editable so Assign Team + Start work;
-                everything else is read-only until status flips to in_progress. */}
-            {isLifecycleLocked(detail.status) ? (
+                everything else is read-only until status flips to in_progress.
+                A locked card names the stage it waits on: it used to say
+                "assign a team and START", both hidden while it is locked. */}
+            {hint ? (
               <div
                 role="status"
                 className="mb-3 px-3 py-2 rounded border text-[12px] bg-[#fbeced] border-[#e6bcbe] text-[#9a393e]"
               >
-                <strong>Job card not started.</strong> Assign a team on the{" "}
-                <em>Overview</em> tab and click <strong>START</strong> to enable
-                Output, Accounting, Quality, and Remarks.
+                <strong>{hint.title}</strong> {hint.body}
+                {upstream && hint.title.startsWith("Waiting") ? (
+                  <>
+                    {" "}
+                    <button
+                      type="button"
+                      onClick={() => jumpToCard(upstream.jobCardId)}
+                      className="underline font-semibold hover:text-[#7a2a2e]"
+                    >
+                      Open {upstream.number?.trim() || "that card"}
+                    </button>
+                  </>
+                ) : null}
               </div>
             ) : null}
             {/* R13 — the batch-closure controls + table now live inside the
                 Accounting Summary card (Output & Accounting tab), not here. */}
             <TabStrip value={tab} onChange={changeTab} />
-            <div onInput={markUnsaved}>
-              <TabPanel
-                detail={detail}
-                chain={chain}
-                tab={tab}
-                onReload={reloadAfterTabSave}
-                onJumpJc={jumpToCard}
-                onJumpToBoxes={jumpToBoxes}
-                focusBatchId={focusBatchId}
-                onFocusConsumed={clearFocusBatch}
-              />
-            </div>
+            <WaitingOnContext.Provider value={upstream ? waitingText(upstream) : null}>
+              <div onInput={markUnsaved}>
+                <TabPanel
+                  detail={detail}
+                  chain={chain}
+                  tab={tab}
+                  onReload={reloadAfterTabSave}
+                  onJumpJc={jumpToCard}
+                  onJumpToBoxes={jumpToBoxes}
+                  focusBatchId={focusBatchId}
+                  onFocusConsumed={clearFocusBatch}
+                />
+              </div>
+            </WaitingOnContext.Provider>
           </>
         ) : null}
       </main>
@@ -1302,7 +1335,11 @@ function useJcEditLog(jcId: number, dep?: unknown): Set<string> {
 // Each action runs a window.confirm step before firing — matches the Android
 // AlertDialog. Dispatch additionally collects the qty via window.prompt so
 // the operator can choose how much to push to the next stage.
-function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDetail; onReload: () => void; reloading?: boolean }) {
+function ActionBar({ detail, onReload, reloading = false, onOpenTab }: {
+  detail: JobCardDetail; onReload: () => void; reloading?: boolean;
+  /** Opens a tab — CLOSE JC refused for a missing sign-off opens Sign-offs. */
+  onOpenTab?: (tab: TabKey) => void;
+}) {
   const [busy, setBusy] = useState(false);
   const status = detail.status ?? "";
   const isLocked = !!detail.is_locked && !detail.force_unlocked;
@@ -1323,15 +1360,19 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
     /** Build the success message from the server's reply instead (e.g. what a
      *  close sent on to the next stage). */
     okMessageFrom?: (reply: unknown) => string;
+    /** Runs after a refusal's message has been shown, with its code. */
+    onRefused?: (code: string | null) => void;
   }) {
     if (!window.confirm(`${opts.confirmTitle}\n\n${opts.confirmMessage}`)) return;
     setBusy(true);
+    let refused: string | null | undefined;
     try {
       const res = await apiFetch(opts.path, {
         method: opts.method,
         body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
       });
       if (!res.ok) {
+        refused = refusalCode(await res.clone().json().catch(() => null));
         // The backend returns lifecycle rejections as a structured envelope
         // ({"detail": {"error": ..., "message": ...}} on 409s). Parse it so the
         // operator sees the human message (e.g. "Can only complete in_progress
@@ -1354,6 +1395,7 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
     } finally {
       setBusy(false);
     }
+    if (refused !== undefined) opts.onRefused?.(refused);
   }
 
   // COMPLETE — like callAction, except that when the job card doesn't balance
@@ -1512,6 +1554,8 @@ function ActionBar({ detail, onReload, reloading = false }: { detail: JobCardDet
         path: `/api/v1/production/job-cards-v2/${detail.job_card_id}/close`,
         okMessage: "Job card closed.",
         okMessageFrom: (reply) => "Job card closed." + sentOnNote(reply),
+        // The refusal now says who must sign; take the operator to where they do.
+        onRefused: (code) => { if (code === "missing_sign_offs") onOpenTab?.("signoffs"); },
       });
     }
   }
@@ -2620,14 +2664,11 @@ function SfgBoxesTab({ detail, onReload, focusBatchId, onFocusConsumed }: { deta
     "border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white " +
     "disabled:opacity-50 disabled:cursor-not-allowed";
 
-  // Seven columns never fold into a 360 px phone, so this summary keeps its
-  // sideways scroll and pins the Batch column instead — three columns into
-  // the scroll every figure still has to say whose batch it is. `md:static`
-  // drops the pin from md up, where the table fits, so the desktop render is
-  // exactly what it was. The separator is a box-shadow because borders on a
-  // border-collapse table belong to the table and scroll away with it, and
-  // the background is supplied per cell (a sticky cell must be opaque, and
-  // the selected row is tinted).
+  // The batch summary's pinned Batch column, from when a phone scrolled this
+  // table sideways; a phone gets cards now (below), and `md:static` keeps the
+  // pin off where the table shows. The separator is a box-shadow because
+  // borders on a border-collapse table belong to the table, and the
+  // background is supplied per cell (the selected row is tinted).
   const pinCell = "sticky md:static left-0 z-10 shadow-[1px_0_0_0_var(--aws-border)] md:shadow-none";
   // A fixed track below md so the pinned pane cannot change width mid-scroll;
   // from md up the column sizes itself exactly as before.
@@ -2715,19 +2756,48 @@ function SfgBoxesTab({ detail, onReload, focusBatchId, onFocusConsumed }: { deta
             </select>
           </div>
 
-          {/* The hint is a sibling of the scroller, not a child: inside it,
-              it would scroll off the left edge along with the first column.
-              min-w-[620px] stops the browser crushing every column to its
-              min-content (headers broke mid-word and "3.000 kg" wrapped in
-              two) only to scroll anyway. Both it and the nowrap cells below
-              are scoped under md: from md up the table sizes itself exactly
-              as it does today, so a long name still wraps rather than
-              turning the card into a scroller. */}
-          <p className="md:hidden text-[10px] text-[var(--text-muted)]">
-            Scroll sideways for the other columns — the batch stays in place.
-          </p>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[620px] md:min-w-0 text-[13px]">
+          {/* Below md the batches are cards (just below); the table is md and
+              up, where it sizes itself and a long name wraps. Its pinned Batch
+              column and max-md nowrap cells are leftovers of the phone
+              scroller and do nothing there. */}
+          {/* Phone: one card per batch — the table below needed 620 px and
+              scrolled sideways (2026-10-26). Same figures, same order. */}
+          <ul role="list" className="md:hidden space-y-2" aria-label="Batches and their live accounting">
+            {perBatchSummaries.map(({ batch: b, summary: s }) => {
+              const input = _num(b.input_qty_kg) || s.rmConsumedKg;
+              const units = b.fg_actual_units == null ? null : Number(b.fg_actual_units);
+              const sel = b.batch_id === selectedBatchId;
+              const fig = (label: string, v: string) => (
+                <div className="min-w-0">
+                  <dt className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">{label}</dt>
+                  <dd className="font-mono tabular-nums text-[12px] text-[var(--text-primary)]">{v}</dd>
+                </div>
+              );
+              return (
+                <li key={b.batch_id} role="listitem" className={`rounded border px-3 py-2 ${sel ? "border-[#f0c48a] bg-[#fff4e6]" : "border-[var(--aws-border)]"}`}>
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="text-[13px] font-semibold text-[var(--text-primary)] break-words">
+                      {b.batch_label?.trim() || `Batch ${b.batch_number}`}
+                    </span>
+                    {s.isBalanced == null ? null : s.isBalanced ? (
+                      <span className="shrink-0 rounded-full bg-[#eaf6ed] px-2 py-0.5 text-[11px] font-semibold text-[var(--text-success)]">Balanced</span>
+                    ) : (
+                      <span className="shrink-0 rounded-full bg-[#fdecea] px-2 py-0.5 text-[11px] font-semibold text-[var(--text-danger)]">Off-balance</span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-[var(--text-muted)] break-words">{fgName}</div>
+                  <dl className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1">
+                    {fig("Input", input > 0 ? `${input.toFixed(3)} kg` : "—")}
+                    {fig("Output", `${s.fgOutKg > 0 ? `${s.fgOutKg.toFixed(3)} kg` : "—"}${units != null && Number.isFinite(units) && units > 0 ? ` · ${units}u` : ""}`)}
+                    {fig("Loss", s.lossKg > 0 ? `${s.lossKg.toFixed(3)} kg` : "—")}
+                    {fig("Balance", s.balanceDiff != null ? `${s.balanceDiff > 0 ? "+" : ""}${s.balanceDiff.toFixed(3)} kg` : "—")}
+                  </dl>
+                </li>
+              );
+            })}
+          </ul>
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full text-[13px]">
               <thead>
                 <tr className="text-left text-[11px] uppercase tracking-wide text-[var(--text-muted)] border-b border-[var(--aws-border)]">
                   <th scope="col" className={`py-1.5 pr-3 font-semibold ${pinCell} ${pinTrack} bg-white`}>Batch</th>
@@ -3625,13 +3695,42 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     return () => ctrl.abort();
   }, [refetchScans]);
 
-  // The page reload plus the scanned figures, which come from their own
-  // endpoint: a plain onReload() refreshes the JC detail and leaves every
-  // variance chip comparing against the totals from before the save.
+  // ── The batch's boxes, for FG kg ───────────────────────────────────────────
+  // FG kg comes from the boxes once a batch has any (lib/job-card-calculated):
+  // every box was weighed on Boxes printing, and typing their total again here
+  // was the same number twice. Producer stages only — nothing else boxes. Same
+  // rollup Boxes printing reads (cancelled boxes left out by the server).
+  const [boxRollup, setBoxRollup] = useState<BatchBoxes[]>([]);
+  const refetchBoxes = useCallback(async (signal?: AbortSignal) => {
+    if (!isProducerStage) return;
+    try {
+      const res = await apiFetch(
+        `/api/v1/production/job-cards-v2/${detail.job_card_id}/wip-boxes`,
+        { signal },
+      );
+      if (signal?.aborted || !res.ok) return;
+      const j = (await res.json()) as { boxes?: SfgBoxRow[]; by_batch?: BoxingBatch[] };
+      if (signal?.aborted) return;
+      setBoxRollup(Array.isArray(j.by_batch) ? j.by_batch : rollupBoxesByBatch(j.boxes ?? []));
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
+      // Non-fatal: without the boxes FG kg is simply typed, as before.
+    }
+  }, [detail.job_card_id, isProducerStage]);
+  useEffect(() => {
+    const ctrl = new AbortController();
+    queueMicrotask(() => { void refetchBoxes(ctrl.signal); });
+    return () => ctrl.abort();
+  }, [refetchBoxes]);
+
+  // The page reload plus the scanned figures and the boxes, which come from
+  // their own endpoints: a plain onReload() refreshes the JC detail and leaves
+  // every variance chip comparing against the totals from before the save.
   const reloadAll = useCallback(() => {
     void refetchScans();
+    void refetchBoxes();
     onReload();
-  }, [refetchScans, onReload]);
+  }, [refetchScans, refetchBoxes, onReload]);
 
   // batch_ids that actually carry recorded data (output / consumption /
   // byproduct / balance rows). Used to bias the initial batch auto-select
@@ -4052,8 +4151,30 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   const lossFromServer    = batchScopedDefaults.loss;
   const remarkFromServer  = batchScopedDefaults.remark;
 
-  const [fgActualUnits, setFgActualUnits] = useState(fgUnitsFromServer);
-  const [fgActualKg,    setFgActualKg]    = useState(fgKgFromServer);
+  // Calculated figures (lib/job-card-calculated) apply only where the form can
+  // be saved: an open batch, unlocked, started, by someone who may edit. A
+  // closed batch shows what it saved, admin override included.
+  const calcApplies = batchIsOpen && !lock.isLocked && !isLifecycleLocked(detail.status) && canEditAccounting;
+  // FG from the batch's boxes, when it has any; null means FG kg is typed.
+  const boxFg = useMemo(
+    () => (calcApplies ? boxedFg(boxRollup, selectedBatchId) : null),
+    [calcApplies, boxRollup, selectedBatchId],
+  );
+
+  const [fgActualUnitsTyped, setFgActualUnits] = useState(fgUnitsFromServer);
+  const [fgActualKgTyped,    setFgActualKg]    = useState(fgKgFromServer);
+  // What the form holds: the box total once there are boxes — not typed a
+  // second time — and the units from it when the SKU has a unit weight (the
+  // same kg → units rule onChangeFgActualKg applies to a typed figure).
+  const boxUnitWt = Number(detail.section_1_product?.net_wt_per_unit_kg ?? 0);
+  const fgActualKg = useMemo(
+    () => (boxFg ? qtyText(boxFg.kg) : fgActualKgTyped),
+    [boxFg, fgActualKgTyped],
+  );
+  const fgActualUnits = useMemo(
+    () => (boxFg && boxUnitWt > 0 ? String(Math.round(boxFg.kg / boxUnitWt)) : fgActualUnitsTyped),
+    [boxFg, boxUnitWt, fgActualUnitsTyped],
+  );
   const [processLoss,   setProcessLoss]   = useState(lossFromServer);
   const [processLossRemark, setProcessLossRemark] = useState(remarkFromServer);
 
@@ -4317,7 +4438,75 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     [detail.byproducts, detail.balance_materials, selectedBatchId],
   );
 
-  const [consumption, setConsumption] = useState<Record<string, string>>(consumptionFromServer);
+  const [consumptionTyped, setConsumption] = useState<Record<string, string>>(consumptionFromServer);
+
+  // ── Qty consumed, calculated from the scans (lib/job-card-calculated) ────
+  // A scanned RM line shows the scanned quantity — less what this card's other
+  // live batches already recorded for it — instead of an input to retype it.
+  // Edit turns it back into an input; "Use scanned" undoes that. A figure saved
+  // earlier that differs is the operator's own and stays an input. The choice
+  // is kept per batch ("<batch>|<line>"), so another batch starts afresh.
+  const [consMode, setConsMode] = useState<Record<string, "calc" | "typed">>({});
+  const modeKey = (key: string) => `${selectedBatchId}|${key}`;
+  const calcConsByKey = useMemo<Record<string, number>>(() => {
+    const out: Record<string, number> = {};
+    if (!calcApplies) return out;
+    // Another live batch of this card: its consumption came out of the same
+    // scanned boxes. Null-batch (legacy) rows show under the selected batch.
+    const liveOtherBatch = (bid: unknown) => {
+      if (bid == null || Number(bid) === selectedBatchId) return false;
+      const b = batches.find((x) => x.batch_id === Number(bid));
+      return !b || b.status !== "cancelled";
+    };
+    for (const a of visibleRmArticles) {
+      const issue = scanMatch.matched.get(a.material_sku_name.trim());
+      if (!issue) continue;
+      let other = 0;
+      for (const l of detail.consumption_lines ?? []) {
+        if (!liveOtherBatch((l as Record<string, unknown>).batch_id)) continue;
+        const same = a.bom_line_id != null && l.bom_line_id != null
+          ? Number(l.bom_line_id) === a.bom_line_id
+          : (l.material_sku_name ?? "").trim() === a.material_sku_name.trim();
+        if (same) other += num(String(l.actual_consumed_qty ?? 0));
+      }
+      const v = calculatedConsumption({
+        scannedKg: issue.net_weight,
+        uom: a.uom,
+        isPm: (a.item_type || "").toUpperCase() === "PM",
+        otherBatchesKg: other,
+      });
+      if (v != null) out[a.bom_line_id != null ? `b${a.bom_line_id}` : `n${a.material_sku_name}`] = v;
+    }
+    return out;
+  }, [calcApplies, visibleRmArticles, scanMatch, detail.consumption_lines, selectedBatchId, batches]);
+  const autoConsKeys = useMemo(() => {
+    const out = new Set<string>();
+    for (const [k, v] of Object.entries(calcConsByKey)) {
+      const mode = consMode[`${selectedBatchId}|${k}`];
+      if (mode === "calc" || (mode !== "typed" && followsCalculation(consumptionFromServer[k], v, false))) {
+        out.add(k);
+      }
+    }
+    return out;
+  }, [calcConsByKey, consMode, consumptionFromServer, selectedBatchId]);
+  // What the form holds — every reader below (summary, variance, save) sees
+  // the calculated figures exactly as if they had been typed.
+  const consumption = useMemo(() => {
+    if (autoConsKeys.size === 0) return consumptionTyped;
+    const out = { ...consumptionTyped };
+    for (const k of autoConsKeys) out[k] = qtyText(calcConsByKey[k]);
+    return out;
+  }, [consumptionTyped, autoConsKeys, calcConsByKey]);
+  const editCalculatedLine = (key: string) => {
+    // The input starts at the calculated figure, ready to adjust.
+    setConsumption((c) => ({ ...c, [key]: qtyText(calcConsByKey[key]) }));
+    setConsMode((m) => ({ ...m, [modeKey(key)]: "typed" }));
+  };
+  const restoreCalculatedLine = (key: string) => {
+    markSectionDirty("consumption");
+    setConsMode((m) => ({ ...m, [modeKey(key)]: "calc" }));
+  };
+
   const [balance, setBalance] = useState<Record<string, string>>(balanceFromServer);
   // Operator-stated: keep an empty Off-Grade row visible by default so
   // the operator doesn't have to click "+ Add another" to start entering
@@ -4399,7 +4588,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   ]);
 
   const [submitting, setSubmitting] = useState(false);
-  const [feedback, setFeedback] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
+  const [feedback, setFeedback] = useState<{ kind: "ok" | "err" | "warn"; msg: string } | null>(null);
   // C3-H3 — server-canonical R9 row, populated after a successful save by
   // re-fetching GET /accounting. Preferred over detail.accounting (which
   // comes from the broader JC detail payload) when present because it
@@ -4953,6 +5142,16 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       return;
     }
 
+    // A calculated figure (Qty consumed from the scans, FG kg from the boxes)
+    // was never typed, so nothing marked its section changed: save it like a
+    // typed one when it differs from what the server has.
+    const differs = (a: string | undefined, b: string | undefined) =>
+      Math.abs(num(a ?? "") - num(b ?? "")) > 0.0005 || ((a ?? "").trim() === "") !== ((b ?? "").trim() === "");
+    if ([...autoConsKeys].some((k) => differs(consumption[k], seededConsumptionRef.current[k]))) {
+      markSectionDirty("consumption");
+    }
+    if (boxFg && differs(fgActualKg, fgKgFromServer)) markSectionDirty("output_qty");
+
     // null vs 0 distinction:
     //   - blank input → null (operator hasn't recorded yet)
     //   - typed "0"   → 0 (legitimate zero-output batch)
@@ -5221,7 +5420,10 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
         const msg = (data && ((data as { message?: string }).message || (data as { error?: string }).error)) || `HTTP ${res.status}`;
         throw new Error(String(msg));
       }
-      setFeedback({ kind: "ok", msg: "Output saved." });
+      // The server saves a boxed batch's FG from its boxes (fg_from_boxes) and
+      // says so when that wasn't the figure sent — e.g. a box added meanwhile.
+      const boxesNote = (data?.fg_from_boxes as { message?: string } | undefined)?.message;
+      setFeedback(boxesNote ? { kind: "warn", msg: `Output saved. ${boxesNote}` } : { kind: "ok", msg: "Output saved." });
       // ── Persist the accounting summary row ────────────────────────
       // Without this, job_card_accounting_v2 stays NULL on every JC
       // and the /complete endpoint's R9 balance check returns
@@ -5426,6 +5628,19 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                 msg: `Output saved, but completing the batch threw: ${friendlyApiError(err)}`,
               });
             }
+          } else {
+            // Completion wasn't tried, so the batch stays open — say so and
+            // why. It used to read just "Output saved." (Kept after a zero-
+            // input warning rather than replacing it.)
+            const note = savedButOpenNote({
+              batchOpen: batchIsOpen, completionAttempted: false,
+              canComplete: canCompleteBatch, fgKg: num(fgActualKg),
+            });
+            if (note) {
+              setFeedback((f) => (f && f.kind === "err"
+                ? { kind: "err", msg: `${f.msg} ${note}` }
+                : { kind: "warn", msg: note }));
+            }
           }
         } else {
           // Surface the failure instead of swallowing — without this,
@@ -5556,19 +5771,61 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     scansDenied,
     multiBatch: liveBatchCount > 1,
   }));
-  const consQtyInput = (r: ConsumptionRow, widthCls: string) => (
-    <input
-      type="number" step="any" placeholder={`Qty (${r.article.uom})`}
-      className={`${inputCls} ${widthCls}${consRed(r.article.material_sku_name) ? " bg-[#fbeced]" : ""}`}
-      value={consumption[r.key] ?? ""}
-      onChange={(e) => { markSectionDirty("consumption"); setConsumption((c) => ({ ...c, [r.key]: e.target.value })); }}
-      onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
-      disabled={inputsDisabled}
-      aria-disabled={inputsDisabled}
-      aria-label={`Quantity consumed, ${r.article.material_sku_name}`}
-      aria-describedby={describedBy}
-    />
-  );
+  const smallBtnCls =
+    "h-7 max-md:h-9 px-2 text-[11px] font-semibold rounded-[2px] border border-[var(--aws-border-strong)] "
+    + "bg-white hover:border-[#2c5fa8] hover:text-[#2c5fa8] disabled:opacity-50";
+  const consQtyInput = (r: ConsumptionRow, widthCls: string) => {
+    const calc = calcConsByKey[r.key];
+    // Calculated from the scans: shown, not typed again. Edit makes it an input.
+    if (calc != null && autoConsKeys.has(r.key)) {
+      return (
+        <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span
+            className="tabular-nums text-[13px] font-semibold text-[var(--text-primary)]"
+            aria-label={`Quantity consumed, ${r.article.material_sku_name}: ${qtyText(calc)} ${r.article.uom}, from the scans`}
+          >
+            {qtyText(calc)} <span className="font-normal text-[11px] text-[var(--text-muted)]">{r.article.uom}</span>
+          </span>
+          <span className="text-[10px] text-[var(--text-muted)]" title="Scanned on the Raw Material tab, less what this card's other batches recorded">
+            from scans
+          </span>
+          <button
+            type="button"
+            onClick={() => editCalculatedLine(r.key)}
+            disabled={inputsDisabled}
+            className={smallBtnCls}
+            aria-label={`Edit quantity consumed, ${r.article.material_sku_name}`}
+          >
+            Edit
+          </button>
+        </span>
+      );
+    }
+    return (
+      <span className="block">
+        <input
+          type="number" step="any" placeholder={`Qty (${r.article.uom})`}
+          className={`${inputCls} ${widthCls}${consRed(r.article.material_sku_name) ? " bg-[#fbeced]" : ""}`}
+          value={consumption[r.key] ?? ""}
+          onChange={(e) => { markSectionDirty("consumption"); setConsumption((c) => ({ ...c, [r.key]: e.target.value })); }}
+          onWheel={(e) => (e.currentTarget as HTMLInputElement).blur()}
+          disabled={inputsDisabled}
+          aria-disabled={inputsDisabled}
+          aria-label={`Quantity consumed, ${r.article.material_sku_name}`}
+          aria-describedby={describedBy}
+        />
+        {calc != null && !inputsDisabled ? (
+          <button
+            type="button"
+            onClick={() => restoreCalculatedLine(r.key)}
+            className="mt-1 block text-[11px] text-[var(--aws-link)] hover:underline"
+          >
+            Use scanned ({qtyText(calc)} {r.article.uom})
+          </button>
+        ) : null}
+      </span>
+    );
+  };
   // Batch list lines — derived ONCE here and rendered twice below (table at
   // md+, cards under it). batchRowActions holds the three controls so their
   // onClick / disabled / title live in one place and the two layouts cannot
@@ -5631,7 +5888,9 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     </>
   );
   const consVariance = (r: ConsumptionRow) => (
-    <VarianceChip
+    // A line calculated from the scans can't differ from them: no chip. (On a
+    // card with several batches the baseline is the BOM, which still can.)
+    autoConsKeys.has(r.key) && r.baseline.source === "scanned" ? null : <VarianceChip
       materialName={r.article.material_sku_name}
       baseline={r.baseline}
       actualQty={num(consumption[r.key] ?? "")}
@@ -5945,9 +6204,36 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
           <KV label="RM Issued (kg)"    value={fmtKg(rmIssuedKg)} />
         </dl>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-          <FormNumber label="FG Actual Units" value={fgActualUnits} onChange={onChangeUnits} disabled={inputsDisabled} highlight={acctRed("output_qty_units")} />
-          <FormNumber label="FG Actual Kg"    value={fgActualKg}    onChange={onChangeFgActualKg}    disabled={inputsDisabled} highlight={acctRed("output_qty")} />
+          {boxFg && boxUnitWt > 0 ? (
+            <CalculatedFigure label="FG Actual Units" value={fgActualUnits} note="from the boxes' weight" />
+          ) : (
+            <FormNumber label="FG Actual Units" value={fgActualUnits} onChange={onChangeUnits} disabled={inputsDisabled} highlight={acctRed("output_qty_units")} />
+          )}
+          {boxFg ? (
+            // The boxes on Boxes printing ARE the batch's output: their total is
+            // FG kg, not a second figure to type and keep within ±0.5 kg of them.
+            <CalculatedFigure
+              label="FG Actual Kg"
+              value={`${qtyText(boxFg.kg)} kg`}
+              note={`from ${boxFg.boxes} ${boxFg.boxes === 1 ? "box" : "boxes"} on Boxes printing — change a box's weight there`}
+            />
+          ) : (
+            <FormNumber label="FG Actual Kg"    value={fgActualKg}    onChange={onChangeFgActualKg}    disabled={inputsDisabled} highlight={acctRed("output_qty")} />
+          )}
         </div>
+        {isProducerStage && calcApplies && !boxFg && selectedBatchId != null ? (
+          <p className="-mt-2 mb-4 text-[11px] text-[var(--text-muted)]">
+            FG kg follows this batch&apos;s boxes once it has any — box it before or after you
+            save; boxes added after the save raise FG out of the process loss.{" "}
+            <button
+              type="button"
+              onClick={() => onJumpToBoxes(selectedBatchId)}
+              className="text-[var(--aws-link)] font-semibold hover:underline"
+            >
+              Open Boxes printing
+            </button>
+          </p>
+        ) : null}
 
         {/* Slice 5: SFG inventory picker — only on a consuming stage (this JC
             doesn't produce SFG) that has an SFG#### to issue (chain input_code
@@ -6094,17 +6380,28 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
                   <div className="mt-0.5 text-[12px] text-[var(--text-muted)]">
                     Issued <ConsumptionIssuedText row={r} />
                   </div>
-                  <label className="block mt-2">
-                    <span className="block text-[11px] uppercase tracking-wide text-[var(--text-muted)] mb-0.5">
-                      {/* Visible text is a prefix of the input's aria-label
-                          ("Quantity consumed, <material>") so speech input
-                          matches what is on screen — WCAG 2.5.3. The unit is
-                          aria-hidden; the accessible name must stay identical
-                          to the table's. */}
-                      Quantity consumed<span aria-hidden="true"> ({r.article.uom})</span>
-                    </span>
-                    {consQtyInput(r, "w-full")}
-                  </label>
+                  {autoConsKeys.has(r.key) ? (
+                    // Calculated: no input to label — a <label> here would
+                    // turn a tap on its text into a tap on Edit.
+                    <div className="mt-2">
+                      <span className="block text-[11px] uppercase tracking-wide text-[var(--text-muted)] mb-0.5">
+                        Quantity consumed
+                      </span>
+                      {consQtyInput(r, "w-full")}
+                    </div>
+                  ) : (
+                    <label className="block mt-2">
+                      <span className="block text-[11px] uppercase tracking-wide text-[var(--text-muted)] mb-0.5">
+                        {/* Visible text is a prefix of the input's aria-label
+                            ("Quantity consumed, <material>") so speech input
+                            matches what is on screen — WCAG 2.5.3. The unit is
+                            aria-hidden; the accessible name must stay identical
+                            to the table's. */}
+                        Quantity consumed<span aria-hidden="true"> ({r.article.uom})</span>
+                      </span>
+                      {consQtyInput(r, "w-full")}
+                    </label>
+                  )}
                   {/* empty:hidden — VarianceChip renders nothing on an untouched
                       line, and a bare margin would leave a gap under the input. */}
                   <div className="mt-1.5 empty:hidden">{consVariance(r)}</div>
@@ -6870,14 +7167,12 @@ function SummaryTable({ summary, rows, additives }:
   const n = rows.length + additives.length;
   const th = "py-1.5 px-2 font-medium text-left whitespace-nowrap";
   const td = "py-1.5 px-2 whitespace-nowrap align-top";
-  // Sixteen nowrap columns will never fold into a phone, so this table keeps
-  // its sideways scroll (the rule the rest of the file follows — fold a table
-  // into cards — is waived for a summary this wide). What it gets instead is a
-  // pinned Material column: three screens into the scroll, every number needs
-  // to still say whose it is. `md:static` drops the pin again from md up, so
-  // the desktop table renders exactly as it did before. The separator is a
-  // box-shadow rather than a border because borders on a border-collapse
-  // table belong to the table, not the cell, and scroll away with it.
+  // Sixteen nowrap columns never fold into a phone, so below md this renders
+  // cards instead (the phone block below); the table is md and up. The pinned
+  // Material column (`sticky md:static`) is a leftover of the phone scroller
+  // and does nothing from md up. The separator is a box-shadow rather than a
+  // border because borders on a border-collapse table belong to the table,
+  // not the cell, and scroll away with it.
   // No background here on purpose: the caller supplies it, because an
   // additive row is #fcfcfd and a "bg-white" baked in would win over it
   // (Tailwind resolves two background utilities by stylesheet order, where
@@ -6900,12 +7195,42 @@ function SummaryTable({ summary, rows, additives }:
   );
   return (
     <div className="mb-3">
-      {/* The hint lives outside the scroller on purpose: inside it, it
-          would scroll off the left edge with the first column. */}
-      <p className="md:hidden mb-1 text-[10px] text-[var(--text-muted)]">
-        Scroll sideways for the other columns — the material name stays in place.
-      </p>
-      <div className="overflow-x-auto">
+      {/* Phone: the batch's figures as a grid, then one card per material with
+          the four figures that are its own — sixteen columns scrolled sideways
+          on a 360 px screen (2026-10-26). md and up keep the table below. */}
+      <div className="md:hidden space-y-3">
+        <SummaryGrid summary={summary} />
+        <ul role="list" className="space-y-2" aria-label="Accounting summary per material">
+          {rows.map((m) => (
+            <li key={m.key} role="listitem" className="rounded border border-[#e5e7eb] px-3 py-2">
+              <div className="text-[13px] text-[var(--text-primary)] break-words">
+                {m.name}{" "}
+                <span className={`text-[10px] ${m.itemType === "SFG" || m.itemType === "WIP" ? "text-[var(--text-success)] font-medium" : "text-[var(--text-muted)]"}`}>
+                  ({m.itemType})
+                </span>
+              </div>
+              <dl className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 text-[12px]">
+                {([["Consumed", m.consumed], ["Returned", m.balance], ["Off-grade", m.offgrade], ["Control sample", m.ctrlSample]] as const)
+                  .map(([label, v]) => (
+                    <div key={label} className="min-w-0">
+                      <dt className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">{label}</dt>
+                      <dd className="tabular-nums text-[var(--text-primary)]">{qty(v, m.uom)}</dd>
+                    </div>
+                  ))}
+              </dl>
+            </li>
+          ))}
+          {additives.map((a) => (
+            <li key={a.key} role="listitem" className="rounded border border-[#e5e7eb] bg-[#fcfcfd] px-3 py-2 flex items-baseline justify-between gap-3">
+              <span className="text-[13px] text-[var(--text-primary)] break-words">
+                {a.name} <span className="text-[10px] text-[var(--text-muted)]">(Additive, data only)</span>
+              </span>
+              <span className="shrink-0 tabular-nums text-[12px]">{kg(a.qty)}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div className="hidden md:block overflow-x-auto">
         <table className="w-full text-[12px] border-collapse">
           <caption className="sr-only">
             Accounting summary. One row per raw and packaging material; batch-level
@@ -8364,6 +8689,20 @@ function FormNumber({ label, value, onChange, disabled, placeholder, highlight }
     </label>
   );
 }
+/** A figure the form works out instead of asking for it again
+ *  (lib/job-card-calculated): laid out like FormNumber, read-only, and saying
+ *  where it comes from. */
+function CalculatedFigure({ label, value, note }: { label: string; value: string; note: string }) {
+  return (
+    <div className="block">
+      <FormLabel>{label}</FormLabel>
+      <div className="min-h-8 px-2 py-1 flex items-center text-[13px] font-semibold tabular-nums rounded-[2px] border border-[var(--aws-border)] bg-[var(--aws-bg-tint,#fbfbfb)] text-[var(--text-primary)]">
+        {value}
+      </div>
+      <span className="block mt-0.5 text-[10px] text-[var(--text-muted)]">{note}</span>
+    </div>
+  );
+}
 function FormSelect({ label, value, onChange, disabled, options }: { label: string; value: string; onChange: (v: string) => void; disabled?: boolean; options: { value: string; label: string }[] }) {
   return (
     <label className="block">
@@ -8402,7 +8741,7 @@ function FormCheckbox({ label, value, onChange, disabled }: { label: string; val
 function FormFooter({
   feedback, submitting, submitLabel, disabled, extraActions,
 }: {
-  feedback: { kind: "ok" | "err"; msg: string } | null;
+  feedback: { kind: "ok" | "err" | "warn"; msg: string } | null;
   submitting: boolean;
   submitLabel: string;
   /** C3: extra disable flag (e.g. JC is locked). When true, the submit
@@ -8440,7 +8779,9 @@ function FormFooter({
       </ActionButton>
       {extraActions}
       {feedback ? (
-        <span className={["text-[12px]", feedback.kind === "ok" ? "text-[var(--text-success)]" : "text-[var(--aws-error)]"].join(" ")}>
+        <span className={["text-[12px]",
+          feedback.kind === "ok" ? "text-[var(--text-success)]"
+            : feedback.kind === "warn" ? "text-[var(--aws-warning,#8a5e10)]" : "text-[var(--aws-error)]"].join(" ")}>
           {feedback.msg}
         </span>
       ) : null}

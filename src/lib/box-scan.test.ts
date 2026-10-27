@@ -6,7 +6,7 @@
 import {
   checkBoxesForPrint, checkPrintDetail, nextBoxNumber, parseBoxQr, printedLabel, renumberDrafts, renumberedMessage,
   rmArticleOptions, storedMessage, storesRefLabel, type PrintedRef, type StoresRef,
-} from "./box-scan.ts";
+ readScanRefusal } from "./box-scan.ts";
 
 let failures = 0;
 function check(name: string, got: unknown, want: unknown) {
@@ -145,6 +145,20 @@ check("a long list of taken boxes is cut short",
 check("the taken boxes not named",
   renumberedMessage([], 8),
   "Some box numbers are already used on this job card, so the boxes still to print now start at Box 8. Print them again.");
+
+// Only a box already recorded is a "duplicate"; the message names where it is.
+check("duplicate with its card",
+  readScanRefusal(409, { detail: { error: "duplicate_box", message: "Box B1 is already recorded on job card PLAN-9-L1-S1." } }, "x"),
+  { kind: "duplicate", message: "Box B1 is already recorded on job card PLAN-9-L1-S1." });
+check("several tables is not a duplicate",
+  readScanRefusal(409, { detail: { error: "ambiguous_box", message: "'48213307' matches more than one box." } }, "x").kind,
+  "ambiguous");
+check("older server's duplicate text",
+  readScanRefusal(409, { detail: "Duplicate box scanned — B1 is already recorded." }, "x").kind, "duplicate");
+check("older server's other 409", readScanRefusal(409, { detail: "'B1' matches boxes in po_box." }, "x").kind, "ambiguous");
+check("a 422 refusal", readScanRefusal(422, { detail: "Box B1 was sent by Stores for job card 7." }, "x"),
+  { kind: "other", message: "Box B1 was sent by Stores for job card 7." });
+check("no body", readScanRefusal(500, null, "Couldn't store B1"), { kind: "other", message: "Couldn't store B1" });
 
 if (failures) { console.error(`${failures} failed`); process.exit(1); }
 console.log("box-scan: all checks passed");
