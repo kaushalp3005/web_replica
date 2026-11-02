@@ -22,6 +22,7 @@ export async function PUT(request: Request): Promise<Response> {
   const number = (body as Record<string, unknown>).contact_number;
   return forwardCollections(
     request,
+    "edit",
     "PUT",
     `/parties/${encodeURIComponent(party)}/contact-number`,
     { contact_number: typeof number === "string" ? number : null },

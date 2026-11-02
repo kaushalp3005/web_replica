@@ -25,7 +25,7 @@ const missing = (what: string) => Response.json({ detail: `${what} is required.`
 export async function GET(request: Request): Promise<Response> {
   const path = partyPath(request);
   if (!path) return missing("party");
-  return forwardCollections(request, "GET", path);
+  return forwardCollections(request, "view", "GET", path);
 }
 
 export async function DELETE(request: Request): Promise<Response> {
@@ -33,5 +33,5 @@ export async function DELETE(request: Request): Promise<Response> {
   if (!path) return missing("party");
   const id = new URL(request.url).searchParams.get("id")?.trim();
   if (!id) return missing("id");
-  return forwardCollections(request, "DELETE", `${path}/${encodeURIComponent(id)}`);
+  return forwardCollections(request, "delete", "DELETE", `${path}/${encodeURIComponent(id)}`);
 }

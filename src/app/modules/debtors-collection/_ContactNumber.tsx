@@ -17,9 +17,12 @@ const LINK = "text-[12px] font-medium text-[var(--aws-link)] hover:underline dis
 /** Mount with `key={party.id}` so each party starts out of edit mode. */
 export function ContactNumber({
   party,
+  editable,
   onSaved,
 }: {
   party: DpdParty;
+  /** false: the number is shown with no Change link (the user may not change parties). */
+  editable: boolean;
   /** The number as saved; null when it was cleared. */
   onSaved: (phone: string | null) => void;
 }) {
@@ -101,9 +104,11 @@ export function ContactNumber({
         <p className="text-[11px] font-medium text-[var(--text-secondary)]">
           {numbers.length > 1 ? "Contact numbers" : "Contact number"}
         </p>
-        <button type="button" onClick={startEditing} className={LINK}>
-          {party.phone ? "Change" : "Add a number"}
-        </button>
+        {editable ? (
+          <button type="button" onClick={startEditing} className={LINK}>
+            {party.phone ? "Change" : "Add a number"}
+          </button>
+        ) : null}
       </div>
       {numbers.length > 0 ? (
         <ul className="mt-1 space-y-1">

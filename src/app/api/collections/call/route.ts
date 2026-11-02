@@ -20,11 +20,11 @@ export async function POST(request: Request): Promise<Response> {
   if (!party) return missing("party");
   const body: unknown = await request.json().catch(() => null);
   if (body === null || typeof body !== "object" || Array.isArray(body)) return missing("The party's details");
-  return forwardCollections(request, "POST", `/parties/${encodeURIComponent(party)}/call`, body as Record<string, unknown>);
+  return forwardCollections(request, "call", "POST", `/parties/${encodeURIComponent(party)}/call`, body as Record<string, unknown>);
 }
 
 export async function GET(request: Request): Promise<Response> {
   const id = new URL(request.url).searchParams.get("id")?.trim();
   if (!id) return missing("id");
-  return forwardCollections(request, "GET", `/calls/${encodeURIComponent(id)}`);
+  return forwardCollections(request, "view", "GET", `/calls/${encodeURIComponent(id)}`);
 }

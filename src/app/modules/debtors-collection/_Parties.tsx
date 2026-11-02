@@ -20,6 +20,7 @@ import { PartySummaryDialog } from "./_SummaryDialog";
 import { EditPartyDialog } from "./_EditPartyDialog";
 import { SECTIONS, type DimensionDef } from "./_sections";
 import { exportPartiesToExcel } from "./_export";
+import { useDebtorsAccess } from "./_access";
 
 export interface SortState {
   key: DpdSortKey;
@@ -153,6 +154,8 @@ export function PartiesList({
   const [editing, setEditing] = useState<DpdParty | null>(null);
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<{ error: boolean; text: string } | null>(null);
+  // Rows get no Edit / Call now button, and the header no Export, for someone who may not.
+  const access = useDebtorsAccess();
 
   async function exportExcel() {
     setExporting(true);
@@ -188,18 +191,20 @@ export function PartiesList({
             {" · "}
             <span className="font-semibold text-[var(--text-primary)]">{compactInr(totals.pending)}</span>
           </p>
-          <button
-            type="button"
-            onClick={exportExcel}
-            disabled={exporting || rows.length === 0}
-            title={filtered ? "Exports the parties the filters are showing" : "Exports every party on this tab"}
-            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[12px] font-semibold text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-subtle)] disabled:opacity-50"
-          >
-            <svg aria-hidden viewBox="0 0 16 16" className="w-3.5 h-3.5">
-              <path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M2.5 10.5v2.5a.5.5 0 0 0 .5.5h10a.5.5 0 0 0 .5-.5v-2.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-            {exporting ? "Exporting…" : filtered ? `Export ${rows.length} to Excel` : "Export to Excel"}
-          </button>
+          {access.export ? (
+            <button
+              type="button"
+              onClick={exportExcel}
+              disabled={exporting || rows.length === 0}
+              title={filtered ? "Exports the parties the filters are showing" : "Exports every party on this tab"}
+              className="inline-flex items-center gap-1.5 h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[12px] font-semibold text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-subtle)] disabled:opacity-50"
+            >
+              <svg aria-hidden viewBox="0 0 16 16" className="w-3.5 h-3.5">
+                <path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M2.5 10.5v2.5a.5.5 0 0 0 .5.5h10a.5.5 0 0 0 .5-.5v-2.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              {exporting ? "Exporting…" : filtered ? `Export ${rows.length} to Excel` : "Export to Excel"}
+            </button>
+          ) : null}
         </div>
       </div>
       {exportNote ? (
@@ -278,9 +283,9 @@ export function PartiesList({
             bucket={filter.bucket}
             sort={sort}
             onSort={onSort}
-            onCall={setCalling}
+            onCall={access.call ? setCalling : null}
             onSummary={setSummarising}
-            onEdit={setEditing}
+            onEdit={access.edit ? setEditing : null}
           />
           <PartyCards
             key={filterKey}
@@ -288,9 +293,9 @@ export function PartiesList({
             keyOf={keyOf}
             dimensions={dimensions}
             bucket={filter.bucket}
-            onCall={setCalling}
+            onCall={access.call ? setCalling : null}
             onSummary={setSummarising}
-            onEdit={setEditing}
+            onEdit={access.edit ? setEditing : null}
           />
         </>
       )}
@@ -455,9 +460,11 @@ function PartiesTable({
   bucket: AgeBucketKey | null;
   sort: SortState;
   onSort: (s: SortState) => void;
-  onCall: (p: DpdParty) => void;
+  /** null: no Call now button (the user may not place calls). */
+  onCall: ((p: DpdParty) => void) | null;
   onSummary: (p: DpdParty) => void;
-  onEdit: (p: DpdParty) => void;
+  /** null: no Edit button (the user may not change parties). */
+  onEdit: ((p: DpdParty) => void) | null;
 }) {
   const header = (key: DpdSortKey, label: string, align: "left" | "right", swatch?: AgeBucketKey) => {
     const active = sort.key === key;
@@ -535,9 +542,9 @@ function PartiesTable({
               ))}
               <td className={`${TD} text-center`}>
                 <span className="inline-flex items-center gap-1.5">
-                  <EditButton party={p} onEdit={onEdit} size="sm" />
+                  {onEdit ? <EditButton party={p} onEdit={onEdit} size="sm" /> : null}
                   <SummaryButton party={p} onSummary={onSummary} size="sm" />
-                  <CallNowButton party={p} onCall={onCall} size="sm" />
+                  {onCall ? <CallNowButton party={p} onCall={onCall} size="sm" /> : null}
                 </span>
               </td>
             </tr>
@@ -580,9 +587,11 @@ function PartyCards({
   keyOf: Map<DpdParty, number>;
   dimensions: readonly DimensionDef[];
   bucket: AgeBucketKey | null;
-  onCall: (p: DpdParty) => void;
+  /** null: no Call now button (the user may not place calls). */
+  onCall: ((p: DpdParty) => void) | null;
   onSummary: (p: DpdParty) => void;
-  onEdit: (p: DpdParty) => void;
+  /** null: no Edit button (the user may not change parties). */
+  onEdit: ((p: DpdParty) => void) | null;
 }) {
   const [limit, setLimit] = useState(CARD_PAGE);
   const shown = rows.slice(0, limit);
@@ -636,9 +645,9 @@ function PartyCards({
                   {p.phone ?? ""}
                 </span>
                 <span className="ml-auto flex flex-wrap items-center justify-end gap-2">
-                  <EditButton party={p} onEdit={onEdit} size="md" />
+                  {onEdit ? <EditButton party={p} onEdit={onEdit} size="md" /> : null}
                   <SummaryButton party={p} onSummary={onSummary} size="md" />
-                  <CallNowButton party={p} onCall={onCall} size="md" />
+                  {onCall ? <CallNowButton party={p} onCall={onCall} size="md" /> : null}
                 </span>
               </div>
             </li>

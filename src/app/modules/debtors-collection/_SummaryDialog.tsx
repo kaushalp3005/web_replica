@@ -14,6 +14,7 @@ import { phoneNumbers, type DpdParty, type DpdSectionKey } from "@/lib/debtors";
 import { saveParty, type CallSummary } from "@/lib/debtor-calls";
 import { PhoneIcon } from "./_ui";
 import { CallSummaries, remarkLine } from "./_CallSummaries";
+import { useDebtorsAccess } from "./_access";
 
 const H3 = "text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)]";
 
@@ -34,6 +35,7 @@ export function PartySummaryDialog({
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  const access = useDebtorsAccess();
 
   useEffect(() => {
     const dialog = ref.current;
@@ -87,7 +89,13 @@ export function PartySummaryDialog({
               )}
             </div>
 
-            <CallSummaries key={party.id} partyKey={party.id} remarks={party.remarks} onAddToRemarks={addToRemarks} />
+            <CallSummaries
+              key={party.id}
+              partyKey={party.id}
+              remarks={party.remarks}
+              onAddToRemarks={access.edit ? addToRemarks : null}
+              canDelete={access.delete}
+            />
 
             <div>
               <h3 className={H3}>Contact</h3>
@@ -108,14 +116,16 @@ export function PartySummaryDialog({
             >
               Close
             </button>
-            <button
-              type="button"
-              onClick={() => onCall(party)}
-              className="inline-flex items-center gap-2 h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-[13px] font-semibold text-white hover:bg-[var(--aws-orange-hover)]"
-            >
-              <PhoneIcon className="w-4 h-4" />
-              Call now
-            </button>
+            {access.call ? (
+              <button
+                type="button"
+                onClick={() => onCall(party)}
+                className="inline-flex items-center gap-2 h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-[13px] font-semibold text-white hover:bg-[var(--aws-orange-hover)]"
+              >
+                <PhoneIcon className="w-4 h-4" />
+                Call now
+              </button>
+            ) : null}
           </div>
         </>
       ) : null}
