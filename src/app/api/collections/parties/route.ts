@@ -14,5 +14,5 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request): Promise<Response> {
   const section = new URL(request.url).searchParams.get("section")?.trim();
   if (!section) return Response.json({ detail: "section is required." }, { status: 400 });
-  return forwardCollections(request, "GET", `/parties?section=${encodeURIComponent(section)}`);
+  return forwardCollections(request, "view", "GET", `/parties?section=${encodeURIComponent(section)}`);
 }

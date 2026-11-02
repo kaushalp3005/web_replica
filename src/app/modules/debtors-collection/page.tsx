@@ -5,17 +5,20 @@
 // APMC + Non-APMC. The parties come from the collections backend's database
 // (lib/debtor-calls loadDpdReport) and from nowhere else.
 //
-// Admin-only, like its tile in lib/modules: scoped roles are bounced by
-// useRequireModuleAccess, and any other non-admin gets the no-access panel.
+// For admins and the debtors_collection role, like its tile in lib/modules:
+// other scoped roles are bounced by useRequireModuleAccess, and anyone else
+// without debtors_collection.view gets the no-access panel. The Tally upload
+// shows only to those who may upload (admins, unless a role is granted it).
 // The section lives in the URL (?section=apmc) so a refresh or a shared link
 // opens the same tab.
 
 import { Suspense, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { BackLink } from "@/components/BackLink";
-import { useIsAdmin, useMe, useRequireAuth, useRequireModuleAccess } from "@/lib/user";
+import { useMe, useRequireAuth, useRequireModuleAccess } from "@/lib/user";
 import { compactInr, totalsOf, type DpdParty, type DpdReport, type DpdSectionKey } from "@/lib/debtors";
 import { loadDpdReport } from "@/lib/debtor-calls";
+import { useDebtorsAccess } from "./_access";
 import { DebtorsChrome } from "./_chrome";
 import { DpdSection } from "./_DpdSection";
 import { UploadDialog } from "./_UploadDialog";
@@ -51,7 +54,8 @@ function DebtorsCollectionScreen() {
   const authed = useRequireAuth(router.replace);
   const scopeOk = useRequireModuleAccess("debtors-collection", router.replace);
   const me = useMe();
-  const isAdmin = useIsAdmin();
+  const access = useDebtorsAccess();
+  const canView = access.view;
   const active = SECTIONS.find((s) => s.key === params.get("section")) ?? SECTIONS[0];
 
   const [loads, setLoads] = useState<Record<DpdSectionKey, LoadState>>(ALL_LOADING);
@@ -62,7 +66,7 @@ function DebtorsCollectionScreen() {
 
   // Both sections load up front: they are small, and the tabs show each total.
   useEffect(() => {
-    if (!authed || !isAdmin) return;
+    if (!authed || !canView) return;
     const ctrl = new AbortController();
     for (const s of SECTIONS) {
       loadDpdReport(s.key, ctrl.signal)
@@ -76,7 +80,7 @@ function DebtorsCollectionScreen() {
         });
     }
     return () => ctrl.abort();
-  }, [authed, isAdmin, attempt]);
+  }, [authed, canView, attempt]);
 
   function retry() {
     setLoads(ALL_LOADING);
@@ -126,7 +130,7 @@ function DebtorsCollectionScreen() {
             DPD view — what each customer owes, by how long it has been outstanding.
           </p>
         </div>
-        {scopeOk && isAdmin ? (
+        {scopeOk && canView && access.upload ? (
           <button type="button" onClick={() => setUploading(active)} aria-haspopup="dialog" className="inline-flex items-center gap-2 h-9 px-3.5 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-semibold text-[var(--text-primary)] hover:bg-[var(--surface-subtle)]">
             <UploadIcon />
             Upload {active.label} from Tally
@@ -143,7 +147,7 @@ function DebtorsCollectionScreen() {
 
       {!scopeOk ? null : me === null ? (
         <Notice>Checking your access…</Notice>
-      ) : !isAdmin ? (
+      ) : !canView ? (
         <Notice>
           You don&rsquo;t have access to the Debtors Collection module. Ask an administrator to grant you access, or
           switch to a different account.
@@ -194,7 +198,7 @@ function DebtorsCollectionScreen() {
             className="transition-opacity duration-300 starting:opacity-0 motion-reduce:transition-none"
           >
             <SectionBody
-              onUpload={() => setUploading(active)}
+              onUpload={access.upload ? () => setUploading(active) : null}
               state={loads[active.key]}
               def={active}
               onRetry={retry}
@@ -231,7 +235,8 @@ function SectionBody({
   state: LoadState;
   def: SectionDef;
   onRetry: () => void;
-  onUpload: () => void;
+  /** Open the Tally upload; null for someone who may not upload. */
+  onUpload: (() => void) | null;
   onPartyChange: (before: DpdParty, after: DpdParty) => void;
 }) {
   if (state.status === "ready") return <DpdSection report={state.report} def={def} onPartyChange={onPartyChange} />;
@@ -242,13 +247,21 @@ function SectionBody({
     return (
       <Notice tall>
         <span className="block font-semibold text-[var(--text-primary)]">No {def.label} report yet</span>
-        <span className="block mt-1">
-          Upload the {def.label} Group Outstandings export from Tally to build it.
-        </span>
-        <button type="button" onClick={onUpload} className="mt-3 inline-flex items-center gap-2 h-9 px-3.5 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-semibold text-[var(--text-primary)] hover:bg-[var(--surface-subtle)]">
-          <UploadIcon />
-          Upload {def.label} from Tally
-        </button>
+        {onUpload ? (
+          <>
+            <span className="block mt-1">
+              Upload the {def.label} Group Outstandings export from Tally to build it.
+            </span>
+            <button type="button" onClick={onUpload} className="mt-3 inline-flex items-center gap-2 h-9 px-3.5 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-semibold text-[var(--text-primary)] hover:bg-[var(--surface-subtle)]">
+              <UploadIcon />
+              Upload {def.label} from Tally
+            </button>
+          </>
+        ) : (
+          <span className="block mt-1">
+            It appears here once an administrator uploads the {def.label} Group Outstandings export from Tally.
+          </span>
+        )}
       </Notice>
     );
   }

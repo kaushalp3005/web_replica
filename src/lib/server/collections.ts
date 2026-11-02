@@ -8,7 +8,9 @@
 // login: the ERP's JWT secret is not its to hold. So the browser never talks
 // to it. It calls a Route Handler here, which:
 //   1. checks the caller's ERP session by asking the ERP backend who they are,
-//      and that they are an admin — Debtors Collection is an admin-only module;
+//      and that they hold the debtors_collection permission the request needs
+//      (view, call, edit, export, upload or delete — see lib/debtors-access;
+//      admins hold them all);
 //   2. adds the key from a server-only env var and forwards the request.
 //
 // Never give either variable a NEXT_PUBLIC_ name: that would ship the key to
@@ -18,7 +20,7 @@
 //   COLLECTIONS_API_KEY   the key that backend expects in x-api-key
 
 import type { MeResponse } from "@/lib/auth";
-import { isAdminMe } from "@/lib/sample-roles";
+import { mayDebtors, type DebtorsAction } from "@/lib/debtors-access";
 
 // Kept in sync with next.config.ts: same env var, same prod fallback.
 const API_PROXY_TARGET = process.env.API_PROXY_TARGET ?? "http://65.0.86.156";
@@ -29,8 +31,18 @@ function problem(status: number, detail: string): Response {
   return Response.json({ detail }, { status });
 }
 
-/** The signed-in admin making the request, or the response to send instead. */
-async function requireAdmin(request: Request): Promise<MeResponse | Response> {
+const REFUSED: Record<DebtorsAction, string> = {
+  view: "You don't have access to Debtors Collection.",
+  call: "You can't place calls in Debtors Collection.",
+  edit: "You can't change parties in Debtors Collection.",
+  export: "You can't export from Debtors Collection.",
+  upload: "You can't upload to Debtors Collection.",
+  delete: "You can't delete call summaries.",
+};
+
+/** The signed-in user making the request, if they may take `action`, or the
+ *  response to send instead. */
+async function requireAccess(request: Request, action: DebtorsAction): Promise<MeResponse | Response> {
   const auth = request.headers.get("authorization");
   if (!auth) return problem(401, "Sign in to continue.");
   let res: Response;
@@ -42,7 +54,7 @@ async function requireAdmin(request: Request): Promise<MeResponse | Response> {
   if (res.status === 401) return problem(401, "Your session has expired. Sign in again.");
   if (!res.ok) return problem(502, "Couldn't check your sign-in. Try again.");
   const me = (await res.json().catch(() => null)) as MeResponse | null;
-  return me && isAdminMe(me) ? me : problem(403, "Only administrators can use Debtors Collection.");
+  return me && mayDebtors(me, action) ? me : problem(403, `${REFUSED[action]} Ask an administrator for access.`);
 }
 
 /** Who to record as having placed a call: the verified sign-in, never
@@ -52,9 +64,11 @@ function actorOf(me: MeResponse): string {
 }
 
 /**
- * Forward one request to the collections backend on behalf of a signed-in admin.
+ * Forward one request to the collections backend on behalf of a signed-in user
+ * who may take `action`.
  *
  * @param request the incoming Route Handler request (browser → Next)
+ * @param action  the debtors_collection permission the request needs
  * @param method  the backend method
  * @param path    path under /api/collections, e.g. "/parties/<id>/summaries";
  *                the caller encodes each segment
@@ -66,12 +80,13 @@ function actorOf(me: MeResponse): string {
  */
 export async function forwardCollections(
   request: Request,
+  action: DebtorsAction,
   method: "GET" | "DELETE" | "POST" | "PUT",
   path: string,
   body?: Record<string, unknown>,
   actorField: "initiated_by" | "updated_by" = "initiated_by",
 ): Promise<Response> {
-  const me = await requireAdmin(request);
+  const me = await requireAccess(request, action);
   if (me instanceof Response) return me;
   if (!COLLECTIONS_API_URL || !COLLECTIONS_API_KEY) {
     return problem(503, "The collections service is not set up on this server yet (COLLECTIONS_API_URL, COLLECTIONS_API_KEY).");
@@ -99,7 +114,8 @@ export async function forwardCollections(
 
 /**
  * Forward an upload (multipart form) to the collections backend on behalf of a
- * signed-in admin. The form is rebuilt here, so only the expected fields go on,
+ * signed-in user who may upload — both steps, the preview as well as the apply,
+ * need debtors_collection.upload. The form is rebuilt here, so only the expected fields go on,
  * and it is stamped with who is uploading (`uploaded_by`) from the verified
  * sign-in.
  *
@@ -113,7 +129,7 @@ export async function forwardCollectionsUpload(
   fields: Record<string, string>,
   files: Record<string, File>,
 ): Promise<Response> {
-  const me = await requireAdmin(request);
+  const me = await requireAccess(request, "upload");
   if (me instanceof Response) return me;
   if (!COLLECTIONS_API_URL || !COLLECTIONS_API_KEY) {
     return problem(503, "The collections service is not set up on this server yet (COLLECTIONS_API_URL, COLLECTIONS_API_KEY).");

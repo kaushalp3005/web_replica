@@ -21,6 +21,7 @@ import {
 import { AgeingBar, PhoneIcon, Remark, Swatch, isFlag } from "./_ui";
 import { AgentCall } from "./_AgentCall";
 import { ContactNumber } from "./_ContactNumber";
+import { useDebtorsAccess } from "./_access";
 import type { DimensionDef } from "./_sections";
 
 export function CallDialog({
@@ -44,6 +45,7 @@ export function CallDialog({
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  const access = useDebtorsAccess();
 
   useEffect(() => {
     const dialog = ref.current;
@@ -108,6 +110,7 @@ export function CallDialog({
             <ContactNumber
               key={party.id}
               party={party}
+              editable={access.edit}
               onSaved={(phone) => onContactSaved(party, phone)}
             />
 

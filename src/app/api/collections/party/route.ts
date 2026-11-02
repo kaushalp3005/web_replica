@@ -20,5 +20,5 @@ export async function PUT(request: Request): Promise<Response> {
   if (!party) return missing("party");
   const body: unknown = await request.json().catch(() => null);
   if (body === null || typeof body !== "object" || Array.isArray(body)) return missing("The changes");
-  return forwardCollections(request, "PUT", `/parties/${encodeURIComponent(party)}`, body as Record<string, unknown>, "updated_by");
+  return forwardCollections(request, "edit", "PUT", `/parties/${encodeURIComponent(party)}`, body as Record<string, unknown>, "updated_by");
 }

@@ -99,12 +99,16 @@ export function CallSummaries({
   partyKey,
   remarks,
   onAddToRemarks,
+  canDelete,
 }: {
   partyKey: string;
   /** The party's remarks now: a summary already in them is shown as added. */
   remarks: string | null;
-  /** Add a summary to the party's remarks; throws with a message to show if it can't. */
-  onAddToRemarks: (s: CallSummary) => Promise<void>;
+  /** Add a summary to the party's remarks; throws with a message to show if it can't.
+   *  null: no Add to remarks (the user may not change parties). */
+  onAddToRemarks: ((s: CallSummary) => Promise<void>) | null;
+  /** false: no Delete (the user may not delete call summaries). */
+  canDelete: boolean;
 }) {
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
@@ -130,6 +134,7 @@ export function CallSummaries({
   }
 
   async function addToRemarks(s: CallSummary) {
+    if (!onAddToRemarks) return;
     setDeleting(s.id);
     setDeleteError(null);
     try {
@@ -225,7 +230,7 @@ export function CallSummaries({
                     <span className="flex items-center gap-3">
                       {inRemarks ? (
                         <span className="text-[12px] text-[var(--text-muted)]">In remarks ✓</span>
-                      ) : (
+                      ) : onAddToRemarks ? (
                         <button
                           type="button"
                           onClick={() => {
@@ -237,18 +242,20 @@ export function CallSummaries({
                         >
                           Add to remarks
                         </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setDeleteError(null);
-                          setConfirming({ id: s.id, action: "delete" });
-                        }}
-                        aria-label={`Delete the summary of ${formatAsOf(s.date) ?? s.date}`}
-                        className="text-[12px] font-medium text-[var(--text-secondary)] hover:text-[#b0280e] hover:underline"
-                      >
-                        Delete
-                      </button>
+                      ) : null}
+                      {canDelete ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDeleteError(null);
+                            setConfirming({ id: s.id, action: "delete" });
+                          }}
+                          aria-label={`Delete the summary of ${formatAsOf(s.date) ?? s.date}`}
+                          className="text-[12px] font-medium text-[var(--text-secondary)] hover:text-[#b0280e] hover:underline"
+                        >
+                          Delete
+                        </button>
+                      ) : null}
                     </span>
                   )}
                 </div>

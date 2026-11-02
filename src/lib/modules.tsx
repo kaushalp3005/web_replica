@@ -364,12 +364,16 @@ export const MODULES: ModuleItem[] = [
     stat: "DPD · CD-CF · APMC + Non-APMC",
     route: "debtors-collection",
     implemented: true,
-    // Admin-only for now. There is no backend for this module yet — the DPD
-    // figures are Excel exports converted to JSON (scripts/import-dpd.mjs,
-    // src/lib/debtors.ts) — so there is no server permission to mirror, and
-    // this flag plus the page's own admin check are the whole gate. When the
-    // API lands, gate it server-side and decide which roles work collections.
-    adminOnly: true,
+    // Admins plus the `debtors_collection` role, and nobody else. Both this and
+    // the ROLE_MODULE_SCOPE entry are needed, for the same reason as Stock Take:
+    // allowedRoles covers a holder whose other roles are unscoped, the scope
+    // entry one who also holds a scoped role.
+    //
+    // This mirrors, and does not replace, the real gate: backend migration 136
+    // grants debtors_collection.{view,call,edit,export} to this role (upload and
+    // delete stay with admins), and every /api/collections/* Route Handler checks
+    // the one it needs (lib/server/collections.ts, lib/debtors-access.ts).
+    allowedRoles: ["debtors_collection"],
     Icon: DebtorsCollectionIcon,
   },
   {
@@ -435,6 +439,12 @@ export const ROLE_MODULE_SCOPE: Record<string, string[]> = {
   // the expected case) takes the scoped branch of the filter, which unions the
   // scope lists and ignores allowedRoles entirely.
   stock_take:    ["stock-take"],
+  // Collections staff: Debtors Collection is the whole job, so the role is scoped
+  // to that one tile, and listed in the tile's allowedRoles too, like stock_take.
+  // The cost of scoping: a user given this role ON TOP of an unscoped one (sales,
+  // business_head) sees only this tile, since the scoped branch wins. Fine for
+  // dedicated staff; for anyone else, drop this entry and keep allowedRoles.
+  debtors_collection: ["debtors-collection"],
   // QC roles see only the standalone QC module (inward inspection / NCR /
   // parameters). The scope overrides the QC tile's adminOnly flag (like
   // purchase); the QC landing page admits qc_manager/qc_inspector to match.
