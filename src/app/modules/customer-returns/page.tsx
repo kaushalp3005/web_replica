@@ -24,7 +24,9 @@ import {
   type CRStatus,
 } from "@/lib/customer-returns";
 import { CustomerReturnsChrome } from "./_chrome";
-import { CompanyToggle, StatusBadge, ErrorBanner, ConfirmDialog, useCompany, cx, fmtDate, fmtDateTime } from "./_shared";
+import { CompanyToggle, StatusBadge, ErrorBanner, ConfirmDialog, useCompany, cx, fmtDate, fmtDateTime, CR_STATUS_LABEL } from "./_shared";
+import { isUndecided } from "./_approvalFlow";
+import { istStamp } from "./_dates";
 
 const PER_PAGE = 20;
 
@@ -47,11 +49,13 @@ const IconPencil = (p: IconProps) => <S {...p}><path d="M12 20h9" /><path d="M16
 const IconTrash = (p: IconProps) => <S {...p}><path d="M3 6h18" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></S>;
 const IconSpinner = (p: IconProps) => <S {...(p.className ? p : { className: "h-3.5 w-3.5 animate-spin" })}><path d="M21 12a9 9 0 1 1-6.219-8.56" /></S>;
 
+// The Submitted tab still filters on the stored value (the server's status filter is
+// an exact match); it is labelled as what it is, an approved return with boxes saved.
 const STATUS_TABS: { label: string; value: CRStatus | "all"; Icon: (p: IconProps) => React.ReactElement; color: string }[] = [
   { label: "All", value: "all", Icon: IconAll, color: "text-[var(--text-primary)]" },
   { label: "Pending", value: "Pending", Icon: IconClock, color: "text-[#b45309]" },
   { label: "Approved", value: "Approved", Icon: IconCheckCircle, color: "text-[var(--text-success)]" },
-  { label: "Submitted", value: "Submitted", Icon: IconCheckCheck, color: "text-[#2c5fa8]" },
+  { label: CR_STATUS_LABEL.Submitted, value: "Submitted", Icon: IconCheckCheck, color: "text-[var(--text-success)]" },
 ];
 
 // ── CR No hover card — pastel roll-up shown on hover (mouse) / tap (touch) ─────
@@ -323,6 +327,7 @@ export default function CustomerReturnsListPage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
       setDeleteTarget(null); // close the modal so the error banner isn't hidden behind the overlay
+      load(); // a refusal usually means the list was stale (decided since it loaded)
     } finally {
       setDeleting(false);
     }
@@ -331,7 +336,7 @@ export default function CustomerReturnsListPage() {
   async function handleDownload() {
     setDownloading(true);
     try {
-      const blob = await exportCustomerReturns(company, {
+      const { blob, filename } = await exportCustomerReturns(company, {
         status: statusFilter === "all" ? undefined : statusFilter,
         customer: search || undefined,
         from_date: toApiDate(fromDate),
@@ -340,7 +345,8 @@ export default function CustomerReturnsListPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `rtv_${company}_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}.xlsx`;
+      // The server's name; the same one (today in IST) if its header didn't come through.
+      a.download = filename ?? `customer_returns_${company}_${istStamp()}.xlsx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -519,7 +525,7 @@ export default function CustomerReturnsListPage() {
                           <Link href={detailHref(item)} title="View detail" aria-label={`View ${item.rtv_id}`} className="h-7 w-7 inline-flex items-center justify-center rounded hover:bg-[var(--background)] text-[var(--text-secondary)]">
                             <IconEye className="h-3.5 w-3.5" />
                           </Link>
-                          {!CR_READ_ONLY && item.status === "Pending" && (
+                          {!CR_READ_ONLY && isUndecided(item.status) && (
                             <>
                               <Link href={approveHref(item)} title="Review / edit" aria-label={`Review ${item.rtv_id}`} className="h-7 w-7 inline-flex items-center justify-center rounded hover:bg-[var(--background)] text-[var(--text-secondary)]">
                                 <IconPencil className="h-3.5 w-3.5" />
@@ -575,7 +581,7 @@ export default function CustomerReturnsListPage() {
                         Review
                       </Link>
                     )}
-                    {!CR_READ_ONLY && item.status === "Pending" && (
+                    {!CR_READ_ONLY && isUndecided(item.status) && (
                       <button onClick={() => setDeleteTarget(item)} aria-label={`Delete ${item.rtv_id}`} className="h-7 w-7 inline-flex items-center justify-center rounded text-[var(--aws-error)] flex-shrink-0">
                         <IconTrash className="h-3 w-3" />
                       </button>
@@ -613,8 +619,9 @@ export default function CustomerReturnsListPage() {
           onCancel={() => setDeleteTarget(null)}
           onConfirm={handleDelete}
         >
-          Are you sure you want to delete <span className="font-medium text-[var(--text-primary)]">{deleteTarget.rtv_id}</span>? This
-          will remove all lines and boxes. This action cannot be undone.
+          Delete <span className="font-medium text-[var(--text-primary)]">{deleteTarget.rtv_id}</span> with all its lines and
+          {" "}{deleteTarget.boxes_count} box(es)? Any printed box labels for it will no longer be valid. The approvers are
+          told it was deleted, and a copy is kept in the deletion record. This can&rsquo;t be undone here.
         </ConfirmDialog>
       )}
     </CustomerReturnsChrome>

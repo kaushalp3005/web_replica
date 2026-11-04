@@ -8,13 +8,14 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BackLink } from "@/components/BackLink";
 import { useUserScope, useHasPermission } from "@/lib/user";
-import { userHasWarehouse, normaliseWarehouseCode } from "@/lib/warehouseScope";
 import { fmtNum, fmtDate } from "@/lib/po";
-import { getPurchasePo, addBoxes, updateBoxes, saveReceive, type PurchasePoDetail, type PurchaseLine } from "@/lib/purchase-receive";
+import { getPurchasePo, addBoxes, updateBoxes, saveReceive, newClientKey, createOneBox, updateOneBox, deleteOneBox, type PurchasePoDetail, type PurchaseLine, type SavedBox } from "@/lib/purchase-receive";
 import { listArrivals, type ArrivalItem } from "@/lib/qc";
-import { inwardReducer, buildReceiveRequest, buildUpdateSections, buildAddSections, buildAddBoxesPayload, type DraftState, type LogisticsField, type InwardAction, type SectionSeed, type PrintResolver } from "./_boxEngine";
+import { inwardReducer, buildReceiveRequest, buildUpdateSections, buildAddSections, buildAddBoxesPayload, buildSavedDraftUpdates, boxApiFields, postedNewSectionIds, existingKey, type DraftState, type LogisticsField, type InwardAction, type SectionSeed, type PrintResolver } from "./_boxEngine";
 import { LineCard } from "./_LineCard";
+import { purchaseBoxToPrint, type BoxActions, type BoxTarget } from "./_SectionEditor";
 import { printLabels } from "./_labelPrint";
+import { inwardWarehouseChoices, lockedWarehouse } from "./_warehouses";
 import { SendIntimationModal } from "../_SendIntimationModal";
 
 function matchKey(s: string | null | undefined): string {
@@ -52,7 +53,7 @@ function sectionSeeds(po: PurchasePoDetail, arrivals: ArrivalItem[]): SectionSee
     const lot = [...matches]
       .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
       .find((a) => a.lot_number)?.lot_number ?? "";
-    seeds.push({ line_number: line.line_number, lot_number: lot });
+    seeds.push({ line_number: line.line_number, lot_number: lot, clientKey: newClientKey() });
   }
   return seeds;
 }
@@ -84,6 +85,19 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
   const prefillRef = useRef<Partial<Record<LogisticsField, string>>>({});
   // Pre-seeded sections (per arrived article), re-applied on reset like prefill.
   const seedsRef = useRef<SectionSeed[]>([]);
+  // The full save in flight, if any. Print during Save (or a double click) waits
+  // for it instead of starting a second save that posts the same new sections
+  // again — duplicate boxes and stock.
+  const saveRef = useRef<Promise<void> | null>(null);
+  // A user whose access covers one warehouse books every inward there: fill it
+  // in once the draft and the user's scope are loaded, unless the PO already
+  // has a warehouse saved.
+  const { isAdmin, warehouses } = useUserScope();
+  const lockedSite = lockedWarehouse(isAdmin, warehouses);
+  const needsWarehouse = draft != null && !draft.header.warehouse;
+  useEffect(() => {
+    if (lockedSite && needsWarehouse) dispatch({ type: "setHeader", field: "warehouse", value: lockedSite });
+  }, [lockedSite, needsWarehouse]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -154,6 +168,9 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
     setToast(null);
     try {
       await addBoxes(transactionNo, { sections: [payload] });
+      // Saved — clear the panel now, so a retry after a failed refresh can't
+      // post the same boxes again.
+      dispatch({ type: "clearAddBoxes", key: existingKey(line.line_number, sectionNumber) });
       await refresh();
       setToast({ kind: "ok", text: `Boxes added to Section ${sectionNumber}` });
     } catch (e) {
@@ -166,18 +183,38 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
   // Full save (reference save handler 1180-1406): receive → update existing
   // sections → create new sections, in order. Any step error aborts the rest.
   // No toast/refresh — reused by both Save and the save-then-print flow.
-  async function doFullSave() {
+  // A call while a save is running joins that save instead of starting another.
+  function doFullSave(): Promise<void> {
+    if (!saveRef.current) {
+      saveRef.current = runFullSave().finally(() => {
+        saveRef.current = null;
+      });
+    }
+    return saveRef.current;
+  }
+
+  async function runFullSave() {
     if (!po) return;
     // Header first — it sets the warehouse the box inserts stamp onto inventory
     // batches. Then update existing boxes + add new sections in parallel (they
     // touch disjoint rows).
     await saveReceive(transactionNo, buildReceiveRequest(draft, po));
-    const updates = buildUpdateSections(draft, po);
+    // Existing boxes, plus draft boxes already saved on their own (by box_id).
+    const updates = [...buildUpdateSections(draft, po), ...buildSavedDraftUpdates(draft)];
     const news = buildAddSections(draft, po, Date.now());
-    await Promise.all([
+    const postedIds = postedNewSectionIds(draft, po);
+    const [updated, added] = await Promise.allSettled([
       updates.length > 0 ? updateBoxes(transactionNo, { sections: updates }) : null,
       news.length > 0 ? addBoxes(transactionNo, { sections: news }) : null,
     ]);
+    // The new sections are saved once their POST lands. Drop them from the draft
+    // now, not on refresh, so a retry after a failed update or reload can't post
+    // them again.
+    if (news.length > 0 && added.status === "fulfilled") {
+      dispatch({ type: "dropNewSections", ids: postedIds });
+    }
+    if (updated.status === "rejected") throw updated.reason;
+    if (added.status === "rejected") throw added.reason;
   }
 
   async function handleSave() {
@@ -233,6 +270,122 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
       setPrinting(null);
     }
   }
+
+  // ── One box at a time: a box row's print, Update and Delete ────────────────
+  // Each acts on that box only. A box not saved yet is created on the PO
+  // (POST /{txn}/box: the first box of a draft section makes the section, later
+  // ones join it); a saved box is updated by its box_id (PUT /{txn}/box/{id}).
+  // Either way the reply carries the box_id the label's QR needs. Nothing else on
+  // the page is saved and the draft is not reloaded, so unsaved work stays.
+  async function saveOneBox(t: BoxTarget): Promise<{ box: SavedBox; created: boolean }> {
+    if (t.kind === "existing") return updateOneBox(transactionNo, t.boxId, boxApiFields(t.row));
+    const fields = boxApiFields(t.box);
+    if (t.box.box_id) return updateOneBox(transactionNo, t.box.box_id, fields);
+    // A new box's stock is booked to the PO's warehouse: save the one picked here first.
+    const warehouse = draft.header.warehouse.trim();
+    if (warehouse && warehouse !== (po?.warehouse ?? "")) {
+      await saveReceive(transactionNo, { header: { warehouse }, lines: [] });
+      setPo((p) => (p ? { ...p, warehouse } : p));
+    }
+    if (t.kind === "panel") {
+      const r = await createOneBox(transactionNo, {
+        line_number: t.line.line_number, section_number: t.sectionNumber,
+        box_number: t.box.box_number, client_key: t.box.key, ...fields,
+      });
+      dispatch({ type: "addBoxSaved", key: t.key, boxIndex: t.index, boxId: r.box.box_id });
+      return r;
+    }
+    const s = t.section;
+    const r = await createOneBox(transactionNo, {
+      line_number: t.line.line_number,
+      section_number: s.section_number,
+      section_key: s.clientKey,
+      section: { lot_number: s.lot_number || null, manufacturing_date: s.mfg_date || null, expiry_date: s.exp_date || null },
+      box_number: t.box.box_number,
+      client_key: t.box.key,
+      ...fields,
+      lot_number: fields.lot_number ?? (s.lot_number || null),
+    });
+    dispatch({ type: "newBoxSaved", id: s.id, boxIndex: t.index, boxId: r.box.box_id, sectionNumber: r.box.section_number });
+    return r;
+  }
+
+  function boxNumberOf(t: BoxTarget): number {
+    return t.kind === "existing" ? t.row.box_number : t.box.box_number;
+  }
+
+  async function handlePrintBox(t: BoxTarget) {
+    if (!po) return;
+    setToast(null);
+    setPrinting({ label: `Saving box ${boxNumberOf(t)}…`, done: 0, total: 0 });
+    try {
+      const { box } = await saveOneBox(t);
+      setPrinting({ label: "Rendering label…", done: 0, total: 1 });
+      await printLabels({
+        entity: po.entity,
+        transaction_no: po.transaction_no,
+        boxes: [purchaseBoxToPrint(box, t.line, box.section_number)],
+        onProgress: (done, total) => setPrinting({ label: "Rendering label…", done, total }),
+      });
+      setPrintedIds((prev) => new Set([...prev, box.box_id]));
+      setToast({ kind: "ok", text: `Box ${box.box_number} saved & sent to print.` });
+    } catch (e) {
+      setToast({ kind: "err", text: e instanceof Error ? e.message : "Save / print failed" });
+    } finally {
+      setPrinting(null);
+    }
+  }
+
+  async function handleSaveBox(t: BoxTarget) {
+    setToast(null);
+    setPrinting({ label: `Saving box ${boxNumberOf(t)}…`, done: 0, total: 0 });
+    try {
+      const { box, created } = await saveOneBox(t);
+      setToast({ kind: "ok", text: `Box ${box.box_number} ${created ? "saved" : "updated"}.` });
+    } catch (e) {
+      setToast({ kind: "err", text: e instanceof Error ? e.message : "Failed to save the box" });
+    } finally {
+      setPrinting(null);
+    }
+  }
+
+  async function handleDeleteBox(t: BoxTarget): Promise<boolean> {
+    const n = boxNumberOf(t);
+    const boxId = t.kind === "existing" ? t.boxId : t.box.box_id;
+    const ok = window.confirm(
+      boxId
+        ? `Delete box ${n}? Only this box is removed (its stock is written off); no other box changes.`
+        : `Remove box ${n} from this draft? It hasn't been saved; the other boxes keep their numbers.`,
+    );
+    if (!ok) return false;
+    setToast(null);
+    if (boxId) {
+      setPrinting({ label: `Deleting box ${n}…`, done: 0, total: 0 });
+      try {
+        await deleteOneBox(transactionNo, boxId);
+      } catch (e) {
+        setToast({ kind: "err", text: e instanceof Error ? e.message : "Failed to delete the box" });
+        return false;
+      } finally {
+        setPrinting(null);
+      }
+    }
+    if (t.kind === "existing") {
+      dispatch({ type: "forgetExistingBox", key: existingKey(t.line.line_number, t.sectionNumber), boxId: t.boxId });
+    } else if (t.kind === "panel") {
+      dispatch({ type: "removeAddBox", key: t.key, boxIndex: t.index });
+    } else {
+      dispatch({ type: "removeNewBox", id: t.section.id, boxIndex: t.index });
+    }
+    setToast({ kind: "ok", text: boxId ? `Box ${n} deleted.` : `Box ${n} removed from the draft.` });
+    return true;
+  }
+
+  const boxActions: BoxActions = {
+    print: (t) => void handlePrintBox(t),
+    save: (t) => void handleSaveBox(t),
+    remove: handleDeleteBox,
+  };
 
   if (loading) return <Shell><Centered>Loading Purchase Order…</Centered></Shell>;
   if (error) return <Shell><Centered tone="err">{error}</Centered></Shell>;
@@ -297,6 +450,7 @@ export function InwardEntry({ transactionNo }: { transactionNo: string }): React
               busy={busy}
               onPrint={handlePrint}
               printedIds={printedIds}
+              boxActions={boxActions}
             />
           ))
         )}
@@ -394,14 +548,6 @@ function Centered({ children, tone }: { children: React.ReactNode; tone?: "err" 
   );
 }
 
-// Physical warehouses the inward can be booked to. The Warehouse dropdown is
-// filtered to the warehouses the signed-in user is scoped to (admins see all);
-// the access match is format-insensitive via normaliseWarehouseCode
-// ("W-202" === "W202", "Savla D-34" === "SAVLAD34").
-const WAREHOUSE_OPTIONS = [
-  "W202", "A185", "A68", "F53", "A101", "Savla D-34", "Savla D-514", "Rishi", "Supreme", "Eskimo",
-];
-
 // Logistics & Receiving form — 12 Stores-owned fields (reference index.html 146-202).
 const LOGISTICS_DEFS: { field: LogisticsField; label: string; placeholder: string; type?: string; mono?: boolean }[] = [
   { field: "customer_party_name", label: "Customer / Party", placeholder: "Buyer party name" },
@@ -426,16 +572,14 @@ function LogisticsForm({
   dispatch: React.Dispatch<InwardAction>;
 }) {
   const { isAdmin, warehouses } = useUserScope();
-  // Warehouses this user may book to (admins see all). Keep an already-saved
-  // value selectable even if it now falls outside the user's scope.
-  const scopedWarehouses = isAdmin
-    ? WAREHOUSE_OPTIONS
-    : WAREHOUSE_OPTIONS.filter((w) => userHasWarehouse(warehouses, w));
-  const currentWh = (header.warehouse ?? "").trim();
-  const allowedWarehouses =
-    currentWh && !scopedWarehouses.some((w) => normaliseWarehouseCode(w) === normaliseWarehouseCode(currentWh))
-      ? [currentWh, ...scopedWarehouses]
-      : scopedWarehouses;
+  // Warehouses and cold stores this user may book to (admins see all), from
+  // the site table. Keep an already-saved value selectable even if it now
+  // falls outside the user's scope; a saved spelling of a listed site shows
+  // as that site (_warehouses.ts).
+  const warehouseChoice = inwardWarehouseChoices(header.warehouse, isAdmin, warehouses);
+  // Access to one warehouse: shown fixed, no dropdown (the page fills it in).
+  // Access to several, or an admin: the dropdown of those sites.
+  const lockedSite = lockedWarehouse(isAdmin, warehouses);
   return (
     <div className="bg-white border border-[var(--aws-border)] rounded-md p-4 mb-4">
       <div className="mb-3">
@@ -447,16 +591,30 @@ function LogisticsForm({
           const id = `mi-recv-${d.field}`;
           return (
             <div key={d.field} className="flex flex-col gap-1">
-              <label htmlFor={id} className="text-[11px] font-semibold text-[var(--text-primary)]">{d.label}</label>
-              {d.field === "warehouse" ? (
+              <label htmlFor={id} className="text-[11px] font-semibold text-[var(--text-primary)]">
+                {d.label}
+                {d.field === "warehouse" && lockedSite ? (
+                  <span className="font-normal text-[var(--text-muted)]"> · from your access</span>
+                ) : null}
+              </label>
+              {d.field === "warehouse" && lockedSite ? (
+                <input
+                  id={id}
+                  type="text"
+                  readOnly
+                  value={warehouseChoice.value || lockedSite}
+                  title="Set by your warehouse access"
+                  className="h-8 px-2 text-[13px] rounded-[2px] bg-[var(--surface-subtle)] border border-[var(--aws-border)] text-[var(--text-primary)] font-mono cursor-not-allowed outline-none"
+                />
+              ) : d.field === "warehouse" ? (
                 <select
                   id={id}
-                  value={header[d.field] ?? ""}
+                  value={warehouseChoice.value}
                   onChange={(e) => dispatch({ type: "setHeader", field: d.field, value: e.target.value })}
                   className="h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] font-mono"
                 >
                   <option value="">Select warehouse…</option>
-                  {allowedWarehouses.map((w) => (
+                  {warehouseChoice.options.map((w) => (
                     <option key={w} value={w}>{w}</option>
                   ))}
                 </select>
@@ -498,6 +656,7 @@ function SummaryGrid({ po }: { po: PurchasePoDetail }) {
       {cell("Voucher Type", po.voucher_type || "—")}
       {cell("Lines", fmtNum(po.total_lines), true)}
       {cell("Status", po.status || "pending")}
+      <div className="col-span-2 md:col-span-5">{cell("Consignee Address", po.consignee_address || "—")}</div>
     </div>
   );
 }

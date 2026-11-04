@@ -197,7 +197,10 @@ export const MODULES: ModuleItem[] = [
     stat: "PO Creation & Receiving",
     route: "purchase",
     implemented: true,
-    adminOnly: true,
+    // Admins; purchase_manager and store_head through ROLE_MODULE_SCOPE; and
+    // inventory_manager (an unscoped role, so it is listed here) for Material
+    // In. The landing page shows each sub-tile only with its permission.
+    allowedRoles: ["inventory_manager"],
     Icon: PurchaseIcon,
   },
   {
@@ -262,7 +265,7 @@ export const MODULES: ModuleItem[] = [
     route: "transfer",
     implemented: true,
     // Admins, plus inventory managers, who approve transfer requests before anything is
-    // scanned (transfer.requests.approve, backend migration 119), and their substitutes
+    // scanned (transfer.requests.approve, backend migration 121), and their substitutes
     // (inventory_manager_substitute, migration 120). Both are unscoped roles, so this is
     // allowedRoles (not ROLE_MODULE_SCOPE): a scope entry would hide every other tile
     // from a senior user given the substitute role on top of their own. The page itself
@@ -406,8 +409,8 @@ export const ROLE_MODULE_SCOPE: Record<string, string[]> = {
   // the same requests under Stores → Production Indents (table + request report).
   // That sub-route key also shows the Stores tile, overriding its adminOnly flag.
   // …plus Inter-Unit Transfer: the store team of the warehouse a request asks stock FROM
-  // accepts or holds it, and scans and sends it once an inventory manager has approved
-  // it — backend transfer.requests.accept (migration 119). The page gate checks that.
+  // accepts or rejects it, and scans and sends it once an inventory manager has approved
+  // it — backend transfer.requests.accept (migration 121). The page gate checks that.
   store_head:    ["purchase/material-in", "production/floor-requisitions", "stores/production-indents", "transfer"],
   // Scoped production roles. Keys are either a top-level module route
   // ("job-card") or a "<module>/<sub>" sub-route for finer gating WITHIN a

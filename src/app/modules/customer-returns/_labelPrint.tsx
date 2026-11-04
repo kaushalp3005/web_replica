@@ -11,6 +11,7 @@
 
 import { renderToStaticMarkup } from "react-dom/server";
 import { QRCodeSVG } from "qrcode.react";
+import { fmtCrLabelDate } from "./_dates";
 
 export interface CrLabelBox {
   box_id?: string | null;
@@ -47,16 +48,6 @@ function wt(v: string | null | undefined): string {
   return s === "" ? "—" : `${s}kg`;
 }
 
-function fmtDate(v: string | null | undefined): string {
-  if (!v) {
-    const d = new Date();
-    return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getFullYear()).slice(-2)}`;
-  }
-  const d = new Date(v);
-  if (isNaN(d.getTime())) return "";
-  return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getFullYear()).slice(-2)}`;
-}
-
 function renderLabel(job: CrLabelJob, box: CrLabelBox): string {
   const boxId = box.box_id ?? "";
   const qrSvg = boxId
@@ -80,7 +71,9 @@ function renderLabel(job: CrLabelJob, box: CrLabelBox): string {
     `<div class="metrics">Box #${escapeHtml(box.box_number)} · Net: ${escapeHtml(wt(box.net_weight))} | Gross: ${escapeHtml(wt(box.gross_weight))}</div>` +
     (countLine ? `<div class="metrics">${countLine}</div>` : "") +
     `<div class="lot">Lot: ${lot}</div>` +
-    `<div class="date">Date: ${escapeHtml(fmtDate(job.rtvDate))}</div>` +
+    // DD/MM/YY of the CR's IST day (today in IST while the CR has no date yet), so a
+    // reprinted label says the same day as the first print and the CR id.
+    `<div class="date">Date: ${escapeHtml(fmtCrLabelDate(job.rtvDate))}</div>` +
     `</div>` +
     `</div>`
   );

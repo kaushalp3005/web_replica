@@ -23,6 +23,7 @@ import {
   FormSection, BillingFields, billingError, billingPayload, EMPTY_BILLING, type BillingValue,
   TargetArticlesEditor, targetsValid, targetsPayload, EMPTY_TARGET, type TargetRow,
 } from "../sample/_form";
+import { dispatchDateError, todayLocalISO } from "@/lib/npd-link";
 
 const PURPOSE_OPTIONS: { value: PurposeTag; label: string }[] = [
   { value: "CUSTOMER_DISPLAY", label: "Customer display" },
@@ -136,8 +137,9 @@ export function NpdSampleForm({ defaultType, heading }: {
   const bhIsPoc = typeof reqUserId === "number" && reqUserId > 0 && reqUserId === effectivePocId;
 
   // Mandatory: ≥1 target (name + pcs>0 + weight>0), warehouse, company, customer.
+  const dateErr = dispatchDateError(expectedDispatch);
   const canSave =
-    !!warehouse && targetsValid(targets) &&
+    !!warehouse && targetsValid(targets) && !dateErr &&
     companyName.trim() !== "" && customerName.trim() !== "" && !billingError(billing) &&
     requestorTeam.trim() !== "";   // a business head must always be chosen
 
@@ -312,7 +314,8 @@ export function NpdSampleForm({ defaultType, heading }: {
             </div>
             <div>
               <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Expected dispatch date <span className="text-[11px] font-normal text-[var(--text-muted)]">(by BD team)</span></label>
-              <input className="form-input" type="date" value={expectedDispatch} onChange={(e) => setExpectedDispatch(e.target.value)} />
+              <input className="form-input" type="date" min={todayLocalISO()} value={expectedDispatch} onChange={(e) => setExpectedDispatch(e.target.value)} />
+              {dateErr && <p className="mt-1 text-[12px] text-[var(--aws-error)]">{dateErr}</p>}
             </div>
             <div className="sm:col-span-2">
               <label className="block text-[12px] font-medium text-[var(--text-secondary)] mb-1.5">Customer ship-to address</label>

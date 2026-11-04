@@ -241,6 +241,9 @@ export function toBulkItems(boxes: CRBoxForm[], uomFor: (article: string) => str
   return boxes.map((b) => ({
     article_description: b.article_description,
     box_number: b.box_number,
+    // The label this page knows the box has: the server refuses the save if its stored
+    // label differs (printed elsewhere, or a number reused), instead of overwriting.
+    box_id: b.box_id || undefined,
     uom: uomFor(b.article_description) || undefined,
     conversion: b.conversion || undefined,
     lot_number: b.lot_number || undefined,

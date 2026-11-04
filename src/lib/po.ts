@@ -9,13 +9,15 @@ import * as XLSX from "xlsx-js-style";
 export interface PoListItem {
   transaction_no: string;
   entity: string;
-  status?: string | null; // pending | partially received | extra received
+  status?: string | null; // pending | partially received | fully received | extra received
   po_number?: string | null;
   po_date?: string | null;
   voucher_type?: string | null;
   order_reference_no?: string | null;
   narration?: string | null;
   vendor_supplier_name?: string | null;
+  consignee_address?: string | null;
+  consignee_site?: string | null; // plant the address is for: W202, A185, A68
   supplier_id?: string | null;
   gross_total?: number | null;
   total_amount?: number | null;
@@ -84,6 +86,7 @@ export interface PreviewHeader {
   order_reference_no?: string | null;
   narration?: string | null;
   vendor_supplier_name?: string | null;
+  consignee_address?: string | null;
   supplier_id?: string | null;
   gross_total?: number | null;
   total_amount?: number | null;
@@ -154,13 +157,15 @@ export interface PoListQuery {
   vendor_supplier_name_contains?: string;
   order_reference_no_contains?: string;
   narration_contains?: string;
+  consignee_address_contains?: string;
   supplier_id?: string;
   voucher_type?: string;
   po_date_from?: string;
   po_date_to?: string;
-  // Material In dashboard section partition (server-side today/pending/completed).
-  section?: "today" | "pending" | "completed";
-  today_date?: string; // client local YYYY-MM-DD, defines the "today" boundary
+  // Material In dashboard section partition (server-side site/pending/completed).
+  section?: "site" | "today" | "pending" | "completed";
+  site?: string;       // consignee sites for the site section, comma-separated ("W202,A185")
+  today_date?: string; // older date partition: client local YYYY-MM-DD for "today"
 }
 
 function toQuery(q: PoListQuery): string {
@@ -211,6 +216,85 @@ export async function commitPo(body: { entity: string; mode: CommitMode; pos: Co
   return res.json();
 }
 
+// ── Batched commit ──────────────────────────────────────────────────────────
+// A whole PO Book (2,500+ POs) in one /commit body is over the proxy's request
+// size limit (HTTP 413) and would outlast its timeout too. The server commits
+// each PO in its own transaction, so the selection goes in batches.
+export const COMMIT_BATCH_POS = 100;
+const COMMIT_BATCH_BYTES = 500_000;
+
+// What /commit reads of a preview PO (po_commit.commit): header, lines and the
+// keys -- not the preview's echo of the header, the existing PO, the diff, the
+// warnings, or each line's matched master row.
+export function commitPayload(po: CommitPo): CommitPo {
+  const lines = (po.lines ?? []).map((l) => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { matched_item, ...rest } = l as Record<string, unknown>;
+    return rest;
+  });
+  return { duplicate_key: po.duplicate_key ?? null, transaction_no: po.transaction_no ?? null, header: po.header, lines };
+}
+
+// Consecutive batches of at most `maxPos` POs and about `maxBytes` of JSON
+// (one PO bigger than that still goes, alone).
+export function commitBatches(pos: CommitPo[], maxPos = COMMIT_BATCH_POS, maxBytes = COMMIT_BATCH_BYTES): CommitPo[][] {
+  const out: CommitPo[][] = [];
+  let cur: CommitPo[] = [];
+  let bytes = 0;
+  for (const po of pos) {
+    const size = JSON.stringify(po).length;
+    if (cur.length > 0 && (cur.length >= maxPos || bytes + size > maxBytes)) {
+      out.push(cur);
+      cur = [];
+      bytes = 0;
+    }
+    cur.push(po);
+    bytes += size;
+  }
+  if (cur.length > 0) out.push(cur);
+  return out;
+}
+
+// A batch failed after earlier ones went through: what they committed, and the
+// duplicate_keys of their POs, so the page can leave those out of a retry.
+export class CommitBatchError extends Error {
+  constructor(message: string, readonly partial: CommitResponse, readonly committedKeys: string[]) {
+    super(message);
+  }
+}
+
+export async function commitPoInBatches(
+  body: { entity: string; mode: CommitMode; pos: CommitPo[] },
+  onProgress?: (done: number, total: number) => void,
+): Promise<CommitResponse> {
+  const out: CommitResponse = { created: [], updated: [], skipped_duplicates: [], skipped_missing: [], errors: [] };
+  const committed: string[] = [];
+  const total = body.pos.length;
+  let done = 0;
+  for (const batch of commitBatches(body.pos.map(commitPayload))) {
+    let r: CommitResponse;
+    try {
+      r = await commitPo({ ...body, pos: batch });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Commit failed";
+      throw new CommitBatchError(
+        done > 0 ? `${msg} — ${done} of ${total} POs were committed before it; Retry commits the rest.` : msg,
+        out,
+        committed,
+      );
+    }
+    out.created.push(...r.created);
+    out.updated.push(...r.updated);
+    out.skipped_duplicates.push(...r.skipped_duplicates);
+    out.skipped_missing.push(...r.skipped_missing);
+    out.errors.push(...r.errors);
+    for (const p of batch) if (p.duplicate_key) committed.push(p.duplicate_key);
+    done += batch.length;
+    onProgress?.(done, total);
+  }
+  return out;
+}
+
 export async function listPos(q: PoListQuery, signal?: AbortSignal): Promise<PoListResponse> {
   const res = await apiFetch(`/api/v1/po?${toQuery(q)}`, { signal });
   if (!res.ok) throw new Error(await readError(res, "Failed to load POs"));
@@ -240,8 +324,9 @@ export interface ReceiptLine {
 export interface ReceiptSummary {
   transaction_no: string;
   entity?: string | null;
+  consignee_address?: string | null;
   completed: boolean; // received qty fully matches ordered on weight + count
-  status?: string; // pending | partially received | extra received
+  status?: string; // pending | partially received | fully received | extra received
   total_lines: number;
   lines: ReceiptLine[];
 }
@@ -354,6 +439,7 @@ export const PO_EXPORT_COLUMNS: { key: keyof PoListItem; label: string }[] = [
   { key: "order_reference_no", label: "Order Ref" },
   { key: "narration", label: "Narration" },
   { key: "vendor_supplier_name", label: "Vendor" },
+  { key: "consignee_address", label: "Consignee Address" },
   { key: "supplier_id", label: "Supplier ID" },
   { key: "entity", label: "Entity" },
   { key: "gross_total", label: "Gross Total" },

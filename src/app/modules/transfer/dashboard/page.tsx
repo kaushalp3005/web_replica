@@ -28,6 +28,7 @@ import {
   type SummaryGroup,
 } from "@/lib/transferBuildSummary";
 import { useSessionCache } from "@/lib/session-state";
+import { sameSite } from "@/lib/sites";
 
 const GROUP_DIMS: GroupDim[] = [
   "route", "from_warehouse", "to_warehouse", "status", "item_category", "material_type", "transfer_month", "received_status",
@@ -179,10 +180,12 @@ export default function TransferDashboardPage() {
     loadWindow(cacheKey, from, to);
   }, [windowKey, customFrom, customTo, loadWindow]);
 
-  // cascading filter options (each chip group ignores its own active filter)
+  // cascading filter options (each chip group ignores its own active filter). Sites are
+  // compared as sites (lib/sites), so a chip kept from an older session in another
+  // spelling still picks its site's records.
   const passesExcept = useCallback((r: TransferRecord, exclude: string): boolean => {
-    if (exclude !== "from" && selFrom.length && !selFrom.includes(r.from_warehouse)) return false;
-    if (exclude !== "to" && selTo.length && !selTo.includes(r.to_warehouse)) return false;
+    if (exclude !== "from" && selFrom.length && !selFrom.some((s) => sameSite(s, r.from_warehouse))) return false;
+    if (exclude !== "to" && selTo.length && !selTo.some((s) => sameSite(s, r.to_warehouse))) return false;
     if (exclude !== "status" && selStatus.length && !selStatus.includes(r.status)) return false;
     if (exclude !== "category" && selCategory.length && !selCategory.includes(r.item_category)) return false;
     if (exclude !== "material" && selMaterial.length && !selMaterial.includes(r.material_type)) return false;

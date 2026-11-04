@@ -225,6 +225,7 @@ export function PoListing(props: PoListingProps): React.JSX.Element {
                 <Th sortable col="po_number" sort={sort} onSort={handleSort}>PO Number</Th>
                 <Th sortable col="po_date" sort={sort} onSort={handleSort}>Date</Th>
                 <Th sortable col="vendor_supplier_name" sort={sort} onSort={handleSort}>Vendor</Th>
+                <Th sortable col="consignee_address" sort={sort} onSort={handleSort}>Consignee Address</Th>
                 <Th sortable col="voucher_type" sort={sort} onSort={handleSort}>Voucher</Th>
                 <Th sortable col="order_reference_no" sort={sort} onSort={handleSort}>Order Ref</Th>
                 <Th sortable col="entity" sort={sort} onSort={handleSort}>Entity</Th>
@@ -236,7 +237,7 @@ export function PoListing(props: PoListingProps): React.JSX.Element {
             <tbody>
               {loading && rows.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-3 py-10 text-center text-[var(--text-secondary)]">
+                  <td colSpan={10} className="px-3 py-10 text-center text-[var(--text-secondary)]">
                     <span className="inline-flex items-center gap-2">
                       <span className="inline-block w-4 h-4 border-2 border-[var(--aws-border-strong)] border-t-[var(--aws-orange)] rounded-full animate-spin" />
                       Loading Purchase Orders…
@@ -245,11 +246,11 @@ export function PoListing(props: PoListingProps): React.JSX.Element {
                 </tr>
               ) : error ? (
                 <tr>
-                  <td colSpan={9} className="px-3 py-8 text-center text-[var(--aws-error)] text-[13px]">{error}</td>
+                  <td colSpan={10} className="px-3 py-8 text-center text-[var(--aws-error)] text-[13px]">{error}</td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-3 py-12 text-center text-[var(--text-secondary)]">
+                  <td colSpan={10} className="px-3 py-12 text-center text-[var(--text-secondary)]">
                     <p className="font-semibold text-[14px] mb-1">No Purchase Orders</p>
                     <p className="text-[12px]">No POs match your current filters.</p>
                   </td>
@@ -357,6 +358,7 @@ function PoToolbar({
     query.vendor_supplier_name_contains,
     query.order_reference_no_contains,
     query.narration_contains,
+    query.consignee_address_contains,
     query.supplier_id,
     query.voucher_type,
   ].filter((v) => v && v.length > 0).length;
@@ -503,12 +505,14 @@ const SORTABLE_COLS = [
   "order_reference_no",
   "entity",
   "gross_total",
+  "consignee_address",
 ] as const;
 
 const ADV_FIELDS: { key: keyof PoListQuery; label: string; placeholder: string }[] = [
   { key: "vendor_supplier_name_contains", label: "Vendor name contains", placeholder: "e.g. acme" },
   { key: "order_reference_no_contains",   label: "Order ref contains",   placeholder: "e.g. REF-9912" },
   { key: "narration_contains",            label: "Narration contains",   placeholder: "e.g. urgent" },
+  { key: "consignee_address_contains",    label: "Consignee address contains", placeholder: "e.g. A-185" },
   { key: "supplier_id",                   label: "Supplier ID (exact)",  placeholder: "e.g. 4471" },
   { key: "voucher_type",                  label: "Voucher type (exact)", placeholder: "e.g. PURCH" },
 ];
@@ -910,6 +914,9 @@ function PoTableRow({
         <td className="px-3 py-2 max-w-[220px] truncate" title={row.vendor_supplier_name ?? ""}>
           {row.vendor_supplier_name || "—"}
         </td>
+        <td className="px-3 py-2 max-w-[260px] truncate" title={row.consignee_address ?? ""}>
+          {row.consignee_address || "—"}
+        </td>
         <td className="px-3 py-2 whitespace-nowrap">{row.voucher_type || "—"}</td>
         <td className="px-3 py-2 max-w-[160px] truncate whitespace-nowrap" title={row.order_reference_no ?? ""}>
           {row.order_reference_no || "—"}
@@ -922,7 +929,7 @@ function PoTableRow({
       </tr>
       {isOpen ? (
         <tr className="border-b border-[var(--aws-border)] bg-[var(--surface-subtle)]">
-          <td colSpan={9} className="px-3 py-3" style={{ borderLeft: "3px solid var(--aws-orange)" }}>
+          <td colSpan={10} className="px-3 py-3" style={{ borderLeft: "3px solid var(--aws-orange)" }}>
             <PoDetailPanel key={row.transaction_no} row={row} linesState={linesState} />
           </td>
         </tr>
@@ -1003,6 +1010,7 @@ function PoDetailPanel({
     { label: "Voucher Type",    value: row.voucher_type || "—" },
     { label: "Order Ref",       value: row.order_reference_no || "—" },
     { label: "Vendor",          value: row.vendor_supplier_name || "—" },
+    { label: "Consignee Address", value: row.consignee_address || "—" },
     { label: "Supplier ID",     value: row.supplier_id || "—" },
   ];
 

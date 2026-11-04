@@ -6,6 +6,7 @@
 // color-adjust are explicit. Rendered by dc/[transferId]/page.tsx.
 
 import { useEffect, useMemo } from "react";
+import { displaySite, sameSite, siteAddress } from "@/lib/sites";
 
 interface DCItem {
   item_description?: string | null;
@@ -34,19 +35,6 @@ export interface DeliveryChallanProps {
   isPartial: boolean;
 }
 
-const WAREHOUSE_ADDRESSES: Record<string, { name: string; address: string }> = {
-  W202: { name: "Warehouse W202", address: "W-202, MIDC TTC Industrial area, Khairane, Navi Mumbai, Maharashtra 400710" },
-  A185: { name: "Warehouse A185", address: "A-185, MIDC TTC Industrial area, Khairane, Navi Mumbai, Maharashtra 400709" },
-  A101: { name: "Warehouse A101", address: "A-101, MIDC TTC Industrial area, Khairane, Navi Mumbai, Maharashtra 400709" },
-  A68: { name: "Warehouse A68", address: "A-68, MIDC TTC Industrial area, Khairane, Navi Mumbai, Maharashtra 400709" },
-  F53: { name: "Warehouse F53", address: "F53, APMC Masala Market, Sector 19, Vashi, Navi Mumbai, Maharashtra 400703" },
-  "Savla D-39": { name: "Savla D-39 Cold Storage", address: "Savla D-39, MIDC TTC Industrial area, Khairane, Navi Mumbai, Maharashtra 400709" },
-  "Savla D-514": { name: "Savla D-514 Cold Storage", address: "Savla D-514, MIDC TTC Industrial area, Khairane, Navi Mumbai, Maharashtra 400709" },
-  Rishi: { name: "Rishi Cold Storage", address: "Rishi, MIDC TTC Industrial area, Khairane, Navi Mumbai, Maharashtra 400709" },
-  Supreme: { name: "Supreme Cold Storage", address: "MIDC, Turbhe, Navi Mumbai" },
-  "Cold Storage": { name: "Cold Storage", address: "MIDC TTC Industrial area, Khairane, Navi Mumbai" },
-};
-
 const MAROON = "#8B4049";
 const ITEMS_PER_PAGE = 10;
 
@@ -60,8 +48,11 @@ function isCountable(it: DCItem): boolean {
 function itemCount(it: DCItem): number {
   return isCountable(it) ? num(it.unit_pack_size) * num(it.quantity) : 0;
 }
+// The site's printed name and address from the shared site table (lib/sites), by any of its
+// spellings ("Warehouse A185", "A-185", "D-39", "Supreme Cold", "ESKIMO"). A site with no
+// known address (Savla Bond, or a name the table does not know) prints its name only.
 function warehouseBlock(code: string): { name: string; address: string } {
-  return WAREHOUSE_ADDRESSES[code] || { name: code, address: "" };
+  return { name: displaySite(code) || code, address: siteAddress(code) };
 }
 
 export function DeliveryChallan(props: DeliveryChallanProps) {
@@ -90,7 +81,7 @@ export function DeliveryChallan(props: DeliveryChallanProps) {
     return Array.from(map.values());
   }, [items]);
 
-  const showCount = consolidated.some(isCountable) || /a-?68/i.test(fromWarehouse);
+  const showCount = consolidated.some(isCountable) || sameSite(fromWarehouse, "A68");
   const totalNet = consolidated.reduce((s, it) => s + num(it.net_weight), 0);
   const totalCount = consolidated.reduce((s, it) => s + itemCount(it), 0);
   const totalBoxes = items.length;

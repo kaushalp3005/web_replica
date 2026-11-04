@@ -69,9 +69,9 @@ export function DocumentsTab({
   confirm: Confirm;
 }): React.JSX.Element {
   // Document action gates (UX only — server enforces).
-  const canCreate = useHasPermission("purchase", "vendor", "document", "create");
-  const canUpdate = useHasPermission("purchase", "vendor", "document", "update");
-  const canDelete = useHasPermission("purchase", "vendor", "document", "delete");
+  const canCreate = useHasPermission("vendor", "document", null, "create");
+  const canUpdate = useHasPermission("vendor", "document", null, "update");
+  const canDelete = useHasPermission("vendor", "document", null, "delete");
 
   const [rows, setRows] = useState<DocumentResponse[]>(initial);
   const [typeFilter, setTypeFilter] = useState("");

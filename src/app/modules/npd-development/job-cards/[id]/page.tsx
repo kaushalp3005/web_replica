@@ -16,6 +16,7 @@ import {
   getDevJobCard, replaceDevLines, startDevJobCard, closeDevJobCard, cancelDevJobCard,
   addDevPhase, replacePhaseLines, startDevPhase, completeDevPhase, deleteDevPhase, promoteApproval,
   promoteRejectByEmail, dispatchDevJobCard, replaceDevArticles, updateDevJobCardDetails,
+  linkDevJobCardToRequest,
   type DevJobCard, type DevLine, type DevPhase, type DevPhaseCompleteBody, type PromoteGate,
   type DevArticle, type DevJobCardCloseBody, type DevJobCardDetailsInput, type DevDispatch,
 } from "@/lib/npd-dev";
@@ -24,6 +25,8 @@ import {
   type ArticleDraft, type DraftLine,
 } from "../../_article-editor";
 import { DevJcStatusPill } from "../../../sample/_shared";
+import { listRequisitions, type Requisition } from "@/lib/sample";
+import { linkCandidates, linkLabel, LINKABLE_STATUSES } from "@/lib/npd-link";
 import {
   ArticlePicker, UomSelect,
   BillingFields, billingError, billingPayload, billingFrom, EMPTY_BILLING, type BillingValue,
@@ -398,6 +401,15 @@ export default function DevJobCardDetailPage() {
                 <Field label="Base BOM" value={jc.base_bom_id != null ? `${jc.base_bom_name ? `${jc.base_bom_name} ` : ""}#${jc.base_bom_id}` : "—"} />
                 {jc.source_requisition_id != null && (
                   <>
+                    <div>
+                      <dt className="text-[11px] text-[var(--text-muted)]">Request</dt>
+                      <dd>
+                        <button onClick={() => router.push(`/modules/sample/${jc.source_requisition_id}`)}
+                          className="text-[var(--text-primary)] font-medium tabular-nums underline decoration-dotted underline-offset-2 hover:text-[var(--aws-orange)]">
+                          {jc.source_request_id ?? jc.source_requisition_id}
+                        </button>
+                      </dd>
+                    </div>
                     <Field label="Business head" value={jc.source_requestor_name ?? "—"} />
                     <Field label="Sales POC" value={jc.source_sales_poc_name ?? jc.source_sales_poc_email ?? "—"} />
                   </>
@@ -410,6 +422,13 @@ export default function DevJobCardDetailPage() {
                 <p className="mt-2 text-[12px] text-[var(--aws-error)]">Cancelled — {jc.cancellation_reason}</p>
               )}
             </section>
+
+            {/* A card made from the menu rather than a request's Develop has no request.
+                Linking it lets the request show this card and close once it's dispatched. */}
+            {caps.canNpd && jc.source_requisition_id == null && jc.status !== "CANCELLED" && (
+              <LinkRequestPanel busy={busy}
+                onLink={(reqId) => run(() => linkDevJobCardToRequest(id, reqId))} />
+            )}
 
             {/* Customer & dispatch — editable while DRAFT/IN_DEVELOPMENT (enter/adjust here),
                 else read-only. Set on the requisition by BD and inherited on Develop. */}
@@ -875,6 +894,44 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
 }
 function Field({ label, value }: { label: string; value: string }) {
   return <div><dt className="text-[11px] text-[var(--text-muted)]">{label}</dt><dd className="text-[var(--text-primary)]">{value}</dd></div>;
+}
+
+// Pick the open NPD / customer-trial request this card was developed for. Requests still
+// waiting for a card are listed first; one that already has a card says so.
+function LinkRequestPanel({ busy, onLink }: { busy: boolean; onLink: (requisitionId: number) => void }) {
+  const [options, setOptions] = useState<Requisition[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [choice, setChoice] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    listRequisitions({ sample_types: "NPD,TRIAL", statuses: LINKABLE_STATUSES.join(","), limit: 200 })
+      .then((rows) => { if (!cancelled) setOptions(linkCandidates(rows)); })
+      .catch((e) => { if (!cancelled) setLoadError(e instanceof Error ? e.message : "Couldn't load requests"); });
+    return () => { cancelled = true; };
+  }, []);
+  return (
+    <Card title="Request">
+      <p className="text-[12px] text-[var(--text-muted)] mb-2">
+        Not linked to a request. Link the request this card was developed for: the request then shows
+        this card, and closes itself once the sample has been dispatched.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <select className="form-input !w-auto max-w-full" value={choice} aria-label="Request to link"
+          onChange={(e) => setChoice(e.target.value)}>
+          <option value="">
+            {options == null ? (loadError ? "Couldn't load requests" : "Loading requests…")
+              : options.length ? "Select a request…" : "No open requests"}
+          </option>
+          {(options ?? []).map((r) => <option key={r.id} value={r.id}>{linkLabel(r)}</option>)}
+        </select>
+        <button disabled={busy || !choice} onClick={() => onLink(Number(choice))}
+          className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">
+          {busy ? "Linking…" : "Link request"}
+        </button>
+      </div>
+      {loadError && <p className="mt-1 text-[12px] text-[var(--aws-error)]">{loadError}</p>}
+    </Card>
+  );
 }
 
 // Customer + dispatch planning card — READ-ONLY on the job card. These are set on

@@ -28,6 +28,7 @@ import {
   BillingFields, billingError, billingPayload, billingFrom, type BillingValue,
   TargetArticlesEditor, targetsValid, targetsPayload, EMPTY_TARGET, type TargetRow,
 } from "../_form";
+import { dispatchDateError, todayLocalISO } from "@/lib/npd-link";
 
 type ModalMode =
   | null | "reject" | "cancel" | "gatePass" | "convertFull" | "convertPartial"
@@ -517,9 +518,10 @@ function EditCard({ req, busy, onSave, onCancel }: {
       ? [{ user_id: 0, full_name: currentReq }, ...reqOptions] : reqOptions;
   const billErr = isNpd ? billingError(billing) : null;
   const targetErr = isNpd && !targetsValid(targets) ? "Each target needs a name, pcs and weight (> 0)." : null;
+  const dateErr = dispatchDateError(expectedDispatch, req.expected_dispatch_date);
 
   function save() {
-    if (billErr || targetErr) return;
+    if (billErr || targetErr || dateErr) return;
     onSave({
       warehouse: (warehouse || undefined) as Warehouse | undefined,
       // NPD/TRIAL: replace the target articles; the backend re-mirrors the header from #1.
@@ -586,7 +588,8 @@ function EditCard({ req, busy, onSave, onCancel }: {
         <input className="form-input mt-0.5" value={modeOfTransport} onChange={(e) => setModeOfTransport(e.target.value)} />
       </label>
       <label className="text-[12px] text-[var(--text-secondary)]">Expected dispatch date <span className="text-[var(--text-muted)]">(BD)</span>
-        <input className="form-input mt-0.5" type="date" value={expectedDispatch} onChange={(e) => setExpectedDispatch(e.target.value)} />
+        <input className="form-input mt-0.5" type="date" min={todayLocalISO()} value={expectedDispatch} onChange={(e) => setExpectedDispatch(e.target.value)} />
+        {dateErr && <span className="block mt-1 text-[12px] text-[var(--aws-error)]">{dateErr}</span>}
       </label>
       <label className="text-[12px] text-[var(--text-secondary)] sm:col-span-2">Customer ship-to address
         <textarea className="form-input mt-0.5 min-h-[56px] resize-y" value={shipTo} onChange={(e) => setShipTo(e.target.value)} />
@@ -603,7 +606,7 @@ function EditCard({ req, busy, onSave, onCancel }: {
         <button disabled={busy} onClick={onCancel}
           className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:bg-[var(--surface-subtle)] disabled:opacity-50">Cancel</button>
         <div className="flex-1" />
-        <button disabled={busy || !warehouse || !!billErr} onClick={save}
+        <button disabled={busy || !warehouse || !!billErr || !!dateErr} onClick={save}
           className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium hover:bg-[var(--aws-orange-hover)] disabled:opacity-50">{busy ? "Saving…" : "Save"}</button>
       </div>
     </div>

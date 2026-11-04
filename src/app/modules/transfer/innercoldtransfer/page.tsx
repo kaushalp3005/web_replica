@@ -1,22 +1,33 @@
 "use client";
 
-// Inner Cold Transfer (doc 11) — relabel a lot (old → new) and/or relocate boxes WITHIN
-// cold storage. Not an inter-unit transfer: it mutates the cold-stock tables directly via
-// POST /api/v1/transfer/inner-transfer. Create, or edit (append lines) via ?editChallan=.
-// Reuses the shared ColdStockSearch picker + _formParts Card/Field. Per the reference, the
-// fetched storage-locations list is dead data, so we use the fixed cold-location chips only.
+// Inner Cold Transfer (doc 11) — relabel lots (old → new) INSIDE one cold store. Not an
+// inter-unit transfer: it changes the cold-stock tables directly via POST
+// /api/v1/transfer/inner-transfer. The boxes stay in their store: moving boxes to another
+// cold store has to be an inter-unit transfer, and the server refuses it (409). Each line
+// acts on the lot row the user picked, then on more rows of that row's group at the same
+// store (unit, mark, item, lot and inward), and only on boxes that are at the store by
+// their latest transfer (or were never on one), and on rows without a box id, which no
+// transfer can take. The page caps a line at the lot's cartons and warns when it asks for
+// more boxes than the search counts at the store (its available-here count, which leaves
+// out rows without a box id; the server counts them and refuses the challan, writing
+// nothing, if the boxes are not there). Each line names the cold table of its picked row
+// (cfpl / cdpl: row ids repeat across the two), so one challan may hold both. Deleting the
+// challan (dashboard) undoes it. Create, or edit (append lines) via ?editChallan=. Reuses
+// the shared ColdStockSearch picker + _formParts Card/Field. The stores are the shared site
+// table's cold stores (lib/sites) the user is assigned to; Savla Bond is a store of its own.
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useRequireAuth } from "@/lib/user";
+import { useRequireAuth, useUserScope } from "@/lib/user";
+import { userHasWarehouse } from "@/lib/warehouseScope";
+import { COLD_SITES, canonicalSite, sameSite } from "@/lib/sites";
 import { TransferChrome } from "../_chrome";
 import { Card, Field } from "../_formParts";
 import { ColdStockSearch } from "../_ColdStockSearch";
+import { coldRowSite } from "../_siteRules";
 import { TransferApi, type InnerTransferCreateBody } from "@/lib/transfer";
-import type { ColdStockRecord } from "@/lib/coldStorage";
+import { ColdStorageApi, hasBoxlessRows, type ColdStockRecord } from "@/lib/coldStorage";
 
-const COMPANY = "cfpl";
-const COLD_LOCATIONS = ["Savla Bond", "Savla D-39", "Savla D-514", "Rishi", "Supreme"];
 const REASONS = ["Stock Requirement", "Material Movement", "Inventory Balancing", "Space Management", "Other"];
 
 function todayDMY(): string {
@@ -32,34 +43,54 @@ function num(v: unknown): number {
   const n = typeof v === "number" ? v : parseFloat(String(v ?? ""));
   return Number.isFinite(n) ? n : 0;
 }
+// The most a line on a picked lot row can ask for: the cold table's cartons of its group
+// (the server moves no more); null when not known.
+function lotCartons(r: ColdStockRecord): number | null {
+  return r.net_qty_on_cartons != null ? Math.floor(r.net_qty_on_cartons) : null;
+}
+// How many of its boxes are at the store by their latest transfer: the search's count when
+// it was given the store. null when it wasn't, or when the lot shows rows without a box id,
+// which the count leaves out although they are relabelled too (the server counts them).
+function boxesHere(r: ColdStockRecord): number | null {
+  return typeof r.available_here === "number" && !hasBoxlessRows(r) ? Math.floor(r.available_here) : null;
+}
 
 interface ICTArticle {
   uid: number;
   stockRecordId: number | null;
+  company: string;   // the picked row's cold table (cfpl / cdpl)
+  site: string;      // the picked row's cold store ("" when its unit / location names none)
   itemCategory: string; itemDescription: string;
-  oldLot: string; perBoxWeight: number; availableBoxes: number;
-  quantity: string; newLot: string; newLocation: string;
+  oldLot: string; perBoxWeight: number;
+  maxBoxes: number | null;     // lotCartons: a hard limit
+  boxesHere: number | null;    // boxesHere: asking for more needs a confirmation
+  quantity: string; newLot: string;
 }
 const EMPTY: Omit<ICTArticle, "uid"> = {
-  stockRecordId: null, itemCategory: "", itemDescription: "", oldLot: "",
-  perBoxWeight: 0, availableBoxes: 0, quantity: "0", newLot: "", newLocation: "",
+  stockRecordId: null, company: "", site: "", itemCategory: "", itemDescription: "", oldLot: "",
+  perBoxWeight: 0, maxBoxes: null, boxesHere: null, quantity: "0", newLot: "",
 };
 
 interface TransferEntry {
-  id: number; stockRecordId: number | null; itemCategory: string; itemDescription: string;
-  perBoxWeight: number; quantity: number; oldLot: string; newLot: string; newLocation: string;
+  id: number; stockRecordId: number | null; company: string; itemCategory: string; itemDescription: string;
+  perBoxWeight: number; quantity: number; oldLot: string; newLot: string;
+  newLocation: string;   // saved lines only: an older challan may have moved boxes
   isExisting?: boolean;
 }
 
-function LocationChips({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+// The cold store chips. Selected by site, so a challan stored "Savla D39" shows Savla D-39.
+// `locked`: the store can't change (an edited challan's, or while new lines are listed).
+function StoreChips({ stores, value, onChange, locked }: {
+  stores: readonly string[]; value: string; onChange: (v: string) => void; locked: boolean;
+}) {
   return (
     <div className="flex flex-wrap gap-1.5">
-      {COLD_LOCATIONS.map((loc) => {
-        const sel = value === loc;
+      {stores.map((store) => {
+        const sel = sameSite(value, store);
         return (
-          <button key={loc} type="button" onClick={() => onChange(sel ? "" : loc)}
-            className={`px-2.5 py-1 text-[12px] rounded-full border ${sel ? "bg-[var(--aws-navy)] text-white border-[var(--aws-navy)]" : "border-[var(--aws-border)] text-[var(--text-secondary)] hover:border-[var(--aws-navy)]"}`}>
-            {loc}
+          <button key={store} type="button" disabled={locked} onClick={() => onChange(sel ? "" : store)}
+            className={`px-2.5 py-1 text-[12px] rounded-full border disabled:cursor-default ${locked && !sel ? "opacity-50" : ""} ${sel ? "bg-[var(--aws-navy)] text-white border-[var(--aws-navy)]" : "border-[var(--aws-border)] text-[var(--text-secondary)] hover:border-[var(--aws-navy)]"}`}>
+            {store}
           </button>
         );
       })}
@@ -81,6 +112,16 @@ function InnerColdTransferForm() {
   const searchParams = useSearchParams();
   const editChallan = searchParams.get("editChallan");
   const isEditMode = !!editChallan;
+  // The stores this user may relabel in, as the server's warehouse lock has it: every cold
+  // store for an admin or a user with no warehouse, else the cold stores assigned.
+  const { isAdmin, warehouses: myWarehouses } = useUserScope();
+  const unlocked = isAdmin || myWarehouses.length === 0;
+  const myStores = useMemo(
+    () => (unlocked ? [...COLD_SITES] : COLD_SITES.filter((s) => userHasWarehouse(myWarehouses, s))),
+    [unlocked, myWarehouses]);
+  // An edited challan's store (its lines were applied there), once loaded; "" otherwise.
+  const [challanStore, setChallanStore] = useState("");
+  const stores = challanStore ? [challanStore] : myStores;
 
   // Seeded empty so the initial render is deterministic (genICTNo()/todayDMY() read the
   // wall clock and would mismatch between the SSR render and client hydration). Filled on mount below.
@@ -104,15 +145,19 @@ function InnerColdTransferForm() {
         const d = await TransferApi.getInnerTransfer(editChallan);
         if (off) return;
         setTransferNo(d.challan_no || genICTNo());
+        // The store by its canonical name, so its chip shows selected ("Savla D39" is Savla
+        // D-39); a name that is no cold store is kept, and a store has to be picked.
+        setChallanStore(COLD_SITES.find((s) => sameSite(s, d.from_warehouse)) ?? "");
         setForm({
           transferDate: d.transfer_date || todayDMY(),
-          fromWarehouse: d.from_warehouse || "",
+          fromWarehouse: canonicalSite(d.from_warehouse),
           reason: d.reason_code || "",
           reasonDescription: d.remark || "",
         });
         setEntries(d.lines.map((ln) => ({
           id: nextEntryId.current++,
           stockRecordId: ln.stock_record_id,
+          company: "",
           itemCategory: ln.item_category || "",
           itemDescription: ln.item_description || "",
           perBoxWeight: ln.quantity ? num(ln.net_weight_kg) / ln.quantity : num(ln.net_weight_kg),
@@ -149,24 +194,46 @@ function InnerColdTransferForm() {
   const addArticle = () => { const uid = nextUid.current++; setArticles((as) => [...as, { uid, ...EMPTY }]); };
   const removeArticle = (uid: number) => setArticles((as) => (as.length > 1 ? as.filter((a) => a.uid !== uid) : as));
 
+  // A picked lot row must be at the challan's store (by its unit, else its storage location).
+  // With no store chosen yet, the row's store becomes it.
   const selectStock = (uid: number, r: ColdStockRecord) => {
+    const at = coldRowSite(r);
+    const store = canonicalSite(form.fromWarehouse);
+    if (store && at && !sameSite(at, store)) {
+      setBanner({ type: "error", text: `This lot is at ${at}, not ${store}. An inner cold transfer works inside one cold store; moving boxes to another cold store has to be an inter-unit transfer.` });
+      return;
+    }
+    if (!store && at && !myStores.some((s) => sameSite(s, at))) {
+      setBanner({ type: "error", text: `This lot is at ${at}, which is not one of your cold stores.` });
+      return;
+    }
     setArticles((as) => as.map((a) => (a.uid === uid ? {
       ...a,
       stockRecordId: r.id,
+      company: r.company || "",
+      site: at,
       itemCategory: r.group_name || "",
       itemDescription: r.item_description || "",
       oldLot: r.lot_no ? String(r.lot_no) : "",
       perBoxWeight: num(r.weight_kg),
-      availableBoxes: r.net_qty_on_cartons != null ? Math.ceil(r.net_qty_on_cartons) : 0,
-      quantity: "0", newLot: "", newLocation: "",
+      maxBoxes: lotCartons(r),
+      boxesHere: boxesHere(r),
+      quantity: "0", newLot: "",
     } : a)));
-    // Auto-derive the source location from the picked record if none chosen yet.
-    setForm((f) => {
-      if (f.fromWarehouse) return f;
-      const guess = (r.storage_location || r.unit || "").trim();
-      const match = COLD_LOCATIONS.find((l) => l.toLowerCase() === guess.toLowerCase());
-      return match ? { ...f, fromWarehouse: match } : f;
-    });
+    if (!store && at) {
+      setForm((f) => (f.fromWarehouse ? f : { ...f, fromWarehouse: at }));
+      // The search had no store to count from: ask it again from the store how many of the
+      // lot's boxes are there.
+      ColdStorageApi.searchStoreStocks({ lot_no: r.lot_no || undefined, q: r.item_description || undefined, store: at, limit: 500 })
+        .then((res) => {
+          const same = res.results.find((x) => x.id === r.id && x.company === r.company);
+          const here = same ? boxesHere(same) : null;
+          if (here != null) {
+            setArticles((as) => as.map((a) => (a.uid === uid && a.stockRecordId === r.id && a.company === (r.company || "") ? { ...a, boxesHere: here } : a)));
+          }
+        })
+        .catch(() => { /* no count: the server checks on submit */ });
+    }
     setBanner(null);
   };
 
@@ -174,15 +241,32 @@ function InnerColdTransferForm() {
     if (!a.itemDescription || a.stockRecordId == null) { setBanner({ type: "error", text: "Select a stock lot first." }); return; }
     const qty = Math.floor(num(a.quantity));
     if (qty <= 0) { setBanner({ type: "error", text: "Enter the number of boxes (> 0)." }); return; }
-    if (a.availableBoxes && qty > a.availableBoxes) { setBanner({ type: "error", text: `Only ${a.availableBoxes} boxes available for this lot.` }); return; }
+    const store = canonicalSite(form.fromWarehouse) || "this store";
+    if (a.site && form.fromWarehouse && !sameSite(a.site, form.fromWarehouse)) {
+      setBanner({ type: "error", text: `This lot is at ${a.site}, not ${store}. An inner cold transfer works inside one cold store; moving boxes to another cold store has to be an inter-unit transfer.` });
+      return;
+    }
+    if (a.maxBoxes != null && qty > a.maxBoxes) {
+      setBanner({ type: "error", text: `This lot has ${a.maxBoxes} box(es) in the cold stock at ${store}; ask for ${a.maxBoxes} or fewer.` });
+      return;
+    }
     if (!a.newLot.trim()) { setBanner({ type: "error", text: "New lot number is required." }); return; }
+    // More than the search counts at the store: the others are in transit, received
+    // elsewhere or written off, unless they are rows without a box id, which the count leaves
+    // out. Only the server can tell, so ask before listing the line.
+    if (a.boxesHere != null && qty > a.boxesHere && typeof window !== "undefined" && !window.confirm(
+      `${a.boxesHere > 0 ? `Only ${a.boxesHere} of this lot's boxes are` : "None of this lot's boxes is"} at ${store} `
+      + "by their latest transfer; the rest are in transit, written off as short, or were received at another site, "
+      + "unless they are rows without a box id, which stay here and can be relabelled. "
+      + `List ${qty} anyway? On submit the server checks each box and, if they are not all at ${store}, `
+      + "refuses the challan and changes nothing.")) return;
     const id = nextEntryId.current++;
     setEntries((es) => [...es, {
-      id, stockRecordId: a.stockRecordId, itemCategory: a.itemCategory, itemDescription: a.itemDescription,
-      perBoxWeight: a.perBoxWeight, quantity: qty, oldLot: a.oldLot, newLot: a.newLot.trim(), newLocation: a.newLocation,
+      id, stockRecordId: a.stockRecordId, company: a.company, itemCategory: a.itemCategory, itemDescription: a.itemDescription,
+      perBoxWeight: a.perBoxWeight, quantity: qty, oldLot: a.oldLot, newLot: a.newLot.trim(), newLocation: "",
     }]);
     // Reset the source fields for the next pick on this article.
-    patch(a.uid, { stockRecordId: null, itemCategory: "", itemDescription: "", oldLot: "", perBoxWeight: 0, availableBoxes: 0, quantity: "0", newLot: "", newLocation: "" });
+    patch(a.uid, { stockRecordId: null, company: "", site: "", itemCategory: "", itemDescription: "", oldLot: "", perBoxWeight: 0, maxBoxes: null, boxesHere: null, quantity: "0", newLot: "" });
     setBanner({ type: "success", text: `Staged ${a.itemDescription}: lot ${a.oldLot || "—"} → ${a.newLot.trim()}.` });
   };
 
@@ -190,10 +274,12 @@ function InnerColdTransferForm() {
   const clearNew = () => setEntries((es) => es.filter((e) => e.isExisting));
 
   const newEntries = useMemo(() => entries.filter((e) => !e.isExisting), [entries]);
+  // Only an older challan's saved lines can carry a new location (a move, no longer done).
+  const showLocation = entries.some((e) => !!e.newLocation);
 
   const validate = (): string[] => {
     const e: string[] = [];
-    if (!form.fromWarehouse) e.push("Inner Stock Transfer selection is required");
+    if (!form.fromWarehouse) e.push("Cold store is required");
     if (!form.reason) e.push("Reason is required");
     if (!form.reasonDescription.trim()) e.push("Reason description is required");
     if (!isEditMode && entries.length === 0) e.push("Add at least one transfer entry");
@@ -209,16 +295,18 @@ function InnerColdTransferForm() {
     const toSend = isEditMode ? newEntries : entries;
     if (toSend.length === 0) { setBanner({ type: "error", text: "No new lines to submit." }); return; }
     setSubmitting(true);
+    // The store by its canonical name, each line's picked row with its cold table (the
+    // server reads the row in that table: ids repeat across cfpl and cdpl), and no new
+    // location: the boxes stay in their store.
     const body: InnerTransferCreateBody = {
-      company: COMPANY,
       header: {
-        challan_no: transferNo, transfer_name: form.transferDate, from_warehouse: form.fromWarehouse,
+        challan_no: transferNo, transfer_name: form.transferDate, from_warehouse: canonicalSite(form.fromWarehouse),
         remark: form.reasonDescription || form.reason, reason_code: form.reason, transfer_type: "INNER_COLD",
       },
       lines: toSend.map((en) => ({
-        stock_record_id: en.stockRecordId, item_category: en.itemCategory, item_description: en.itemDescription,
-        net_weight: en.perBoxWeight, quantity: en.quantity, old_lot_number: en.oldLot,
-        new_lot_number: en.newLot, new_storage_location: en.newLocation || null,
+        stock_record_id: en.stockRecordId, company: en.company || null, item_category: en.itemCategory,
+        item_description: en.itemDescription, net_weight: en.perBoxWeight, quantity: en.quantity,
+        old_lot_number: en.oldLot, new_lot_number: en.newLot, new_storage_location: null,
       })),
     };
     try {
@@ -270,7 +358,23 @@ function InnerColdTransferForm() {
               </select>
             </Field>
             <div className="sm:col-span-2">
-              <Field label="Inner Stock Transfer (cold unit)" required><LocationChips value={form.fromWarehouse} onChange={(v) => setForm({ ...form, fromWarehouse: v })} /></Field>
+              <Field label="Cold store" required>
+                {/* Fixed for an edited challan, and while lines are listed (they are for this store). */}
+                <StoreChips stores={stores} value={form.fromWarehouse} locked={!!challanStore || (newEntries.length > 0 && !!form.fromWarehouse)}
+                  onChange={(v) => setForm({ ...form, fromWarehouse: v })} />
+              </Field>
+              {stores.length === 0 && !editLoading ? (
+                <p className="text-[12px] text-rose-700 mt-1.5">
+                  Your account is assigned to {myWarehouses.join(", ")}, which is not a cold store, so it cannot relabel cold stock.
+                </p>
+              ) : (
+                <p className="text-[12px] text-[var(--text-secondary)] mt-1.5">
+                  An inner cold transfer relabels lots inside one cold store, and the boxes stay where they are.
+                  Moving boxes to another cold store has to be an inter-unit transfer (a request, then Scan &amp; send).
+                  {challanStore && ` This challan is at ${challanStore}, so its new lines are too.`}
+                  {!challanStore && newEntries.length > 0 && !!form.fromWarehouse && " The store stays as it is while lines are listed; Clear New to pick another."}
+                </p>
+              )}
             </div>
             <div className="sm:col-span-2">
               <Field label="Reason Description" required><textarea value={form.reasonDescription} onChange={(e) => setForm({ ...form, reasonDescription: e.target.value })}
@@ -286,25 +390,21 @@ function InnerColdTransferForm() {
             className="px-2.5 py-1 text-[12px] border border-[var(--aws-navy)] text-[var(--aws-navy)] rounded-md hover:bg-[var(--aws-navy)] hover:text-white">+ Add Article</button>
         </div>
         {articles.map((a) => (
-          <Card key={a.uid} title="Relabel / relocate a lot" action={articles.length > 1 ? <button type="button" onClick={() => removeArticle(a.uid)} className="text-[12px] text-rose-600 hover:underline">Remove</button> : undefined}>
-            <ColdStockSearch onSelect={(r) => selectStock(a.uid, r)} />
+          <Card key={a.uid} title="Relabel a lot" action={articles.length > 1 ? <button type="button" onClick={() => removeArticle(a.uid)} className="text-[12px] text-rose-600 hover:underline">Remove</button> : undefined}>
+            <ColdStockSearch onSelect={(r) => selectStock(a.uid, r)} fromWarehouse={form.fromWarehouse} storeOnly />
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-3">
               <Field label="Item Category"><input value={a.itemCategory} readOnly className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-[var(--background)]" /></Field>
               <Field label="Item Description"><input value={a.itemDescription} readOnly className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-[var(--background)]" /></Field>
               <Field label="Old Lot Number"><input value={a.oldLot} readOnly className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-[var(--background)] font-mono" /></Field>
               <Field label="Weight / box (kg)"><input value={a.perBoxWeight || 0} readOnly className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-[var(--background)]" /></Field>
-              <Field label={`No. of Boxes${a.availableBoxes ? ` (max ${a.availableBoxes})` : ""}`} required>
+              <Field label={`No. of Boxes${a.maxBoxes != null ? ` (max ${a.maxBoxes}${a.boxesHere != null && a.boxesHere < a.maxBoxes ? `; ${a.boxesHere} at the store by their latest transfer` : ""})` : ""}`} required>
                 <input type="number" step="1" min="0" value={a.quantity} onWheel={(e) => e.currentTarget.blur()}
-                  onChange={(e) => { const n = parseInt(e.target.value, 10) || 0; patch(a.uid, { quantity: String(a.availableBoxes ? Math.min(n, a.availableBoxes) : n) }); }}
+                  onChange={(e) => { const n = parseInt(e.target.value, 10) || 0; patch(a.uid, { quantity: String(a.maxBoxes != null ? Math.min(n, a.maxBoxes) : n) }); }}
                   className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" />
               </Field>
               <Field label="Total Weight (kg)"><input value={(num(a.quantity) * a.perBoxWeight).toFixed(3)} readOnly className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-[var(--background)]" /></Field>
               <Field label="New Lot Number" required><input value={a.newLot} onChange={(e) => patch(a.uid, { newLot: e.target.value })}
                 placeholder="Enter new lot" className="w-full px-2.5 py-1.5 text-[13px] border border-orange-300 rounded-md font-mono" /></Field>
-              <div className="sm:col-span-2 lg:col-span-2">
-                <Field label="New Storage Location (optional)"><LocationChips value={a.newLocation} onChange={(v) => patch(a.uid, { newLocation: v })} /></Field>
-                {a.newLocation && <div className="text-[11px] text-[var(--text-secondary)] mt-1">Will move to: {a.newLocation}</div>}
-              </div>
             </div>
             <div className="mt-3 flex justify-end">
               <button type="button" onClick={() => addToList(a)}
@@ -322,7 +422,8 @@ function InnerColdTransferForm() {
               <table className="w-full text-[12px]">
                 <thead><tr className="text-left text-[var(--text-secondary)] border-b border-[var(--aws-border)]">
                   <th className="py-1.5 pr-2">Item</th><th className="py-1.5 pr-2">Old Lot</th><th className="py-1.5 pr-2">New Lot</th>
-                  <th className="py-1.5 pr-2 text-right">Boxes</th><th className="py-1.5 pr-2 text-right">Total Wt</th><th className="py-1.5 pr-2">New Location</th><th /></tr></thead>
+                  <th className="py-1.5 pr-2 text-right">Boxes</th><th className="py-1.5 pr-2 text-right">Total Wt</th>
+                  {showLocation && <th className="py-1.5 pr-2">New Location</th>}<th /></tr></thead>
                 <tbody>{entries.map((en) => (
                   <tr key={en.id} className="border-b border-[var(--aws-border)]/40">
                     <td className="py-1.5 pr-2 max-w-[200px] truncate" title={en.itemDescription}>{en.itemDescription}{en.isExisting && <span className="ml-1 text-[10px] px-1 rounded bg-gray-100 text-gray-600">saved</span>}</td>
@@ -330,7 +431,7 @@ function InnerColdTransferForm() {
                     <td className="py-1.5 pr-2 font-mono text-orange-600">{en.newLot}</td>
                     <td className="py-1.5 pr-2 text-right">{en.quantity}</td>
                     <td className="py-1.5 pr-2 text-right">{(en.quantity * en.perBoxWeight).toFixed(3)}</td>
-                    <td className="py-1.5 pr-2">{en.newLocation || "—"}</td>
+                    {showLocation && <td className="py-1.5 pr-2">{en.newLocation || "—"}</td>}
                     <td className="py-1.5 text-right">{!en.isExisting && <button type="button" onClick={() => removeEntry(en.id)} className="text-rose-600 hover:underline">✕</button>}</td>
                   </tr>))}</tbody>
               </table>
@@ -340,7 +441,10 @@ function InnerColdTransferForm() {
 
         <Card>
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <span className="text-[12px] text-[var(--text-secondary)]">{isEditMode ? "Edit appends new lines to this challan." : "Relabels the selected cold-stock lots."}</span>
+            <span className="text-[12px] text-[var(--text-secondary)]">
+              {isEditMode ? "Edit appends new lines to this challan." : "Relabels the selected cold-stock lots."}
+              {form.fromWarehouse && ` The boxes stay at ${canonicalSite(form.fromWarehouse)}.`}
+            </span>
             <div className="flex items-center gap-2">
               <button type="button" onClick={() => router.push("/modules/transfer")} className="px-3 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md hover:border-[var(--aws-navy)]">Cancel</button>
               <button type="submit" disabled={submitting || (!isEditMode && entries.length === 0)} className="px-4 py-1.5 text-[13px] rounded-md bg-[var(--aws-navy)] text-white hover:opacity-90 disabled:opacity-50">

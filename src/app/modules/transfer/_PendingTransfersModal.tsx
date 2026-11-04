@@ -1,22 +1,41 @@
 "use client";
 
 // In-transit ("Pending Stock") modal. Mirrors components/transfer/
-// PendingTransfersModal.tsx: portal to <body>, ESC + backdrop close, auto-sync
-// on open (gracefully tolerates a failed backfill — banners + still loads the
-// list), totals bar, warehouse chips, and a gated Cancel action per row.
+// PendingTransfersModal.tsx: portal to <body>, ESC + backdrop close, totals bar,
+// warehouse chips, and a gated Cancel action per row. Opening it only reads the list;
+// the sync (backfill) runs on demand, from its "Sync in-transit records" button (the
+// users who may cancel), and says what it did.
+// Record only: the list is the transfer module's own in-transit records. The sync
+// only adds missing ones for dispatched transfers (not for boxes that went on since or
+// that IMS took in), and Cancel deletes the transfer and its in-transit rows (freeing
+// its boxes for another transfer); neither changes the stock tables, which IMS keeps.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  TransferApi, type PendingTransferRecord, type PendingStockResponse,
+  TransferApi, type BackfillResult, type PendingTransferRecord, type PendingStockResponse,
 } from "@/lib/transfer";
+import { canonicalSite, sameSite } from "@/lib/sites";
 import { ChallanHoverCard } from "./_ChallanHoverCard";
 import { transferHoverData } from "./_hoverData";
+import { GRID_TABLE } from "./_grid";
+import { siteOptions } from "./_siteRules";
 
 function fmtDate(s?: string | null): string {
   if (!s) return "—";
   const d = new Date(s);
   return Number.isNaN(d.getTime()) ? s : d.toLocaleDateString();
+}
+
+// What a sync did, in a line.
+function syncSummary(r: BackfillResult): string {
+  if (r.error) return `Sync did not run: ${r.error}.`;
+  const parked = (r.boxes_parked_from_cold ?? 0) + (r.boxes_parked_from_warehouse ?? 0) + (r.boxes_parked_without_source ?? 0);
+  const skipped = [
+    r.boxes_skipped_sent_on ? `${r.boxes_skipped_sent_on} went on on a newer transfer` : "",
+    r.boxes_skipped_received ? `${r.boxes_skipped_received} were received in IMS` : "",
+  ].filter(Boolean).join(", ");
+  return `Sync done: ${parked} box(es) recorded in transit${skipped ? `; not recorded: ${skipped}` : ""}.`;
 }
 
 export function PendingTransfersModal({
@@ -32,6 +51,7 @@ export function PendingTransfersModal({
   const [search, setSearch] = useState("");
   const [fromChip, setFromChip] = useState<string | null>(null);
   const [toChip, setToChip] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
   const justOpened = useRef(false);
 
   const loadData = useCallback(async () => {
@@ -46,26 +66,30 @@ export function PendingTransfersModal({
     }
   }, []);
 
-  // On open: auto-sync (backfill) then always reload. A failed sync is
-  // non-fatal — banner it and load the list anyway (doc §12).
+  // On open: load the list (read only; the sync is the button below).
   useEffect(() => {
     if (!open || justOpened.current) return;
     justOpened.current = true;
-    queueMicrotask(async () => {
-      if (canCancel) {
-        try {
-          await TransferApi.backfillPendingStock();
-          setBanner(null);
-        } catch {
-          setBanner("Sync failed — refreshing data anyway…");
-        }
-      }
-      await loadData();
-    });
-  }, [open, canCancel, loadData]);
+    queueMicrotask(() => { setBanner(null); void loadData(); });
+  }, [open, loadData]);
 
-  // Reset the one-shot sync guard when the modal closes.
+  // Reset the one-shot load guard when the modal closes.
   useEffect(() => { if (!open) justOpened.current = false; }, [open]);
+
+  // On demand: record in-transit rows for dispatched transfers that have none, copying
+  // their boxes' details (stock is not changed), then reload. A failed sync is non-fatal
+  // — banner it and load the list anyway (doc §12).
+  const onSync = async () => {
+    setSyncing(true);
+    try {
+      setBanner(syncSummary(await TransferApi.backfillPendingStock()));
+    } catch (e) {
+      setBanner(`Sync failed (${e instanceof Error ? e.message : "error"}) — refreshing data anyway…`);
+    } finally {
+      setSyncing(false);
+    }
+    await loadData();
+  };
 
   // ESC to close.
   useEffect(() => {
@@ -76,7 +100,7 @@ export function PendingTransfersModal({
   }, [open, onClose]);
 
   const onCancelTransfer = async (rec: PendingTransferRecord) => {
-    if (typeof window !== "undefined" && !window.confirm(`Cancel transfer ${rec.transfer_out_challan_no}? Boxes return to source.`)) return;
+    if (typeof window !== "undefined" && !window.confirm(`Cancel transfer ${rec.transfer_out_challan_no}? The transfer is deleted and its boxes come off the in-transit list, free to go on another transfer; if it was sent from a request, the request goes back to Ready to Send. Stock is not changed here.`)) return;
     try {
       await TransferApi.deleteTransfer(rec.transfer_out_id);
       await loadData();
@@ -87,15 +111,17 @@ export function PendingTransfersModal({
 
   if (!open || typeof document === "undefined") return null;
 
+  // Chips and rows are compared as sites (lib/sites): "A-185" and "A185", or "ESKIMO" and
+  // "Eskimo", are one chip, and it picks every row of that site.
   const records = (data?.records ?? []).filter((r) =>
     (!search || r.transfer_out_challan_no.toLowerCase().includes(search.toLowerCase())) &&
-    (!fromChip || r.from_site === fromChip) &&
-    (!toChip || r.to_site === toChip)
+    (!fromChip || sameSite(r.from_site, fromChip)) &&
+    (!toChip || sameSite(r.to_site, toChip))
   );
   const totalBoxes = records.reduce((s, r) => s + (r.total_boxes || 0), 0);
   const totalKg = records.reduce((s, r) => s + (r.total_kg || 0), 0);
-  const fromChips = data?.filter_options.from_sites ?? [];
-  const toChips = data?.filter_options.to_sites ?? [];
+  const fromChips = siteOptions(data?.filter_options.from_sites ?? []);
+  const toChips = siteOptions(data?.filter_options.to_sites ?? []);
 
   return createPortal(
     <div className="fixed inset-0 z-40 flex items-start justify-center bg-black/40 p-4 overflow-auto"
@@ -118,6 +144,13 @@ export function PendingTransfersModal({
             <button onClick={() => { setSearch(""); setFromChip(null); setToChip(null); }}
               className="text-[11px] underline text-[var(--text-secondary)]">Clear filters</button>
           )}
+          {canCancel && (
+            <button onClick={() => void onSync()} disabled={syncing || loading}
+              title="Record in-transit rows for dispatched transfers that have none"
+              className="ml-auto px-2 py-1 text-[11px] border border-[var(--aws-border)] rounded hover:border-[var(--aws-navy)] disabled:opacity-50">
+              {syncing ? "Syncing…" : "Sync in-transit records"}
+            </button>
+          )}
         </div>
 
         {/* Totals */}
@@ -133,7 +166,7 @@ export function PendingTransfersModal({
           ) : records.length === 0 ? (
             <div className="py-8 text-center text-[13px] text-[var(--text-secondary)]">No in-transit transfers.</div>
           ) : (
-            <table className="w-full text-[12px]">
+            <table className={GRID_TABLE}>
               <thead><tr className="text-left text-[var(--text-secondary)] border-b border-[var(--aws-border)]">
                 <th className="py-2">Date</th><th>Challan</th><th>From → To</th><th>Boxes</th><th>Cartons</th><th>Weight</th><th>Dispatched By</th><th>Status</th><th></th>
               </tr></thead>
@@ -148,11 +181,11 @@ export function PendingTransfersModal({
                     <td>
                       <ChallanHoverCard
                         label={r.transfer_out_challan_no}
-                        from={r.from_site} to={r.to_site}
+                        from={canonicalSite(r.from_site)} to={canonicalSite(r.to_site)}
                         fetchLines={() => TransferApi.getTransfer(r.transfer_out_id).then(transferHoverData)}
                       />
                     </td>
-                    <td>{r.from_site} → {r.to_site}
+                    <td>{canonicalSite(r.from_site)} → {canonicalSite(r.to_site)}
                       <div className="text-[10px] text-[var(--text-secondary)]">{r.from_storage_type} → {r.to_storage_type}</div>
                     </td>
                     <td>{r.total_boxes}{r.unallocated_boxes ? <span className="ml-1 text-rose-600">({r.unallocated_boxes} short)</span> : null}</td>
@@ -160,8 +193,11 @@ export function PendingTransfersModal({
                     <td>{r.total_kg.toFixed(1)}</td>
                     <td>{r.dispatched_by}</td>
                     <td>
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${r.header_status === "Partial" ? "bg-amber-100 text-amber-800" : "bg-sky-100 text-sky-800"}`}>
-                        {r.header_status === "Partial" ? "Partial (GRN raised)" : r.status}
+                      {/* Partial is set when the transfer is sent (fewer boxes than its
+                          request asks for), never by a receipt. */}
+                      <span title={r.header_status === "Partial" ? "Fewer boxes than the request asks for" : undefined}
+                        className={`px-1.5 py-0.5 rounded text-[10px] ${r.header_status === "Partial" ? "bg-amber-100 text-amber-800" : "bg-sky-100 text-sky-800"}`}>
+                        {r.header_status === "Partial" ? "Partial" : r.status}
                       </span>
                       {r.updated_ts && <span className="ml-1 px-1.5 py-0.5 rounded text-[10px] bg-violet-100 text-violet-800">Edited</span>}
                     </td>
