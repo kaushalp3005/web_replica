@@ -810,6 +810,7 @@ function AdjustDialog({ target, operation, warehouse, location, onCancel, onPost
   // Tri-state, and DERIVED rather than synced: undefined = not looked up yet,
   // null = that line holds nothing here, a number = its balance. Writing the
   // unswitched case into state inside the effect is what
+          requireClassified
   // react-hooks/set-state-in-effect forbids, and it would be redundant anyway —
   // target.available_kg is already the answer when nothing was switched.
   const [fetched, setFetched] = useState<number | null | undefined>(undefined);

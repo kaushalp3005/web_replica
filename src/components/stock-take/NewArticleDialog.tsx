@@ -12,6 +12,7 @@
 // them there; Tab still moves focus as usual.
 
 import { useEffect, useRef, useState } from "react";
+import { unclassifiedMessage } from "@/lib/article-picker";
 import { lookupSku, type SkuLookupResponse } from "@/lib/so";
 
 const FIELD =
@@ -45,14 +46,19 @@ export interface PickedArticle {
  *  the third path is free entry, which RTV has no equivalent for. All four
  *  descriptors are required — the Stock Take app's own custom-item path sends
  *  blanks and its backend stamps GENERAL/OTHER over them, losing what the
- *  operator chose. */
+ *  operator chose.
+ *
+ *  `requireClassified` refuses a catalogue article missing any of those
+ *  descriptors. Posting needs them; the sticker prints only use the name, so they
+ *  leave it off. */
 export function NewArticleDialog({
   onCancel, onPick,
   title = "Add an article not in this list",
   intro = "For stock on your floor that has never been counted here.",
+  requireClassified = false,
 }: {
   onCancel: () => void; onPick: (a: PickedArticle) => void;
-  title?: string; intro?: string;
+  title?: string; intro?: string; requireClassified?: boolean;
 }) {
   const [tab, setTab] = useState<"search" | "browse" | "free">("search");
   const [q, setQ] = useState("");
@@ -115,6 +121,9 @@ export function NewArticleDialog({
     const r = await lookupSku({ particulars: name });
     const s = r.selected_item;
     if (!s) return;
+    const refused = requireClassified ? unclassifiedMessage(s) : null;
+    setErr(refused);
+    if (refused) return;
     onPick({
       item_name: String(s.particulars ?? "").trim(),
       material_type: String(s.item_type ?? ""),

@@ -2,7 +2,7 @@
 // so this runs directly on Node's native TypeScript stripping:
 //
 //     node src/lib/article-picker.test.ts
-import { browseTypeOptions, pickLookupFilters, searchResults } from "./article-picker.ts";
+import { browseTypeOptions, pickLookupFilters, searchResults, unclassifiedMessage } from "./article-picker.ts";
 
 let failures = 0;
 function check(name: string, got: unknown, want: unknown) {
@@ -73,6 +73,22 @@ check("search results: a name repeated within one type is one entry",
   searchResults(["rm", "pm"], [["Salt", "Salt"], []]), [{ name: "Salt", type: "rm", showType: false }]);
 check("search results: capped",
   searchResults(["rm"], [["A", "B", "C"]], 2).map((r) => r.name), ["A", "B"]);
+
+check("classification: a fully classified article can be posted",
+  unclassifiedMessage({ particulars: "Wet Dates Nagal", item_type: "rm", item_group: "dates", sub_group: "naghal" }),
+  null);
+check("classification: all three missing, as sku-lookup sends them (null)",
+  unclassifiedMessage({ particulars: "Legal Service", item_type: null, item_group: null, sub_group: null }),
+  "\"Legal Service\" can't be posted: the item master has no material type, category or sub category for it. Ask for it to be classified first.");
+check("classification: two missing",
+  unclassifiedMessage({ particulars: "Mix", item_type: "sfg", item_group: "", sub_group: "" }),
+  "\"Mix\" can't be posted: the item master has no category or sub category for it. Ask for it to be classified first.");
+check("classification: one missing",
+  unclassifiedMessage({ particulars: "Mix", item_type: "sfg", item_group: "nuts" }),
+  "\"Mix\" can't be posted: the item master has no sub category for it. Ask for it to be classified first.");
+check("classification: spaces only count as missing, because the server stores them stripped",
+  unclassifiedMessage({ particulars: "Mix", item_type: "rm", item_group: "  ", sub_group: "nuts" }),
+  "\"Mix\" can't be posted: the item master has no category for it. Ask for it to be classified first.");
 
 if (failures) { console.error(`${failures} failure(s)`); process.exit(1); }
 console.log("article-picker: all passed");
