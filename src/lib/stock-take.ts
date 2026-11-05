@@ -468,7 +468,7 @@ export async function createStockTransaction(
 
 export async function listStockTransactions(
   q: { warehouse?: string; location?: string; itemName?: string; stockType?: StockTypeName;
-       page?: number; pageSize?: number } = {},
+       dateTo?: string; page?: number; pageSize?: number } = {},
   signal?: AbortSignal,
 ): Promise<{ transactions: StockTransaction[]; pagination: { page: number; page_size: number; total: number; total_pages: number } }> {
   const p = new URLSearchParams();
@@ -476,6 +476,7 @@ export async function listStockTransactions(
   if (q.location) p.set("location", q.location);
   if (q.itemName) p.set("itemName", q.itemName);
   if (q.stockType) p.set("stockType", q.stockType);
+  if (q.dateTo) p.set("dateTo", q.dateTo);
   if (q.page) p.set("page", String(q.page));
   if (q.pageSize) p.set("pageSize", String(q.pageSize));
   const qs = p.toString();

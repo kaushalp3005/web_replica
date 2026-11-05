@@ -21,6 +21,8 @@ import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { BackLink } from "@/components/BackLink";
 import { useRequireAuth, useUserInitial, useHasPermission } from "@/lib/user";
+import { istToday } from "@/app/modules/customer-returns/_dates";
+import { clampAsOf, isPastView } from "@/lib/stock-take-as-of";
 import {
   downloadEntriesExcel,
   downloadStockExcel,
@@ -61,8 +63,10 @@ const COLUMNS: { key: SortKey | null; label: string; numeric?: boolean }[] = [
  * articles are last counted weeks ago because that is how often a floor gets
  * counted, and colouring 1600 rows as alarms would train people to ignore it.
  * The age is stated plainly and the colour only steps back once past a month.
+ *
+ * On a past date the server measures the age against that day, not today.
  */
-function LastCounted({ date, days }: { date: string | null; days: number | null }) {
+function LastCounted({ date, days, past }: { date: string | null; days: number | null; past: boolean }) {
   if (!date) {
     return <span className="text-[11px] text-[#a8500a]">never counted</span>;
   }
@@ -72,7 +76,7 @@ function LastCounted({ date, days }: { date: string | null; days: number | null 
       {formatDate(date)}
       {days !== null && (
         <span className="ml-1 text-[10px]">
-          {days === 0 ? "(today)" : days === 1 ? "(1 day)" : `(${days} days)`}
+          {days === 0 ? (past ? "(same day)" : "(today)") : days === 1 ? "(1 day)" : `(${days} days)`}
         </span>
       )}
     </span>
@@ -124,6 +128,11 @@ export default function StockTakeLandingPage() {
   const [itemType, setItemType] = useState("");
   const [stockType, setStockType] = useState("");
   const [search, setSearch] = useState("");
+  // Empty = live stock. A past day shows each article at its last count on or
+  // before that day, plus adjustments up to the end of that day.
+  const [asOf, setAsOf] = useState("");
+  const today = istToday();
+  const viewingPast = isPastView(asOf, today);
 
   // Changing warehouse must not leave a floor selected that the new warehouse
   // does not have — the table would come back empty with nothing to explain it.
@@ -164,6 +173,7 @@ export default function StockTakeLandingPage() {
         itemType: itemType ? [itemType] : undefined,
         stockType: stockType ? [stockType] : undefined,
         search: debouncedSearch || undefined,
+        dateTo: asOf || undefined,
       });
       setExportMsg(
         `${r.filename} — ${formatNumber(r.rows, 0)} count entries`
@@ -174,7 +184,7 @@ export default function StockTakeLandingPage() {
     } finally {
       setExporting(false);
     }
-  }, [warehouse, floorName, itemType, stockType, debouncedSearch]);
+  }, [warehouse, floorName, itemType, stockType, debouncedSearch, asOf]);
 
   /** Download current stock under the same filters, kept apart per warehouse
    *  and floor: every warehouse you can see (the cold stores included) and every
@@ -189,14 +199,16 @@ export default function StockTakeLandingPage() {
         itemType: itemType ? [itemType] : undefined,
         stockType: stockType ? [stockType] : undefined,
         search: debouncedSearch || undefined,
+        asOf: asOf || undefined,
       });
-      setExportMsg(`${r.filename} — ${formatNumber(r.rows, 0)} stock lines by warehouse and floor.`);
+      setExportMsg(`${r.filename} — ${formatNumber(r.rows, 0)} stock lines by warehouse and floor`
+        + (asOf ? ` as of ${formatDate(asOf)}.` : "."));
     } catch (e) {
       setExportMsg(e instanceof Error ? e.message : "Download failed.");
     } finally {
       setDownloading(false);
     }
-  }, [warehouse, floorName, itemType, stockType, debouncedSearch]);
+  }, [warehouse, floorName, itemType, stockType, debouncedSearch, asOf]);
 
   // Factories first, then the cold stores, each under its own heading — and by
   // name ("Savla D-39"), not by code.
@@ -235,12 +247,13 @@ export default function StockTakeLandingPage() {
       itemType: itemType ? [itemType] : undefined,
       stockType: stockType ? [stockType] : undefined,
       search: debouncedSearch || undefined,
+      asOf: asOf || undefined,
       page,
       pageSize: PAGE_SIZE,
       sortBy,
       sortOrder,
     }),
-    [warehouse, floorName, itemType, stockType, debouncedSearch, page, sortBy, sortOrder],
+    [warehouse, floorName, itemType, stockType, debouncedSearch, asOf, page, sortBy, sortOrder],
   );
 
   // Guards against out-of-order responses: a slow early request must not
@@ -293,6 +306,13 @@ export default function StockTakeLandingPage() {
 
   const totals = data?.totals;
   const hasRows = (data?.items.length ?? 0) > 0;
+  // Checked before the "no data" wording, which blames the server's database: a
+  // date earlier than the first record comes back the same way.
+  const noRowsText = viewingPast
+    ? `No stock on record for these filters on or before ${formatDate(asOf)}.`
+    : data?.as_of_date === null
+      ? "No stock take data is available. If no filters are set, the server may be pointed at a database that has no stock take tables."
+      : "No items on this page.";
 
   return (
     <div className="min-h-screen flex flex-col bg-[var(--background)]">
@@ -331,9 +351,11 @@ export default function StockTakeLandingPage() {
           <>
             <div className="mb-5 flex flex-wrap items-baseline gap-x-3 gap-y-1">
               <h1 className="text-[22px] leading-[28px] font-semibold text-[var(--text-primary)]">Stock Take</h1>
-              {data?.as_of_date && (
+              {/* The chosen day when there is one: the newest count under it can be
+                  days earlier, and adjustments run up to the chosen day regardless. */}
+              {(asOf || data?.as_of_date) && (
                 <span className="text-[12px] font-medium px-2 py-0.5 rounded-sm bg-[#eaf3ff] text-[#9a393e]">
-                  As of {formatDate(data.as_of_date)}
+                  As of {formatDate(asOf || data!.as_of_date!)}
                 </span>
               )}
               <div className="flex-1" />
@@ -362,7 +384,7 @@ export default function StockTakeLandingPage() {
               <button
                 onClick={onDownloadStock}
                 disabled={downloading}
-                title="Current stock for every warehouse and floor, with totals, as .xlsx"
+                title={`${viewingPast ? `Stock as of ${formatDate(asOf)}` : "Current stock"} for every warehouse and floor, with totals, as .xlsx`}
                 className="h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] font-medium hover:border-[var(--aws-orange)] disabled:opacity-40"
               >
                 {downloading ? "Preparing\u2026" : "Download stock"}
@@ -384,7 +406,10 @@ export default function StockTakeLandingPage() {
                 </p>
               )}
               <p className="w-full text-[13px] text-[var(--text-secondary)] mt-1">
-                Each article at its own most recent physical count, plus adjustments posted since that count. Counting happens in the Stock Take app; adjustments are recorded here.
+                {viewingPast
+                  ? `Each article at its own most recent physical count on or before ${formatDate(asOf)}, plus adjustments from that count up to the end of that day.`
+                  : "Each article at its own most recent physical count, plus adjustments posted since that count."}{" "}
+                Counting happens in the Stock Take app; adjustments are recorded here.
               </p>
             </div>
 
@@ -400,7 +425,7 @@ export default function StockTakeLandingPage() {
                     ? `${totals.net_adjustment_kg > 0 ? "+" : ""}${formatNumber(totals.net_adjustment_kg)}`
                     : "—",
                 },
-                { label: "Current stock (kg)", value: totals ? formatNumber(totals.total_weight) : "—" },
+                { label: viewingPast ? "Stock on that day (kg)" : "Current stock (kg)", value: totals ? formatNumber(totals.total_weight) : "—" },
                 // Already counted inside Current stock — off grade is a separate
                 // line per article, not a deduction — so it is shown as a share
                 // of it rather than as another addend.
@@ -408,7 +433,7 @@ export default function StockTakeLandingPage() {
                   label: "Off grade (kg)",
                   value: totals ? formatNumber(totals.off_grade_weight) : "—",
                   hint: totals && totals.total_weight > 0
-                    ? `${formatNumber((totals.off_grade_weight / totals.total_weight) * 100, 1)}% of current · ${formatNumber(totals.off_grade_items, 0)} lines`
+                    ? `${formatNumber((totals.off_grade_weight / totals.total_weight) * 100, 1)}% of ${viewingPast ? "stock" : "current"} · ${formatNumber(totals.off_grade_items, 0)} lines`
                     : undefined,
                 },
               ].map((s) => (
@@ -462,6 +487,26 @@ export default function StockTakeLandingPage() {
                   {(opts ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
                 </select>
               ))}
+              <label className="flex items-center gap-2 text-[13px] text-[var(--text-secondary)]">
+                As of
+                <input
+                  type="date"
+                  value={asOf}
+                  max={today}
+                  onChange={(e) => changeQuery(() => setAsOf(clampAsOf(e.target.value, today)))}
+                  aria-label="Stock as of date"
+                  className="h-9 px-2 text-[13px] text-[var(--text-primary)] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e]"
+                />
+              </label>
+              {asOf && (
+                <button
+                  type="button"
+                  onClick={() => changeQuery(() => setAsOf(""))}
+                  className="h-9 text-[12px] text-[var(--aws-orange)] hover:underline"
+                >
+                  Clear date
+                </button>
+              )}
             </div>
 
             {error && (
@@ -478,24 +523,27 @@ export default function StockTakeLandingPage() {
                 <table className="w-full text-[13px] border-collapse">
                   <thead>
                     <tr className="bg-[#fafafa]">
-                      {COLUMNS.map((c) => (
-                        <th
-                          key={c.label}
-                          scope="col"
-                          className="border border-[var(--aws-border)] px-3 py-2 font-semibold text-[var(--text-primary)] whitespace-nowrap text-center"
-                        >
-                          {c.key ? (
-                            <button
-                              onClick={() => toggleSort(c.key!)}
-                              className="hover:text-[var(--aws-orange)] inline-flex items-center gap-1"
-                              aria-label={`Sort by ${c.label}`}
-                            >
-                              {c.label}
-                              {sortBy === c.key && <span aria-hidden>{sortOrder === "asc" ? "▲" : "▼"}</span>}
-                            </button>
-                          ) : c.label}
-                        </th>
-                      ))}
+                      {COLUMNS.map((c) => {
+                        const label = viewingPast && c.key === "totalWeight" ? "Stock (kg)" : c.label;
+                        return (
+                          <th
+                            key={c.label}
+                            scope="col"
+                            className="border border-[var(--aws-border)] px-3 py-2 font-semibold text-[var(--text-primary)] whitespace-nowrap text-center"
+                          >
+                            {c.key ? (
+                              <button
+                                onClick={() => toggleSort(c.key!)}
+                                className="hover:text-[var(--aws-orange)] inline-flex items-center gap-1"
+                                aria-label={`Sort by ${label}`}
+                              >
+                                {label}
+                                {sortBy === c.key && <span aria-hidden>{sortOrder === "asc" ? "▲" : "▼"}</span>}
+                              </button>
+                            ) : label}
+                          </th>
+                        );
+                      })}
                     </tr>
                   </thead>
                   <tbody>
@@ -505,9 +553,7 @@ export default function StockTakeLandingPage() {
                     {!loading && !error && !hasRows && (
                       <tr>
                         <td colSpan={COLUMNS.length} className="px-3 py-8 text-center text-[var(--text-secondary)]">
-                          {data?.as_of_date === null
-                            ? "No stock take data is available. If no filters are set, the server may be pointed at a database that has no stock take tables."
-                            : "No items on this page."}
+                          {noRowsText}
                         </td>
                       </tr>
                     )}
@@ -538,7 +584,7 @@ export default function StockTakeLandingPage() {
                             : it.entry_count}
                         </td>
                         <td className="border border-[var(--aws-border)] px-3 py-2 text-center text-[12px]">
-                          <LastCounted date={it.last_counted_date} days={it.days_since_count} />
+                          <LastCounted date={it.last_counted_date} days={it.days_since_count} past={viewingPast} />
                         </td>
                         <td className="border border-[var(--aws-border)] px-2 py-2 text-center">
                           <button
@@ -566,9 +612,7 @@ export default function StockTakeLandingPage() {
               )}
               {!loading && !error && !hasRows && (
                 <p className="text-[13px] text-[var(--text-secondary)] py-6 text-center">
-                  {data?.as_of_date === null
-                    ? "No stock take data is available. If no filters are set, the server may be pointed at a database that has no stock take tables."
-                    : "No items on this page."}
+                  {noRowsText}
                 </p>
               )}
               {data?.items.map((it) => (
@@ -619,14 +663,14 @@ export default function StockTakeLandingPage() {
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-[var(--text-muted)]">Current</dt>
+                      <dt className="text-[var(--text-muted)]">{viewingPast ? "Stock" : "Current"}</dt>
                       <dd className="tabular-nums font-medium text-[var(--text-primary)]">{formatNumber(it.total_weight)}</dd>
                     </div>
                   </dl>
                   {/* Full width under the figures: on a phone the age of the count
                       matters as much as the number, and it does not fit the grid. */}
                   <p className="mt-2 text-[11px] text-[var(--text-muted)]">
-                    Last counted <LastCounted date={it.last_counted_date} days={it.days_since_count} />
+                    Last counted <LastCounted date={it.last_counted_date} days={it.days_since_count} past={viewingPast} />
                   </p>
                 </div>
               ))}
