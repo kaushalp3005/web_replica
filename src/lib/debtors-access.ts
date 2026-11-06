@@ -6,9 +6,9 @@
 // The permissions are module-level rows in the ERP's auth_permission, made by
 // backend migration 136 (app/db/136_debtors_collection_role.sql), and /me
 // sends every permission the signed-in user's roles grant. Admins pass on
-// their flag. The `debtors_collection` role holds view, call, edit and export;
-// upload (replacing a tab from Tally) and delete (removing a call summary)
-// stay with admins unless the admin screen grants them to a role.
+// their flag. The `debtors_collection` role holds all six: 136 granted view,
+// call, edit and export, and 138 added upload (replacing a tab from Tally) and
+// delete (removing a call summary).
 //
 // No imports beyond these two, so the test runs on Node directly:
 //

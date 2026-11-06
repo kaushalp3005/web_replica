@@ -369,10 +369,10 @@ export const MODULES: ModuleItem[] = [
     // allowedRoles covers a holder whose other roles are unscoped, the scope
     // entry one who also holds a scoped role.
     //
-    // This mirrors, and does not replace, the real gate: backend migration 136
-    // grants debtors_collection.{view,call,edit,export} to this role (upload and
-    // delete stay with admins), and every /api/collections/* Route Handler checks
-    // the one it needs (lib/server/collections.ts, lib/debtors-access.ts).
+    // This mirrors, and does not replace, the real gate: backend migrations 136 and
+    // 138 grant this role debtors_collection.{view,call,edit,export,upload,delete},
+    // and every /api/collections/* Route Handler checks the one it needs
+    // (lib/server/collections.ts, lib/debtors-access.ts).
     allowedRoles: ["debtors_collection"],
     Icon: DebtorsCollectionIcon,
   },

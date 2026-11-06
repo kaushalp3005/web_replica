@@ -4,8 +4,9 @@
 //     node src/lib/debtors-access.test.ts
 //
 // What it guards: the same check decides what the Route Handlers forward to the
-// collections service and which buttons the screen shows, so the role must get
-// exactly its four actions, and nothing that merely looks like a grant may count.
+// collections service and which buttons the screen shows, so a role must get
+// exactly the actions it is granted, and nothing that merely looks like a grant
+// may count.
 
 import type { MeResponse, MePermission } from "./auth.ts";
 import { debtorsAccessOf, mayDebtors, DEBTORS_ACTIONS } from "./debtors-access.ts";
@@ -21,14 +22,18 @@ function user(permissions: MePermission[], extra: Partial<MeResponse> = {}): MeR
 }
 const grant = (action: string, sub_module: string | null = null): MePermission => ({ module: "debtors_collection", sub_module, action });
 
-// The role as migration 136 grants it.
-const staff = user(["view", "call", "edit", "export"].map((a) => grant(a)));
-check("role: day-to-day four", debtorsAccessOf(staff), {
+// A partial grant gets exactly what it names (the role as 136 alone leaves it).
+const partial = user(["view", "call", "edit", "export"].map((a) => grant(a)));
+check("partial grant: only those four", debtorsAccessOf(partial), {
   view: true, call: true, edit: true, export: true, upload: false, delete: false,
 });
 
-// Admins pass every action with no grant rows at all, by either admin shape.
 const all = Object.fromEntries(DEBTORS_ACTIONS.map((a) => [a, true]));
+
+// The role with 138 applied: the whole module, and no admin flag needed for it.
+check("role: all six", debtorsAccessOf(user(DEBTORS_ACTIONS.map((a) => grant(a)))), all);
+
+// Admins pass every action with no grant rows at all, by either admin shape.
 check("admin flag", debtorsAccessOf(user([], { is_admin: true })), all);
 check("admin role envelope", debtorsAccessOf(user([], { roles: [{ code: "admin" }] })), all);
 check("admin bare role string", debtorsAccessOf(user([], { roles: ["admin"] })), all);

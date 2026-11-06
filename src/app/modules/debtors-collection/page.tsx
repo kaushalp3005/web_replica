@@ -8,7 +8,7 @@
 // For admins and the debtors_collection role, like its tile in lib/modules:
 // other scoped roles are bounced by useRequireModuleAccess, and anyone else
 // without debtors_collection.view gets the no-access panel. The Tally upload
-// shows only to those who may upload (admins, unless a role is granted it).
+// shows only to those who hold debtors_collection.upload.
 // The section lives in the URL (?section=apmc) so a refresh or a shared link
 // opens the same tab.
 
