@@ -452,3 +452,8 @@ export const completeDevPhase = (id: number, phaseId: number, body?: DevPhaseCom
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/phases/${phaseId}/complete`, body ?? {}), "Failed to complete phase");
 export const dispatchDevJobCard = (id: number, body: { recipient?: string; qty?: number; article_id?: number; uom?: string }) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/dispatch`, body), "Dispatch failed");
+/** Record EVERY remaining balance on a CLOSED card as dispatched (one part per article, all
+ *  or nothing). Returns the new parts — the ids the combined outpass is then printed for. */
+export const dispatchAllRemaining = (id: number, body: { recipient?: string }) =>
+  jsonOrThrow<{ dispatch_ids: number[]; job_card: DevJobCard }>(
+    post(`${BASE}/${id}/dispatch-all`, body), "Dispatch failed");

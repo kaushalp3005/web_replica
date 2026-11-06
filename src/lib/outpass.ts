@@ -35,7 +35,7 @@ export interface OutpassInput {
   jcId: number;
   /** ?dispatch=<a,b,c> — the parts this document covers, in the order they were chosen. */
   selectedIds: number[];
-  /** ?merge=1 — every article's FULL finalized output, one line each. */
+  /** ?merge=1 — every part recorded on the card, one line each (ledger order). */
   mergeAll: boolean;
   articles: OutpassArticle[];
   dispatches: OutpassDispatch[];
@@ -72,6 +72,11 @@ export interface OutpassDoc {
   outpassNo: string;
   date: string;
   recipient: string;
+  /** False when nothing on the document has been recorded as dispatched — the stock is
+   *  still in R&D as far as the system knows, so the page must not print it. A printed
+   *  outpass with no goods issue behind it is how 93 of 100 closed cards ended up with
+   *  their samples gone but every article still pending. */
+  recorded: boolean;
 }
 
 const n = (v: unknown): number => Number(v) || 0;
@@ -80,10 +85,13 @@ const day = (v?: string | null): string => (v ?? "").slice(0, 10);
 export function buildOutpass(i: OutpassInput): OutpassDoc {
   // Resolve the selection against THIS card's ledger. An id that isn't on the card is
   // dropped rather than faked — a document must never claim a movement with no goods
-  // issue behind it.
-  const selected = i.selectedIds
-    .map((id) => i.dispatches.find((d) => Number(d.dispatch_id) === id))
-    .filter((d): d is OutpassDispatch => !!d);
+  // issue behind it. merge=1 selects every recorded part, in ledger order: it used to
+  // print each article's FULL output whatever had gone out, recording nothing.
+  const selected = i.mergeAll
+    ? [...i.dispatches].sort((a, b) => a.seq - b.seq)
+    : i.selectedIds
+      .map((id) => i.dispatches.find((d) => Number(d.dispatch_id) === id))
+      .filter((d): d is OutpassDispatch => !!d);
   const one = selected.length === 1 ? selected[0] : null;
 
   const articleOf = (d: OutpassDispatch) =>
@@ -97,10 +105,6 @@ export function buildOutpass(i: OutpassInput): OutpassDoc {
     ? `${i.jcId}-${selected.map((d) => d.seq).join("+")}`
     : one ? `${i.jcId}-${one.seq}`
     : String(i.jcId);
-
-  const artItems: OutpassLine[] = i.articles
-    .filter((a) => a.article_id != null && n(a.output_qty) > 0)
-    .map((a) => ({ desc: a.name ?? "—", qty: n(a.output_qty), uom: a.output_uom || cardUom }));
 
   // Each selected part at ITS OWN quantity and unit (084 lets a part carry a different
   // unit from its balance), labelled with its sub-number so a merged doc reconciles
@@ -116,13 +120,17 @@ export function buildOutpass(i: OutpassInput): OutpassDoc {
 
   const oneArticle = one ? articleOf(one) : null;
   const items: OutpassLine[] =
-    i.mergeAll && artItems.length > 0 ? artItems
-    : selected.length > 1 ? selectedItems
+    selected.length > 1 ? selectedItems
+    : i.mergeAll && !one ? []
     : [{
         desc: oneArticle?.name || i.fgSkuName || i.title || "—",
         qty: n(one ? one.qty : i.outputQty),
         uom: one?.uom || oneArticle?.output_uom || cardUom,
       }];
+  // Backed by recorded parts — or, with no parts named, by an old single-shot dispatch
+  // (046: dispatched_at set on the card, no ledger row). Anything else is stock the
+  // system still holds in R&D.
+  const recorded = selected.length > 0 || (!i.mergeAll && i.dispatches.length === 0 && !!i.dispatchedAt);
 
   // Dated by the LAST part on the document — the movement it authorizes is complete only
   // once every selected part has gone out.
@@ -148,7 +156,7 @@ export function buildOutpass(i: OutpassInput): OutpassDoc {
   // decimals is the domain's precision, not an arbitrary cut.
   const totalQty = round3(items.reduce((s, it) => s + it.qty, 0));
   return { selected, items, totals, mixedUnits, totalLabel: formatTotals(totals),
-           totalQty, outpassNo, date, recipient };
+           totalQty, outpassNo, date, recipient, recorded };
 }
 
 const round3 = (v: number): number => Math.round(v * 1000) / 1000;
