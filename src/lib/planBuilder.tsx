@@ -42,6 +42,9 @@ import {
 } from "@/lib/selectedGroups";
 import { GRID_HEAD_ROW, GRID_TABLE, GRID_TD, GRID_TH, GRID_WRAP } from "@/lib/gridTable";
 import { friendlyApiError } from "@/lib/apiErrors";
+import {
+  PRODUCTION_FLOORS, allowedFloorsFor as allowedFloorsIn, normaliseFloor, type FloorRule,
+} from "@/lib/floorChoices";
 import type { UserScope } from "@/lib/user";
 
 // ── Factory + floor masters ─────────────────────────────────────────────
@@ -54,18 +57,10 @@ import type { UserScope } from "@/lib/user";
 export const FACTORY_TO_WAREHOUSE = { W202: "W-202", A185: "A-185" } as const;
 export type FactoryCode = keyof typeof FACTORY_TO_WAREHOUSE;
 
+// The production floors live in lib/floorChoices now (one list for every picker).
 export const FLOORS_BY_FACTORY: Record<FactoryCode, readonly string[]> = {
-  W202: [
-    "Lower Basement", "Upper Basement",
-    "First Floor", "First Floor Mezz",
-    "Second Floor", "Second Floor Mezz",
-    "Terrace",
-  ],
-  A185: [
-    "Roasting Area", "Mezzanine", "Sorting Area", "Printing Area",
-    "Dmart Production Area", "Dmart Packing Area",
-    "Cheese Floor", "FG store", "FFS Packing Area",
-  ],
+  W202: PRODUCTION_FLOORS.W202,
+  A185: PRODUCTION_FLOORS.A185,
 };
 
 // Intersect the master with the user's scope. Admin or empty scope ⇒ no
@@ -84,12 +79,16 @@ export function allowedFactoryCodes(scope: UserScope): FactoryCode[] {
   );
 }
 
-export function allowedFloorsFor(scope: UserScope, factory: FactoryCode | undefined): string[] {
-  if (!factory) return [];
-  const base = FLOORS_BY_FACTORY[factory] ?? [];
-  if (scope.isAdmin) return [...base];
-  if (!scope.floors.length) return [...base];
-  return base.filter((fl) => scope.floors.includes(fl));
+// The floors this person may plan in a factory, by lib/floorChoices' rule (the
+// one every floor picker uses): planners (plans › approve, rule.anyFloorInFactory)
+// any floor of it, others with floor grants their own. Grants match ignoring
+// case, as on the server: a grant typed "roasting area" offers "Roasting Area".
+export function allowedFloorsFor(
+  scope: UserScope,
+  factory: FactoryCode | undefined,
+  rule: FloorRule = {},
+): string[] {
+  return factory ? allowedFloorsIn(scope, factory, rule) : [];
 }
 
 // ── Per-card configuration (Selected Articles panel) ────────────────────
@@ -191,9 +190,11 @@ export interface UsePlanBuilder {
 export function usePlanBuilder(opts: {
   entity: "" | "cfpl" | "cdpl";
   scope: UserScope;
+  /** Holds plans › approve: may plan any floor of the factory (lib/floorChoices). */
+  anyFloorInFactory?: boolean;
   onToast: (msg: string) => void;
 }): UsePlanBuilder {
-  const { entity, scope, onToast } = opts;
+  const { entity, scope, anyFloorInFactory = false, onToast } = opts;
   const factoryOpts = useMemo(() => allowedFactoryCodes(scope), [scope]);
 
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -474,11 +475,13 @@ export function usePlanBuilder(opts: {
   const setCardFactory = useCallback((id: number, factory: FactoryCode | undefined) => {
     setCardCfg((m) => {
       const cur = m.get(id) ?? {};
-      const allowed = factory ? new Set(allowedFloorsFor(scope, factory)) : null;
+      const allowed = factory
+        ? new Set(allowedFloorsFor(scope, factory, { anyFloorInFactory }).map(normaliseFloor))
+        : null;
       let steps = cur.steps;
       if (steps && allowed) {
         steps = steps.map((s) =>
-          s.floor && !allowed.has(s.floor) ? { ...s, floor: null } : s,
+          s.floor && !allowed.has(normaliseFloor(s.floor)) ? { ...s, floor: null } : s,
         );
       } else if (steps && factory === undefined) {
         // Factory cleared → no floors are valid until a factory is picked.
@@ -488,7 +491,7 @@ export function usePlanBuilder(opts: {
       nm.set(id, { ...cur, factory, steps });
       return nm;
     });
-  }, [scope]);
+  }, [scope, anyFloorInFactory]);
 
   // An account with access to exactly one factory: that factory is every
   // card's factory without asking. Fills any selected card that has none —
@@ -879,7 +882,7 @@ const SEL_TH = GRID_TH;
 const SEL_TD = GRID_TD;
 
 export function SelectedArticlesPanel({
-  selectedIds, rowsCache, cardCfg, expandedCardId, scope, factoryOpts,
+  selectedIds, rowsCache, cardCfg, expandedCardId, scope, anyFloorInFactory = false, factoryOpts,
   onToggleExpand, onPatch, onReset, onRemove, onClearAll,
   onSetFactory, onSetStepFloor, onSetStepProcess, onMoveStep, onMergeSteps,
   onAddStep,
@@ -891,6 +894,8 @@ export function SelectedArticlesPanel({
   cardCfg: Map<number, CardOverride>;
   expandedCardId: number | null;
   scope: UserScope;
+  // Holds plans › approve: the step floor lists every floor of the factory.
+  anyFloorInFactory?: boolean;
   factoryOpts: FactoryCode[];
   onToggleExpand: (id: number) => void;
   onPatch: (id: number, patch: Partial<CardOverride>) => void;
@@ -1093,6 +1098,7 @@ export function SelectedArticlesPanel({
                       cfg={cfgs[i]}
                       isExpanded={expandedCardId === r.fulfillment_id}
                       scope={scope}
+                      anyFloorInFactory={anyFloorInFactory}
                       factoryOpts={factoryOpts}
                       onToggleExpand={() => onToggleExpand(r.fulfillment_id)}
                       onPatch={(patch) => onPatch(r.fulfillment_id, patch)}
@@ -1157,7 +1163,7 @@ function RemoveButton({ label, onClick }: { label: string; onClick: (e: MouseEve
 }
 
 function SelectedCard({
-  row, cfg, isExpanded, scope, factoryOpts,
+  row, cfg, isExpanded, scope, anyFloorInFactory, factoryOpts,
   onToggleExpand, onPatch, onReset, onRemove,
   onSetFactory, onSetStepFloor, onSetStepProcess, onMoveStep, onMergeSteps,
   onAddStep, onRemoveStep, onRefreshSteps, onCreateBom, onUpdateBom, showSteps = true,
@@ -1166,6 +1172,7 @@ function SelectedCard({
   cfg: CardOverride;
   isExpanded: boolean;
   scope: UserScope;
+  anyFloorInFactory: boolean;
   factoryOpts: FactoryCode[];
   onToggleExpand: () => void;
   onPatch: (patch: Partial<CardOverride>) => void;
@@ -1189,7 +1196,10 @@ function SelectedCard({
 
   const factory = cfg.factory;
   const steps = cfg.steps ?? [];
-  const allowedFloors = useMemo(() => allowedFloorsFor(scope, factory), [scope, factory]);
+  const allowedFloors = useMemo(
+    () => allowedFloorsFor(scope, factory, { anyFloorInFactory }),
+    [scope, factory, anyFloorInFactory],
+  );
   const flooredCount = steps.filter((s) => !!s.floor).length;
 
   // Per-unit kg derived from the SO line's own pending qtys — this is
@@ -1470,7 +1480,8 @@ function SelectedCard({
 //
 // HTML5 drag-and-drop reorder + accessible ↑/↓ buttons for keyboard and
 // touch. Floor dropdown per step pulls from `allowedFloors` (the factory's
-// floor set intersected with the user's auth scope). Empty = "any floor".
+// floors this person may plan: all of them for a planner, else the floor set
+// intersected with the user's auth scope). Empty = "any floor".
 //
 // State lives in the parent; we only emit move + setFloor events back up.
 

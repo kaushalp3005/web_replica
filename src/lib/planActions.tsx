@@ -22,14 +22,21 @@ import {
   fmtPlanKg,
   fmtPlanUnits,
 } from "@/lib/plans";
+import { chainFloorProblems, floorChoicesFor, floorScopeNote, prefillFloor, productionFloors, touchedFloors } from "@/lib/floorChoices";
+import { memberPieces } from "@/lib/job-card-sfg";
+import { useUserScope, useHasPermission } from "@/lib/user";
+import { FloorPicker } from "@/lib/FloorPicker";
 
 export function RowActions({
-  cancelled = false, anyCarded, anyRemaining, onOpen, onCreateJobCard, onDispatch,
+  cancelled = false, jobCardsEditable = !cancelled, anyCarded, anyRemaining, onOpen, onCreateJobCard, onDispatch,
 }: {
   /** A cancelled plan: its job cards went with it and its SO qty is pending
    *  again, so only Open is offered (Create Job Card used to stay, and the
    *  server accepted it). */
   cancelled?: boolean;
+  /** Not on a cancelled or executed plan (lib/job-card-edit); the server
+   *  refuses plan_closed. */
+  jobCardsEditable?: boolean;
   anyCarded: boolean;
   anyRemaining: boolean;
   onOpen: () => void;
@@ -55,7 +62,7 @@ export function RowActions({
           Create Job Card
         </button>
       ) : null}
-      {anyCarded && !cancelled ? (
+      {anyCarded && jobCardsEditable ? (
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onCreateJobCard("edit"); }}
@@ -149,6 +156,7 @@ type MergeMemberDraft = {
   plan_line_id: number;
   fg_sku_name: string | null;
   planned_qty_kg: number | null;
+  planned_qty_units: number | null;
   qty_kg: string;
   pkg_floor: string;
   pkg_process: string;
@@ -172,6 +180,9 @@ export function MergeProcessModal({ planIds, onClose, onDone }: {
   const [members, setMembers] = useState<MergeMemberDraft[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const scope = useUserScope();
+  // The server's _may_approve_plans: planners may plan any floor of the factory.
+  const anyFloorInFactory = useHasPermission("production", "plans", "approve", "create");
 
   // Selection is frozen while the modal is open, so validate once on mount.
   // (loadingVal starts true; we only flip it in the async callbacks, keeping
@@ -194,12 +205,21 @@ export function MergeProcessModal({ planIds, onClose, onDone }: {
   const group: ProcessMergeGroup | null =
     val && chosenIdx >= 0 ? val.groups[chosenIdx] ?? null : null;
 
+  // The floors of the members' un-started cards the merge rebuilds: kept as
+  // stored, and what the server compares the new run with (only floors that gain
+  // or lose a card are checked).
+  const rebuiltFloors = (g: ProcessMergeGroup | null) =>
+    (g?.members ?? []).filter((m) => m.carded).flatMap((m) => (m.steps ?? []).map((s) => s.floor));
+
   // Seed the shared-process + per-member drafts from the chosen group's key.
   function chooseGroup(idx: number, v?: ProcessMergeValidation) {
     const source = v ?? val;
     const g = source?.groups[idx];
     setChosenIdx(idx);
     if (!g) return;
+    // Floors as the pickers list them (declared spelling; blank when the
+    // factory's list doesn't hold the planned one).
+    const seedFloor = (f: string | null | undefined) => prefillFloor(g.key.factory, f, rebuiltFloors(g));
     // Pre-fill the shared process from the products' actual planned steps
     // (drop packaging — that stays per-product). Seed from the first member;
     // they share RM + floor so their process is the same. Fall back to blank.
@@ -207,19 +227,35 @@ export function MergeProcessModal({ planIds, onClose, onDone }: {
     const wip = first.filter((s) => (s.stage || "").toLowerCase() !== "packaging");
     const seed = wip.length ? wip : first.slice(0, Math.max(0, first.length - 1));
     setProcSteps(seed.length
-      ? seed.map((s) => ({ process: s.process_name || "", floor: s.floor || g.key.floor }))
-      : [{ process: "", floor: g.key.floor }]);
-    const slug = (g.key.rm_articles[0] || "wip").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 10);
-    setSharedSfg(`SFG-${slug}`);
+      ? seed.map((s) => ({ process: s.process_name || "", floor: seedFloor(s.floor || g.key.floor) }))
+      : [{ process: "", floor: seedFloor(g.key.floor) }]);
+    // The products' own SFG when they agree (the server's suggested_sfg), else
+    // blank: the merge then uses the first product's routed SFG.
+    setSharedSfg(g.suggested_sfg ?? "");
     setMembers(g.members.map((m) => ({
       plan_line_id: m.plan_line_id,
       fg_sku_name: m.fg_sku_name,
       planned_qty_kg: m.planned_qty_kg,
+      planned_qty_units: m.planned_qty_units,
       qty_kg: m.planned_qty_kg != null ? String(m.planned_qty_kg) : "",
-      pkg_floor: g.key.floor,
+      pkg_floor: seedFloor(g.key.floor),
       pkg_process: "Packaging",
     })));
   }
+
+  // Floors come from the group's factory: a picker over its declared floors
+  // (free text only when it lists none), the user's own enabled — see
+  // lib/floorChoices for who may use which.
+  const mergeWh = group?.key.factory ?? null;
+  const freeTextFloors = productionFloors(mergeWh).length === 0;
+  const rebuilt = rebuiltFloors(group);
+  const floorOptions = floorChoicesFor(scope, mergeWh, { anyFloorInFactory, saved: rebuilt });
+  const floorNote = floorScopeNote(scope, mergeWh, { anyFloorInFactory });
+  const floorProblem = group
+    ? chainFloorProblems(scope, mergeWh,
+      touchedFloors(rebuilt, [...procSteps.map((s) => s.floor), ...members.map((m) => m.pkg_floor)]),
+      { anyFloorInFactory })
+    : null;
 
   const mergedQty = members.reduce((s, m) => s + (Number(m.qty_kg) || 0), 0);
   const procOk = procSteps.length >= 1 && procSteps.every((s) => s.process.trim() && s.floor.trim());
@@ -227,6 +263,7 @@ export function MergeProcessModal({ planIds, onClose, onDone }: {
 
   async function submit() {
     if (!group) return;
+    if (floorProblem) { setErr(floorProblem.message); return; }
     setSubmitting(true);
     setErr(null);
     try {
@@ -243,7 +280,7 @@ export function MergeProcessModal({ planIds, onClose, onDone }: {
           pkg_floor: m.pkg_floor.trim(),
           pkg_process: m.pkg_process.trim() || "Packaging",
           qty_kg: Number(m.qty_kg),
-          qty_units: null,
+          qty_units: memberPieces(m.planned_qty_units, m.planned_qty_kg, Number(m.qty_kg)),
         })),
       });
       onDone(`Merged ${res.packaging.length} products into one process run · ${res.merged_qty_kg} kg · ${res.count} job cards${planReleaseNote(res.plan_release) || "."}`);
@@ -375,8 +412,9 @@ export function MergeProcessModal({ planIds, onClose, onDone }: {
                     <div key={i} className="flex items-center gap-2">
                       <input value={s.process} placeholder="Process (e.g. Roasting)" className={`flex-1 ${MERGE_INP}`}
                         onChange={(e) => setProcSteps((ps) => ps.map((x, j) => j === i ? { ...x, process: e.target.value } : x))} />
-                      <input value={s.floor} placeholder="Floor" className={`flex-1 ${MERGE_INP}`}
-                        onChange={(e) => setProcSteps((ps) => ps.map((x, j) => j === i ? { ...x, floor: e.target.value } : x))} />
+                      <FloorPicker value={s.floor} choices={floorOptions} freeText={freeTextFloors}
+                        className={`flex-1 min-w-0 ${MERGE_INP}`}
+                        onChange={(floor) => setProcSteps((ps) => ps.map((x, j) => j === i ? { ...x, floor } : x))} />
                       {procSteps.length > 1 ? (
                         <button type="button" aria-label="Remove step" className="w-7 h-7 rounded-sm border border-[var(--aws-border)] text-[var(--text-muted)] hover:text-[var(--aws-error)]"
                           onClick={() => setProcSteps((ps) => ps.filter((_, j) => j !== i))}>×</button>
@@ -385,12 +423,18 @@ export function MergeProcessModal({ planIds, onClose, onDone }: {
                   ))}
                 </div>
                 <button type="button" className="mt-2 text-[11px] text-[var(--aws-link)] hover:underline"
-                  onClick={() => setProcSteps((ps) => [...ps, { process: "", floor: group.key.floor }])}>+ Add process step</button>
+                  onClick={() => setProcSteps((ps) => [...ps, { process: "", floor: prefillFloor(mergeWh, group.key.floor, rebuilt) }])}>+ Add process step</button>
+                {floorNote ? <p className="mt-1 text-[10px] text-[var(--text-muted)]">{floorNote}</p> : null}
               </div>
               <label className="block">
                 <span className="block text-[10px] uppercase tracking-wide font-semibold text-[var(--text-secondary)] mb-1">Shared SFG code (roasted/processed intermediate)</span>
-                <input value={sharedSfg} onChange={(e) => setSharedSfg(e.target.value)} placeholder="e.g. SFG-CHIA" className={`w-full ${MERGE_INP}`} />
-                <span className="block text-[10px] text-[var(--text-muted)] mt-0.5">Each packaging stage consumes this code from the shared process output.</span>
+                <input value={sharedSfg} onChange={(e) => setSharedSfg(e.target.value)} placeholder="Blank: the first product's routed SFG" className={`w-full ${MERGE_INP}`} />
+                <span className="block text-[10px] text-[var(--text-muted)] mt-0.5">
+                  Each packaging stage takes this SFG from the shared process.{" "}
+                  {group.suggested_sfg
+                    ? "Filled in with the SFG these products already use."
+                    : `These products don't share an SFG — type one, or leave it blank to use ${group.members[0]?.fg_sku_name || "the first product"}'s routed SFG, if it has one.`}
+                </span>
               </label>
             </div>
           ) : null}
@@ -399,24 +443,33 @@ export function MergeProcessModal({ planIds, onClose, onDone }: {
           {step === 3 && group ? (
             <div className="space-y-3">
               <div className="text-[11px] text-[var(--text-muted)]">Each product keeps its own packaging card. Confirm qty + packaging floor per product.</div>
-              <div className="grid grid-cols-[1fr_84px_1fr_1fr] gap-2 text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)] px-1">
-                <span>Product</span><span className="text-right">Qty (kg)</span><span>Pkg floor</span><span>Pkg process</span>
+              <div className="grid grid-cols-[1fr_84px_56px_1fr_1fr] gap-2 text-[10px] uppercase tracking-wide font-semibold text-[var(--text-muted)] px-1">
+                <span>Product</span><span className="text-right">Qty (kg)</span><span className="text-right">Pcs</span><span>Pkg floor</span><span>Pkg process</span>
               </div>
-              {members.map((m, i) => (
-                <div key={m.plan_line_id} className="grid grid-cols-[1fr_84px_1fr_1fr] gap-2 items-center">
+              {members.map((m, i) => {
+                // The plan line's pieces for this kg — what is sent (lib/job-card-sfg).
+                const pcs = memberPieces(m.planned_qty_units, m.planned_qty_kg, Number(m.qty_kg));
+                return (
+                <div key={m.plan_line_id} className="grid grid-cols-[1fr_84px_56px_1fr_1fr] gap-2 items-center">
                   <span className="truncate text-[var(--text-primary)]" title={m.fg_sku_name || ""}>{m.fg_sku_name || "—"}</span>
                   <input value={m.qty_kg} inputMode="decimal" className={`text-right ${MERGE_INP}`}
                     onChange={(e) => setMembers((ms) => ms.map((x, j) => j === i ? { ...x, qty_kg: e.target.value } : x))} />
-                  <input value={m.pkg_floor} className={MERGE_INP}
-                    onChange={(e) => setMembers((ms) => ms.map((x, j) => j === i ? { ...x, pkg_floor: e.target.value } : x))} />
+                  <span className="text-right font-mono text-[var(--text-secondary)]" title="Planned pieces for this quantity">
+                    {fmtPlanUnits(pcs)}
+                  </span>
+                  <FloorPicker value={m.pkg_floor} choices={floorOptions} freeText={freeTextFloors}
+                    className={`min-w-0 ${MERGE_INP}`}
+                    onChange={(pkg_floor) => setMembers((ms) => ms.map((x, j) => j === i ? { ...x, pkg_floor } : x))} />
                   <input value={m.pkg_process} className={MERGE_INP}
                     onChange={(e) => setMembers((ms) => ms.map((x, j) => j === i ? { ...x, pkg_process: e.target.value } : x))} />
                 </div>
-              ))}
+                );
+              })}
               <div className="text-right text-[11px] font-semibold text-[var(--text-primary)]">Merged process qty: {mergedQty} kg</div>
             </div>
           ) : null}
 
+          {step > 1 && floorProblem ? <p className="mt-3 text-[11px] text-[var(--aws-error)]">{floorProblem.message}</p> : null}
           {err ? <p className="mt-3 text-[11px] text-[var(--aws-error)]">{err}</p> : null}
         </div>
 
@@ -431,7 +484,7 @@ export function MergeProcessModal({ planIds, onClose, onDone }: {
                 disabled={step === 1 ? !group : !procOk}
                 onClick={() => setStep((s) => (s + 1) as 1 | 2 | 3)}>Next</button>
             ) : (
-              <button type="button" className={btnPrimary} disabled={!membersOk || submitting} onClick={submit}>
+              <button type="button" className={btnPrimary} disabled={!membersOk || submitting || floorProblem != null} onClick={submit}>
                 {submitting ? "Merging…" : "Create merged run"}
               </button>
             )}

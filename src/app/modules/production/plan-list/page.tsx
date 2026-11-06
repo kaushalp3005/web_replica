@@ -39,6 +39,7 @@ import { classifyProcess, STAGE_FINAL_FG } from "@/lib/processCatalog";
 import { DispatchModal, MergeActionBar, MergeProcessModal, RowActions } from "@/lib/planActions";
 import { CreateJobCardModal, submitJobCardWizard } from "@/lib/planJobCardModal";
 import { planRowFlags } from "@/lib/planRowActions";
+import { planAllowsJobCardEdit } from "@/lib/job-card-edit";
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 300;
@@ -858,6 +859,7 @@ const PlanRowDesktop = memo(function PlanRowDesktop({
       <td className="px-2.5 py-1.5 text-right">
         <RowActions
           cancelled={cancelled}
+          jobCardsEditable={planAllowsJobCardEdit(row.status)}
           anyCarded={anyCarded}
           anyRemaining={anyRemaining}
           onOpen={handleOpen}
@@ -967,6 +969,7 @@ const PlanMobileCard = memo(function PlanMobileCard({
         <div className="flex items-center gap-2 mt-2">
           <RowActions
             cancelled={cancelled}
+            jobCardsEditable={planAllowsJobCardEdit(row.status)}
             anyCarded={anyCarded}
             anyRemaining={anyRemaining}
             onOpen={handleOpen}

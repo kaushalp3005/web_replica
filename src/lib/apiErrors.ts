@@ -3,9 +3,9 @@
 // {error, message, details} (request_context middleware) or {detail:{...}}
 // (FastAPI's HTTPException) — both shapes carry an error code + a
 // contextual message. This helper parses both, picks the backend's own
-// message when present, and prepends a short action verb so the operator
-// sees "Cannot complete — Batch 2 is still open" instead of
-// `{"error":"open_batch","message":"Batch 2 is still open…"}`.
+// message when present, and (for most codes) prepends a short action verb so
+// the operator sees "Cannot complete — <the backend's sentence>" instead of
+// `{"error":"…","message":"…"}`.
 
 export type ApiErrorDetail = {
   error?: string;
@@ -20,6 +20,9 @@ export type ApiErrorDetail = {
   yield_pct?: number | string;
   output_qty_kg?: number | string;
   rm_consumed_kg?: number | string;
+  // floor_not_allowed: the floors refused, and the user's own (details block).
+  requested?: string | string[];
+  allowed_floors?: string[];
 };
 
 /**
@@ -89,11 +92,11 @@ export function friendlyApiError(raw: unknown): string {
     case "admin_only":
       return fromBackend || "Only admin users can perform this action.";
     // ── JC lifecycle ────────────────────────────────────────────────
+    // Complete and Close JC both refuse with this code, each with a whole
+    // sentence, so no verb is put in front of the server's own.
     case "open_batch":
-      return compose(
-        "complete",
-        `Batch ${detail.batch_number ?? "?"} is still open. Close every batch before completing the job card.`,
-      );
+      return fromBackend
+        || `Batch ${detail.batch_number ?? "?"} is still open. Close every batch before completing the job card.`;
     case "open_shift":
       return compose("complete", "an active shift segment is still running. Stop the shift before completing.");
     case "open_segment_exists":
@@ -215,6 +218,16 @@ export function friendlyApiError(raw: unknown): string {
       return fromBackend || "Nothing to update — no fields changed.";
     case "job_cards_already_exist":
       return compose("approve plan", "job cards have already been generated for this plan.");
+    // ── Floors (backend services/chain_floors, stock-take place_scope) ──
+    case "floor_not_allowed": {
+      // The server's sentence names the floors and lists the user's own.
+      if (fromBackend) return fromBackend;
+      const asked = ([] as string[]).concat(detail.requested ?? []);
+      const mine = detail.allowed_floors ?? [];
+      return `${asked.length ? asked.join(", ") : "That floor"} is not one of your floors.`
+        + (mine.length ? ` Your floors: ${mine.join(", ")}.` : "")
+        + " Ask a planner to make this change, or an admin to add the floor to your profile.";
+    }
     // ── Fulfillment / SO ───────────────────────────────────────────
     case "fulfillment_not_found":
       return "Fulfillment row not found.";

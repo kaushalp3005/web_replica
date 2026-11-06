@@ -26,4 +26,6 @@ export const WEIGHT_SAMPLE_COUNT = 20;
 // rounding noise; at or above we surface a red "No". Matches the operator
 // expectation on the floor: weighing scales repeat to within ~30-40 g per
 // batch, so 50 g is a noise floor rather than a strict allowance.
+// Not for Dispatch / Distribute / Close: those follow the server's
+// remaining_to_send_kg (job-card-send-on.ts).
 export const BALANCE_TOLERANCE_KG = 0.05;

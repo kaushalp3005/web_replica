@@ -28,12 +28,14 @@ import {
 import { useParams, useRouter } from "next/navigation";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
 import { useHasPermission, useHasRole, useIsAdmin, useMe, useRequireAuth, useUserInitial } from "@/lib/user";
-import { BALANCE_TOLERANCE_KG, WEIGHT_SAMPLE_COUNT } from "@/lib/constants";
+import { WEIGHT_SAMPLE_COUNT } from "@/lib/constants";
 import { allowedDifferenceKg, isWithinBalance, toleranceFraction } from "@/lib/job-card-balance";
 import { cleanReason, completeAnywayPrompt, MIN_REASON_LEN, readOverrideOffer } from "@/lib/job-card-override";
 import { REFRESH_RETRY_MS, refreshFailureView } from "@/lib/job-card-refresh";
 import { unsavedPrompt } from "@/lib/job-card-unsaved";
 import { distributeSummary, sentOnNote } from "@/lib/job-card-handoff";
+import { closeConfirmMessage, completedCardPlan, dispatchPrefill, kgText, readDispatchQty } from "@/lib/job-card-send-on";
+import { cancelBatchConfirm, cancelBatchOffered, openBatchConfirm, openBatchOffered } from "@/lib/job-card-batch";
 import { lifecycleHint, refusalCode, savedButOpenNote, upstreamCard, waitingText } from "@/lib/job-card-guidance";
 import { boxedFg, calculatedConsumption, followsCalculation, qtyText, type BatchBoxes } from "@/lib/job-card-calculated";
 import { classifyProcess, classifySteps, isPmBearingStage, STAGE_CREATE_WIP } from "@/lib/processCatalog";
@@ -202,6 +204,9 @@ type JobCardDetail = {
   next_job_card_id?: number | null;
   prev_job_card_id?: number | null;
   dispatched_to_next_kg?: number | string | null;
+  /** kg this stage made but hasn't sent on, by the server's own dispatch / close
+   *  rule (0 on the last stage). Absent from older servers. */
+  remaining_to_send_kg?: number | string | null;
   // Set on cards created by a cross-product process merge. The terminal process
   // card (output_kind SFG/WIP + next_job_card_id NULL) fans its output out to
   // every member packaging via POST .../dispatch-group.
@@ -1312,13 +1317,17 @@ function useJcEditLog(jcId: number, dep?: unknown): Set<string> {
 
 // ── Action bar ───────────────────────────────────────────────────────────
 //
-// Mirrors JobCardDetailActivity.updateActionButton — a single context-
-// sensitive button driven by status + lock + chain position:
-//   assigned/material_received & !locked  → START          → PUT /start
-//   in_progress                           → COMPLETE        → PUT /complete
-//   completed & has next & remaining > 0  → DISPATCH TO NEXT→ POST /dispatch-to-next
-//   completed & no remaining              → CLOSE JC        → PUT /close
+// Mirrors JobCardDetailActivity.updateActionButton — context-sensitive buttons
+// driven by status + lock + chain position:
+//   assigned/material_received & !locked  → START            → PUT /start
+//   in_progress                           → COMPLETE          → PUT /complete
+//   completed & has next & kg left        → DISPATCH TO NEXT  → POST /dispatch-to-next
+//   completed & merged process & kg left  → DISTRIBUTE TO PACKAGING → POST /dispatch-group
+//   completed (whatever is left)          → CLOSE JC          → PUT /close
 //   anything else                         → bar hidden
+// "kg left" is the server's remaining_to_send_kg (job-card-send-on). Completing
+// and closing both send whatever is left on to the next stage, so CLOSE JC
+// shows beside the send button and its confirm says how much goes where.
 // Each action runs a window.confirm step before firing — matches the Android
 // AlertDialog. Dispatch additionally collects the qty via window.prompt so
 // the operator can choose how much to push to the next stage.
@@ -1434,7 +1443,7 @@ function ActionBar({ detail, onReload, reloading = false, onOpenTab }: {
   // finished, nothing can move: offer to close this card instead of looping.
   async function distributeToPackaging(remainingKg: number) {
     if (!window.confirm(
-      `Distribute to packaging\n\nShare the remaining ${remainingKg.toFixed(2)} kg of the shared process `
+      `Distribute to packaging\n\nShare the remaining ${kgText(remainingKg)} of the shared process `
       + "output across every product's packaging card, in proportion to their planned quantity?")) return;
     const base = `/api/v1/production/job-cards-v2/${detail.job_card_id}`;
     setBusy(true);
@@ -1465,90 +1474,87 @@ function ActionBar({ detail, onReload, reloading = false, onOpenTab }: {
     }
   }
 
-  // Decide which button to show.
-  let label: string | null = null;
-  let onClick: (() => void) | null = null;
-  // Whether the current user is permitted for the active action (set per branch).
-  let allowed = false;
+  // Decide which buttons to show; each carries the permission it needs.
+  const actions: { label: string; onClick: () => void; allowed: boolean; primary: boolean }[] = [];
 
   if ((status === "assigned" || status === "material_received") && !isLocked) {
-    label = "START";
-    allowed = canStart;
-    onClick = () => callAction({
-      confirmTitle: "Start Production",
-      confirmMessage: "Start production for this job card? The timer will begin recording.",
-      method: "PUT",
-      path: `/api/v1/production/job-cards-v2/${detail.job_card_id}/start`,
-      okMessage: "Production started — timer running.",
+    actions.push({
+      label: "START",
+      allowed: canStart,
+      primary: true,
+      onClick: () => callAction({
+        confirmTitle: "Start Production",
+        confirmMessage: "Start production for this job card? The timer will begin recording.",
+        method: "PUT",
+        path: `/api/v1/production/job-cards-v2/${detail.job_card_id}/start`,
+        okMessage: "Production started — timer running.",
+      }),
     });
   } else if (status === "in_progress") {
-    label = "COMPLETE";
-    allowed = canComplete;
-    onClick = () => { void completeJobCard(); };
+    actions.push({ label: "COMPLETE", allowed: canComplete, primary: true, onClick: () => { void completeJobCard(); } });
   } else if (status === "completed") {
-    const fgKg = num(String(detail.section_5_output?.fg_actual_kg ?? 0));
-    const sentKg = num(String(detail.dispatched_to_next_kg ?? 0));
-    const remaining = fgKg - sentKg;
-    // 50 g tolerance — IEEE 754 noise + scale repeatability. Same constant
-    // the Accounting Summary uses, so a JC that reads "balanced" in one
-    // place can't simultaneously have a "Dispatch to next" button.
-    if (detail.next_job_card_id && remaining > BALANCE_TOLERANCE_KG) {
-      label = "DISPATCH TO NEXT";
-      allowed = canComplete;
-      onClick = () => {
-        const qtyStr = window.prompt(
-          `Dispatch to next stage\n\nRemaining: ${remaining.toFixed(2)} kg\nEnter qty to dispatch (kg):`,
-          remaining.toFixed(2),
-        );
-        if (qtyStr == null) return;
-        const qty = parseFloat(qtyStr);
-        if (!Number.isFinite(qty) || qty <= 0) {
-          window.alert("Qty must be a positive number.");
-          return;
-        }
-        if (qty > remaining + BALANCE_TOLERANCE_KG) {
-          window.alert(`Qty exceeds remaining (${remaining.toFixed(2)} kg).`);
-          return;
-        }
-        void callAction({
-          confirmTitle: "Dispatch to next stage",
-          confirmMessage: `Push ${qty.toFixed(2)} kg to the next stage?`,
-          method: "POST",
-          path: `/api/v1/production/job-cards-v2/${detail.job_card_id}/dispatch-to-next`,
-          body: { qty_kg: qty },
-          okMessage: "Dispatched.",
-        });
-      };
-    } else if (
-      // Merged-process producer: one shared process card fans its output out to
-      // every product's packaging (prev-linked, not a single next). Until it's
-      // distributed, that's the action; then it falls through to CLOSE.
-      detail.process_group_id != null &&
-      !detail.next_job_card_id &&
-      (detail.output_kind === "SFG" || detail.output_kind === "WIP") &&
-      remaining > BALANCE_TOLERANCE_KG
-    ) {
-      label = "DISTRIBUTE TO PACKAGING";
-      allowed = canComplete;
-      onClick = () => { void distributeToPackaging(remaining); };
-    } else {
-      label = "CLOSE JC";
-      allowed = canClose;
-      onClick = () => callAction({
+    // What is left comes from the server (remaining_to_send_kg): the same rule
+    // as its dispatch cap and close, not the 0.05 kg Accounting tolerance.
+    const plan = completedCardPlan(detail);
+    const remaining = plan.remainingKg;
+    // CLOSE JC whatever is left: closing sends it on, and its confirm says so.
+    actions.push({
+      label: "CLOSE JC",
+      allowed: canClose,
+      primary: plan.send === null,
+      onClick: () => callAction({
         confirmTitle: "Close Job Card",
-        confirmMessage: "Close this job card after sign-offs? It will become read-only, and anything produced but not yet dispatched is sent on to the next stage.",
+        confirmMessage: closeConfirmMessage(detail),
         method: "PUT",
         path: `/api/v1/production/job-cards-v2/${detail.job_card_id}/close`,
         okMessage: "Job card closed.",
         okMessageFrom: (reply) => "Job card closed." + sentOnNote(reply),
         // The refusal now says who must sign; take the operator to where they do.
         onRefused: (code) => { if (code === "missing_sign_offs") onOpenTab?.("signoffs"); },
+      }),
+    });
+    if (plan.send === "dispatch" && plan.target?.kind === "next") {
+      const nextId = plan.target.jobCardId;
+      actions.push({
+        label: "DISPATCH TO NEXT",
+        allowed: canComplete,
+        primary: true,
+        onClick: () => {
+          const qtyStr = window.prompt(
+            `Dispatch to next stage\n\nRemaining: ${kgText(remaining)}\nEnter qty to dispatch (kg):`,
+            dispatchPrefill(remaining),
+          );
+          if (qtyStr == null) return;
+          const read = readDispatchQty(qtyStr, remaining);
+          if ("error" in read) {
+            window.alert(read.error);
+            return;
+          }
+          void callAction({
+            confirmTitle: "Dispatch to next stage",
+            confirmMessage: `Send ${kgText(read.qty)} on to job card ${nextId}?`,
+            method: "POST",
+            path: `/api/v1/production/job-cards-v2/${detail.job_card_id}/dispatch-to-next`,
+            body: { qty_kg: read.qty },
+            okMessage: "Dispatched.",
+          });
+        },
+      });
+    } else if (plan.send === "distribute") {
+      // Merged-process producer: one shared process card fans its output out to
+      // every product's packaging (prev-linked, not a single next).
+      actions.push({
+        label: "DISTRIBUTE TO PACKAGING",
+        allowed: canComplete,
+        primary: true,
+        onClick: () => { void distributeToPackaging(remaining); },
       });
     }
   }
 
-  // Hide the lifecycle CTA when the role lacks the matching permission.
-  if (!label || !onClick || !allowed) return null;
+  // Hide each lifecycle CTA the role lacks the matching permission for.
+  const shown = actions.filter((a) => a.allowed);
+  if (shown.length === 0) return null;
 
   // C10 (Wave 4) — migrated to LockableButton. Lock state goes through the
   // shared hook so the disabled / tooltip behaviour matches every other
@@ -1558,25 +1564,29 @@ function ActionBar({ detail, onReload, reloading = false, onOpenTab }: {
   // honour the lock + busy gating.
   const lockState = { isLocked, lockedReason: detail.locked_reason ?? null };
   return (
-    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] px-4 py-2 mb-4 flex justify-end">
-      <LockableButton
-        lockState={lockState}
-        busy={busy}
-        // Disabled while a refetch is in flight: during a reload the page keeps
-        // showing the stale detail (loading only blanks the page on first load),
-        // so without this the just-clicked CTA would stay live against an
-        // about-to-change status — the classic double-submit "currently
-        // 'completed'" rejection. Re-enables once fresh detail lands.
-        disabled={reloading}
-        onClick={onClick}
-        variant="primary"
-        // Full width below md: this is the lifecycle CTA the floor presses
-        // most, and a ~200 px target hugging the right edge of a phone card
-        // is the hardest thing on the screen to hit. md+ is unchanged.
-        className="h-9 px-4 text-[13px] font-bold tracking-wide w-full md:w-auto justify-center"
-      >
-        {label}
-      </LockableButton>
+    // Stacked below md so each full-width button keeps its own row.
+    <div className="bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] px-4 py-2 mb-4 flex justify-end gap-2 max-md:flex-col">
+      {shown.map((a) => (
+        <LockableButton
+          key={a.label}
+          lockState={lockState}
+          busy={busy}
+          // Disabled while a refetch is in flight: during a reload the page keeps
+          // showing the stale detail (loading only blanks the page on first load),
+          // so without this the just-clicked CTA would stay live against an
+          // about-to-change status — the classic double-submit "currently
+          // 'completed'" rejection. Re-enables once fresh detail lands.
+          disabled={reloading}
+          onClick={a.onClick}
+          variant={a.primary || shown.length === 1 ? "primary" : "secondary"}
+          // Full width below md: this is the lifecycle CTA the floor presses
+          // most, and a ~200 px target hugging the right edge of a phone card
+          // is the hardest thing on the screen to hit. md+ is unchanged.
+          className="h-9 px-4 text-[13px] font-bold tracking-wide w-full md:w-auto justify-center"
+        >
+          {a.label}
+        </LockableButton>
+      ))}
     </div>
   );
 }
@@ -1982,7 +1992,7 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
     items.push({
       label: "Close JC",
       enabled: true,
-      onClick: () => closeJc(),
+      onClick: () => { void closeJc(); },
     });
   }
   if (showForceUnlock) {
@@ -2020,9 +2030,17 @@ function OverflowMenu({ detail, onReload }: { detail: JobCardDetail; onReload: (
     }
   }
 
-  function closeJc() {
-    if (!window.confirm("Close Job Card\n\nClose this job card after sign-offs? It will become read-only.")) return;
-    void callApi("PUT", `/api/v1/production/job-cards-v2/${detail.job_card_id}/close`, undefined, "Job card closed.");
+  // Same confirm and reply as the action bar's CLOSE JC: what closing sends on.
+  async function closeJc() {
+    if (!window.confirm(`Close Job Card\n\n${closeConfirmMessage(detail)}`)) return;
+    try {
+      const res = await apiFetch(`/api/v1/production/job-cards-v2/${detail.job_card_id}/close`, { method: "PUT" });
+      if (!res.ok) throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
+      window.alert("Job card closed." + sentOnNote(await res.json().catch(() => null)));
+      onReload();
+    } catch (e) {
+      window.alert(friendlyJobCardError(e));
+    }
   }
   function forceUnlockJc() {
     // Delegates to the module-scope shared runner so the LockBanner CTA
@@ -3581,9 +3599,11 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   // Fine-grained permission gates (UX only; server still enforces + scopes).
   //   accounting/edit → the Output & Accounting form (folded into inputsDisabled)
   //   overview/start  → Open Batch ; overview/complete → Close Batch
+  //   overview/close  → Cancel batch (the cancel route's own gate)
   const canEditAccounting = useHasPermission("production", "job_cards", "accounting", "edit");
   const canStartBatch = useHasPermission("production", "job_cards", "overview", "start");
   const canCompleteBatch = useHasPermission("production", "job_cards", "overview", "complete");
+  const canCancelBatch = useHasPermission("production", "job_cards", "overview", "close");
 
   // ── Stage 3: per-batch form binding ─────────────────────────────────
   // Fetches all batches for this JC so the BatchSelector dropdown can
@@ -3742,6 +3762,16 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     scan(detail.balance_materials);
     return s;
   }, [detail.outputs, detail.consumption_lines, detail.byproducts, detail.balance_materials]);
+  // batch_ids with a saved output row: Cancel batch isn't offered on them (the
+  // server cancels only an empty batch).
+  const outputBatchIds = useMemo(() => {
+    const s = new Set<number>();
+    for (const o of detail.outputs ?? []) {
+      const bid = (o as { batch_id?: number | null }).batch_id;
+      if (bid != null) s.add(Number(bid));
+    }
+    return s;
+  }, [detail.outputs]);
 
   // Selected batch — drives form hydration + the POST body's batch_id.
   // Default (first load) prefers a batch that HAS data over an empty open
@@ -4240,8 +4270,9 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   // input sat inside the Accounting form, so it blocked saving the figures of
   // an already-open batch.) A name can still be added later with Rename.
   const doOpenBatch = useCallback(async () => {
-    // Confirm before creating — a new batch is not trivially undoable.
-    if (!window.confirm("Open a new batch?")) return;
+    // Confirm before creating — a new batch is not trivially undoable. On a
+    // completed card (an admin's missed batch) it says Close JC now waits for it.
+    if (!window.confirm(openBatchConfirm(detail.status, ""))) return;
     setBatchActionMsg(null);
     setBatchActionBusy(true);
     try {
@@ -4267,7 +4298,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     } finally {
       setBatchActionBusy(false);
     }
-  }, [detail.job_card_id, reloadAll, refetchBatches]);
+  }, [detail.job_card_id, detail.status, reloadAll, refetchBatches]);
 
   // 072: rename a batch (so a batch — including legacy ones — can be given the
   // free-text name shown in the batch table). Acts on the passed row. A name is
@@ -4293,6 +4324,35 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       setBatchActionBusy(false);
     }
   }, [detail.job_card_id, refetchBatches]);
+
+  // Cancel an open batch that has nothing on it — opened by mistake, or the
+  // missed batch an admin opened on a completed card turned out not to be
+  // needed: Close JC is refused while any batch is open. The server cancels
+  // only an empty batch (no output, dispatch, shift or boxes) and says why
+  // otherwise; its sentence is shown as is.
+  const doCancelBatch = useCallback(async (batch: BatchRow) => {
+    if (!window.confirm(cancelBatchConfirm(batchLabel(batch)))) return;
+    setBatchActionMsg(null);
+    setBatchActionBusy(true);
+    try {
+      const res = await apiFetch(
+        `/api/v1/production/job-cards-v2/${detail.job_card_id}/batches/${batch.batch_id}/cancel`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+      if (!res.ok) throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
+      // A 200 still says `error` when nothing was cancelled (older server).
+      const body = await res.json().catch(() => null);
+      if (body?.error) throw new Error(body.message ?? `Batch ${batchLabel(batch)} was not cancelled.`);
+      setBatchActionMsg({ kind: "ok", msg: `Batch ${batchLabel(batch)} cancelled.` });
+      // The batch list, and the card around it.
+      await refetchBatches();
+      reloadAll();
+    } catch (e) {
+      setBatchActionMsg({ kind: "err", msg: friendlyJobCardError(e) });
+    } finally {
+      setBatchActionBusy(false);
+    }
+  }, [detail.job_card_id, refetchBatches, reloadAll]);
 
   // Re-sync on detail reload. Skipped when the operator has unsaved
   // input (formDirty.current === true) so an auto-poll doesn't wipe the
@@ -5813,6 +5873,13 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
       b,
       isLoaded: b.batch_id === selectedBatchId,
       canManage: detail.status !== "completed" || isAdmin,
+      // An open batch with no output on it (lib/job-card-batch): Close JC waits
+      // while it is open, so whoever may close the card may cancel it.
+      cancellable: canCancelBatch && detail.status !== "closed" && detail.status !== "cancelled"
+        && cancelBatchOffered(b, {
+        hasOutputRows: outputBatchIds.has(b.batch_id),
+        boxes: boxedFg(boxRollup, b.batch_id)?.boxes,
+      }),
       busy: batchActionBusy || submitting || lock.isLocked || lifecycleLocked,
       statusColor: b.status === "open"
         ? "bg-[#eaf6ed] text-[#1d8102]"
@@ -5847,6 +5914,18 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
           className={`${sizeCls} text-[11px] rounded-[2px] border border-transparent text-[var(--aws-link)] hover:underline disabled:opacity-50 disabled:cursor-not-allowed`}
         >
           Rename
+        </button>
+      ) : null}
+      {r.cancellable ? (
+        <button
+          type="button"
+          onClick={() => void doCancelBatch(r.b)}
+          // Not held back before START: an empty batch can go at any time.
+          disabled={batchActionBusy || submitting || lock.isLocked}
+          title="Cancel this batch — it has no output. Close JC waits while a batch is open."
+          className={`${sizeCls} text-[11px] rounded-[2px] border border-transparent text-[var(--aws-error)] hover:underline disabled:opacity-50 disabled:cursor-not-allowed`}
+        >
+          Cancel batch
         </button>
       ) : null}
       {isProducerStage ? (
@@ -5945,8 +6024,11 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
         ) : null}
         {/* Open a new batch — no name needed on any stage; the batch gets its
             auto-generated 8-digit code. Hidden when the role lacks
-            overview/start (batch-open). */}
-        {(detail.status !== "completed" || isAdmin) && canStartBatch ? (
+            overview/start (batch-open), and where
+            the server refuses one (lib/job-card-batch): before the card is
+            assigned, on a closed or cancelled card, and on a completed card
+            for anyone but an admin adding a missed batch. */}
+        {openBatchOffered(detail.status, isAdmin) && canStartBatch ? (
           <div className="flex items-center gap-2 mb-3 flex-wrap">
             <label className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)] sm:w-[110px]">
               New batch
@@ -5971,7 +6053,9 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
           <div className="text-[12px] text-[var(--text-muted)] italic mb-2">loading batches…</div>
         ) : batches.length === 0 ? (
           <div className="text-[12px] text-[var(--text-secondary)] mb-2">
-            No batches yet — click <strong>Open Batch</strong> to create the first one.
+            {openBatchOffered(detail.status, isAdmin) && canStartBatch ? (
+              <>No batches yet — click <strong>Open Batch</strong> to create the first one.</>
+            ) : "No batches yet."}
           </div>
         ) : (
           /* Two layouts, ONE data source (batchListRows above).

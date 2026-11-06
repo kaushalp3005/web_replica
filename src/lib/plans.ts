@@ -130,6 +130,13 @@ export interface PlanStepRow {
   std_time_min?: number | string | null;
   loss_pct?: number | string | null;
   notes?: string | null;
+  // The step has job cards still waiting (locked / unlocked), which move with
+  // its floor. Absent from an older server.
+  carded?: boolean;
+  // The floors those waiting cards are on (not always the step's own floor):
+  // what update_step_v2 checks when the floor changes (lib/floorChoices
+  // stepFloorTouched). Absent from an older server.
+  card_floors?: (string | null)[];
   [k: string]: unknown;
 }
 
@@ -146,6 +153,11 @@ export interface PlanLineRow {
   // Head cards created for this line (one per chain). 0 ⇒ route is only a
   // plan template; >0 ⇒ job cards exist.
   job_card_count?: number | null;
+  // Set when the line's job cards are in a merged process run (reason
+  // "merged_run") or several chains ("multiple_chains"): its steps can't be
+  // added, moved or removed (lib/plan-steps-lock). null, or absent from an
+  // older server, when they can.
+  steps_locked?: { reason: string; message: string } | null;
   steps?: PlanStepRow[];
   [k: string]: unknown;
 }
@@ -281,6 +293,9 @@ export interface ProcessMergeGroup {
   total_qty_kg: number;
   total_qty_units: number;
   mergeable: true;
+  // The SFG these products already make (their cards, else their routing, else
+  // their standard SFG) when they all agree; null otherwise.
+  suggested_sfg?: string | null;
 }
 
 export interface ProcessMergeValidation {
@@ -370,7 +385,9 @@ export async function dispatchProcessGroup(
 
 // Current job-card config for a line, shaped to prefill the Edit wizard.
 // exists=false ⇒ no cards yet (Create); editable=false ⇒ a stage already
-// started, so it can't be replaced.
+// started, or (rebuild_blocked says why) the un-started cards can't be rebuilt —
+// either way they are edited in place (apply-edits). A one-card chain has
+// wip_steps [] and its card as pkg_*.
 export interface LineJobCardConfigStep {
   job_card_id?: number | null;
   process?: string | null;
@@ -378,6 +395,11 @@ export interface LineJobCardConfigStep {
   sfg_output?: string | null;
   status?: string | null;
   started?: boolean;
+  // The saved card holds material the stage before sent it, and the floor has
+  // asked for material for it: either keeps it from being removed in place.
+  // Absent from an older server (read as false).
+  holds_material?: boolean;
+  has_requisition?: boolean;
 }
 
 export interface LineJobCardConfig {
@@ -387,6 +409,7 @@ export interface LineJobCardConfig {
   canonical_sfg?: string | null;
   editable?: boolean;
   started?: boolean;
+  rebuild_blocked?: string | null;
   qty_kg?: number | null;
   qty_units?: number | null;
   wip_steps?: LineJobCardConfigStep[];

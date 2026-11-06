@@ -20,9 +20,13 @@ import {
   searchCanonicalSfg,
   fmtPlanKg,
 } from "@/lib/plans";
-import { FACTORY_TO_WAREHOUSE, FLOORS_BY_FACTORY, type FactoryCode } from "@/lib/planBuilder";
 import { PROCESS_OPTIONS } from "@/lib/processCatalog";
 import { buildArticleOptions, getLineId, numOr0, round3 } from "@/lib/planRowActions";
+import { chainFloorProblems, finishedCardMoved, floorChoicesFor, floorScopeNote, liveEditTouched, prefillFloor, productionFloors, touchedFloors, type FloorChoice } from "@/lib/floorChoices";
+import { MIN_PROCESS_ROWS, addProcessBlocked, cardFinished, chainFinishedNote, editsInPlace, removeBlocked } from "@/lib/job-card-edit";
+import { mergeProcessRows, seedStandardSfg, sfgFeedIndex } from "@/lib/job-card-sfg";
+import { useUserScope, useHasPermission } from "@/lib/user";
+import { FloorPicker } from "@/lib/FloorPicker";
 
 // ── Create Job Card modal (scaffold) ───────────────────────────────────
 //
@@ -145,9 +149,10 @@ export function CreateJobCardModal({
   // stage; rows above it are WIP/SFG producers. All rows are mergeable, so a
   // WIP process can be merged with packing into e.g. "Sorting + Packing".
   // Seed = one blank WIP + one blank Packaging terminal.
-  const [wipSteps, setWipSteps] = useState<WipStep[]>(
-    [{ process: "", floor: "", sfgOutput: "" }, { process: "Packaging", floor: "", sfgOutput: "" }],
-  );
+  const [wipSteps, setWipSteps] = useState<WipStep[]>(() => [
+    { uid: newRowUid(), process: "", floor: "", sfgOutput: "" },
+    { uid: newRowUid(), process: "Packaging", floor: "", sfgOutput: "" },
+  ]);
 
   // BOM of the selected article — drives the read-only per-step RM/PM view.
   const [bom, setBom] = useState<PlanBomSummary | null>(null);
@@ -165,6 +170,10 @@ export function CreateJobCardModal({
   // tail, remove with a forced JC-data record. `chainStarted` flips the modal
   // from the un-started full-replace path to the live apply-edits path.
   const [chainStarted, setChainStarted] = useState(false);
+  // Nothing started, but the server can't rebuild the cards (the floor asked
+  // for material, or the line keeps cancelled cards): why, and they are edited
+  // in place like a started chain.
+  const [rebuildBlocked, setRebuildBlocked] = useState<string | null>(null);
   const [pkgJobCardId, setPkgJobCardId] = useState<number | null>(null);
   const [removeReasons, setRemoveReasons] = useState<Record<string, string>>({});
   // Read-only snapshot of the existing job-card chain (edit mode) so the
@@ -177,7 +186,7 @@ export function CreateJobCardModal({
   }[]>([]);
   // Canonical SFG name for the selected article (auto-fill, design §5.4).
   const [canonicalSfg, setCanonicalSfg] = useState("");
-  const liveEdit = mode === "edit" && chainStarted;
+  const liveEdit = mode === "edit" && editsInPlace({ started: chainStarted, editable });
 
   const selectedLine = lines.find((l, i) => getLineId(l, i) === selected) ?? null;
   const selectedBomId = selectedLine?.bom_id ?? null;
@@ -214,10 +223,24 @@ export function CreateJobCardModal({
     return () => c.abort();
   }, [selectedBomId]);
 
-  // Floors come from the plan's factory: warehouse → factory code → floor set.
-  const factory = (Object.keys(FACTORY_TO_WAREHOUSE) as FactoryCode[])
-    .find((c) => FACTORY_TO_WAREHOUSE[c] === plan.warehouse);
-  const floors = factory ? [...FLOORS_BY_FACTORY[factory]] : [];
+  // Floors come from the plan's factory (any spelling of its code), and which of
+  // them this person may use from lib/floorChoices: planners (plans › approve,
+  // the server's own test) any floor of it, others their own floors.
+  const scope = useUserScope();
+  const anyFloorInFactory = useHasPermission("production", "plans", "approve", "create");
+  const warehouse = plan.warehouse ?? null;
+  const freeTextFloors = productionFloors(warehouse).length === 0;
+  const floorNote = floorScopeNote(scope, warehouse, { anyFloorInFactory });
+  // A saved floor stays pickable as stored: in a live edit the row's own card's
+  // (the server diffs by job card), in an un-started edit any floor of the chain
+  // it replaces (the server compares the two chains' floors).
+  const savedFloorOf = new Map(existingCards.filter((c) => c.jobCardId != null).map((c) => [c.jobCardId, c.floor]));
+  const floorChoices = (s: WipStep): FloorChoice[] => floorChoicesFor(scope, warehouse, {
+    anyFloorInFactory,
+    saved: mode !== "edit" ? null
+      : liveEdit ? (s.jobCardId != null ? savedFloorOf.get(s.jobCardId) ?? null : null)
+        : existingCards.map((c) => c.floor),
+  });
 
   async function goNext() {
     if (selected == null) return;
@@ -260,36 +283,46 @@ export function CreateJobCardModal({
           setMode("edit");
           setEditable(cfg.editable !== false);
           setChainStarted(cfg.started === true);
+          setRebuildBlocked(cfg.rebuild_blocked ?? null);
           setPkgJobCardId(cfg.pkg_job_card_id ?? null);
           setRemoveReasons({});
           setQtyKg(cfg.qty_kg != null ? String(cfg.qty_kg) : "");
           setQtyUnits(cfg.qty_units != null ? String(cfg.qty_units) : "");
-          setWipSteps([
+          // Each step keeps the SFG it was saved with; the standard one only
+          // fills a blank last process (lib/job-card-sfg).
+          setWipSteps(seedStandardSfg([
             ...(cfg.wip_steps ?? []).map((s) => ({
+              uid: newRowUid(),
               process: s.process ?? "",
               floor: s.floor ?? "",
-              // Auto-fill the canonical SFG for articles that have one
-              // (overwrites a prior free-typed value); fall back to the
-              // saved value only when there's no canonical. Stays editable.
-              sfgOutput: canon || (s.sfg_output ?? ""),
+              sfgOutput: s.sfg_output ?? "",
               jobCardId: s.job_card_id ?? null,
               started: s.started === true,
+              status: s.status ?? null,
+              // What decides whether it can be removed in place (an older
+              // server sends neither: read as nothing held, nothing asked).
+              holdsMaterial: s.holds_material === true,
+              hasRequisition: s.has_requisition === true,
             })),
-            // Terminal Final-FG (packaging) row — always last.
+            // Terminal Final-FG (packaging) row — always last. A one-card chain
+            // is this row alone.
             {
+              uid: newRowUid(),
               process: cfg.pkg_process ?? "Packaging",
               floor: cfg.pkg_floor ?? "",
               sfgOutput: "",
               jobCardId: cfg.pkg_job_card_id ?? null,
               started: cfg.pkg_started === true,
+              status: cfg.pkg_status ?? null,
             },
-          ]);
+          ], canon));
         } else {
           // CREATE a fresh chain, OR "create another" partial chain when cards
           // already exist but the operator chose Create — a NEW chain drawing
           // from the line's remaining balance.
           setMode("create");
           setChainStarted(false);
+          setRebuildBlocked(null);
           // Default qty: create-another → the line's remaining balance; a fresh
           // create → the combined (possibly-merged) option qty.
           const remainingKg = selectedLine
@@ -308,30 +341,38 @@ export function CreateJobCardModal({
           // chain's route when carded, else the plan's snapshot route). Each new
           // chain gets its own steps (jobCardId null).
           if (cfg.wip_steps && cfg.wip_steps.length) {
-            setWipSteps([
+            // Every card of a new chain is new: its floors in the declared
+            // spelling, blank where the factory's list doesn't hold one. SFGs
+            // as the existing chain has them (none on a plan route); the
+            // standard one goes on the last process only.
+            setWipSteps(seedStandardSfg([
               ...cfg.wip_steps.map((s) => ({
+                uid: newRowUid(),
                 process: s.process ?? "",
-                floor: s.floor ?? "",
-                sfgOutput: canon || (s.sfg_output ?? ""),
+                floor: prefillFloor(warehouse, s.floor),
+                sfgOutput: s.sfg_output ?? "",
                 jobCardId: null,
                 started: false,
               })),
               // Terminal Final-FG (packaging) row — always last.
-              { process: cfg.pkg_process ?? "Packaging", floor: cfg.pkg_floor ?? "", sfgOutput: "", jobCardId: null, started: false },
-            ]);
+              { uid: newRowUid(), process: cfg.pkg_process ?? "Packaging", floor: prefillFloor(warehouse, cfg.pkg_floor), sfgOutput: "", jobCardId: null, started: false },
+            ], canon));
           } else {
-            // Fresh chain, no plan steps: seed the first WIP step's SFG output.
-            setWipSteps((prev) => prev.map((x, idx) => (idx === 0 && !x.sfgOutput ? { ...x, sfgOutput: canon } : x)));
+            // Fresh chain, no plan steps: the standard SFG on its last process.
+            setWipSteps((prev) => seedStandardSfg(prev, canon));
           }
         }
       } catch {
         setMode("create");   // fall back to a create attempt; the server still guards
         setChainStarted(false);
+        setRebuildBlocked(null);
+        setCanonicalSfg("");  // not another article's standard SFG at Save
       } finally {
         setLoadingCfg(false);
       }
     } else {
       setMode("create");
+      setCanonicalSfg("");
       // Prefill combined qty from the selected option the first time we advance.
       if (qtyKg === "" && selectedOption && selectedOption.kg > 0) {
         setQtyKg(String(selectedOption.kg));
@@ -344,21 +385,32 @@ export function CreateJobCardModal({
   }
 
   // Add a WIP process — inserted BEFORE the terminal so the last row stays the
-  // Final-FG (packaging) stage.
+  // Final-FG (packaging) stage. The new row is the last process now, so the
+  // standard SFG moves to it (seedStandardSfg, as after every move/remove/merge).
   function addWipProcess() {
-    setWipSteps((s) =>
+    setWipSteps((s) => seedStandardSfg(
       s.length === 0
-        ? [{ process: "", floor: "", sfgOutput: "" }]
-        : [...s.slice(0, -1), { process: "", floor: "", sfgOutput: "" }, s[s.length - 1]],
-    );
+        ? [{ uid: newRowUid(), process: "", floor: "", sfgOutput: "" }]
+        : [...s.slice(0, -1), { uid: newRowUid(), process: "", floor: "", sfgOutput: "" }, s[s.length - 1]],
+      canonicalSfg,
+    ));
   }
 
   // Every row needs a process + floor. The last row IS the terminal Final-FG
-  // stage. CREATE allows a single-process route (1 row → one RM→FG card); EDIT
-  // still needs ≥2 (the replace path can't collapse a chain to a lone stage).
-  const minRows = mode === "create" ? 1 : 2;
-  const wipOk = wipSteps.length >= minRows && wipSteps.every((s) => s.process !== "" && s.floor !== "");
+  // stage. A single row is a whole chain — one RM→FG card — in Create and in
+  // Edit alike (lib/job-card-edit): Edit used to need two, so a one-card chain
+  // opened with Save off.
+  const wipOk = wipSteps.length >= MIN_PROCESS_ROWS && wipSteps.every((s) => s.process !== "" && s.floor !== "");
   const canCreate = qtyKg.trim() !== "" && Number(qtyKg) > 0 && wipOk;
+  // In place, a process goes in only before a last card still waiting for the
+  // stage before it; nothing changes once every card has finished, and a
+  // finished card stays on its floor (the server refuses the whole save). The
+  // saved chain's first card is the one the server calls first, wherever its
+  // row now sits.
+  const firstJobCardId = existingCards[0]?.jobCardId ?? null;
+  const addBlocked = addProcessBlocked(liveEdit, wipSteps, { firstJobCardId });
+  const finishedNote = liveEdit ? chainFinishedNote(existingCards) : null;
+  const finishedMove = liveEdit ? finishedCardMoved(existingCards, wipSteps) : null;
 
   // Quantity cap (decision: cap-at-remaining). A carded line's remaining balance
   // is planned − Σ(chain-head qty); a fresh line's cap is the (merged) option
@@ -376,11 +428,25 @@ export function CreateJobCardModal({
   const overQty = capKg != null && Number(qtyKg) > capKg + 0.001;
   const overBlocks = mode === "create" && overQty;
 
+  // The floors this Save touches that the server would refuse, said before Save
+  // (lib/floorChoices, the server's rules): a new chain touches every floor; an
+  // un-started edit only floors that gain or lose a card against the chain it
+  // replaces; a live edit the added, moved and removed cards — a quantity-only
+  // edit none.
+  const floorProblem = step === 2
+    ? chainFloorProblems(scope, warehouse,
+      mode !== "edit" ? wipSteps.map((s) => s.floor)
+        : liveEdit ? liveEditTouched(existingCards, wipSteps)
+          : touchedFloors(existingCards.map((c) => c.floor), wipSteps.map((s) => s.floor)),
+      { anyFloorInFactory })
+    : null;
+
   // Create + un-started edit go through the replace path (needs `editable`);
-  // a started chain goes through the live apply-edits path (always submittable).
-  // Over-remaining on a create is a HARD block (cap-at-remaining).
+  // a started chain, or one that can't be rebuilt, goes through the live
+  // apply-edits path. Over-remaining on a create is a HARD block (cap-at-remaining).
   const canSubmit =
-    canCreate && (mode === "create" || editable || liveEdit) && !overBlocks;
+    canCreate && (mode === "create" || editable || liveEdit) && !overBlocks && floorProblem == null
+    && finishedNote == null && finishedMove == null;
 
   // Remove a WIP row. A started row force-records its job-card data on the
   // server, so we capture a reason first (the operator must confirm).
@@ -458,6 +524,7 @@ export function CreateJobCardModal({
                               setMode("create");
                               setEditable(true);
                               setChainStarted(false);
+                              setRebuildBlocked(null);
                               setPkgJobCardId(null);
                               setRemoveReasons({});
                               setExistingCards([]);
@@ -592,7 +659,9 @@ export function CreateJobCardModal({
                   <button
                     type="button"
                     onClick={addWipProcess}
-                    className="h-6 px-2 text-[11px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)] inline-flex items-center gap-1"
+                    disabled={addBlocked != null || finishedNote != null}
+                    title={addBlocked ?? undefined}
+                    className="h-6 px-2 text-[11px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)] inline-flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-[var(--aws-border-strong)]"
                   >
                     <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
                       <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
@@ -602,28 +671,51 @@ export function CreateJobCardModal({
                 </div>
                 <WipProcessList
                   steps={wipSteps}
-                  floors={floors}
+                  floorChoices={floorChoices}
+                  freeTextFloors={freeTextFloors}
                   onChange={setWipSteps}
                   liveEdit={liveEdit}
+                  firstJobCardId={firstJobCardId}
                   onRemoveStarted={onRemoveStartedReason}
                   canonicalSfg={canonicalSfg}
                   entity={plan.entity ?? undefined}
                 />
+                {addBlocked && !finishedNote ? (
+                  <p className="mt-1 text-[10px] text-[var(--text-muted)]">{addBlocked}</p>
+                ) : null}
               </div>
 
-              {floors.length === 0 ? (
+              {freeTextFloors ? (
                 <p className="text-[10px] text-[var(--text-muted)] italic">
                   No floor list for this warehouse — enter the floor name.
                 </p>
+              ) : floorNote ? (
+                <p className="text-[10px] text-[var(--text-muted)]">{floorNote}</p>
+              ) : null}
+              {floorProblem ? (
+                <p className="text-[11px] text-[#9a393e]">{floorProblem.message}</p>
+              ) : null}
+              {finishedMove && !finishedNote ? (
+                <p className="text-[11px] text-[#9a393e]">{finishedMove.message}</p>
               ) : null}
             </div>
 
-            {liveEdit ? (
+            {finishedNote ? (
               <p className="px-2 py-1.5 text-[11px] rounded border text-[#664d03] border-[#ffe69c] bg-[#fff8e6]">
-                <strong>Live edit</strong> — some stages have started. You can change floors and
-                quantity, and add new processes. Started processes (badged) keep their step but
-                can&apos;t be reordered; removing one records its job-card data, then cancels it.
-                Quantity changes update the linked sales order.
+                {finishedNote}
+              </p>
+            ) : liveEdit ? (
+              <p className="px-2 py-1.5 text-[11px] rounded border text-[#664d03] border-[#ffe69c] bg-[#fff8e6]">
+                {chainStarted ? (
+                  <><strong>Live edit</strong> — some stages have started.</>
+                ) : (
+                  <><strong>Edited in place</strong> — {rebuildBlocked ?? "these job cards can't be rebuilt."}</>
+                )}{" "}
+                You can change floors and quantity, and add a process before a stage that is still
+                waiting for the one before it. Started processes (badged) keep their name and step,
+                and a finished one its floor. A running stage is stopped from its job card rather than
+                removed here, and a stage that already holds material stays. Quantity changes update
+                the linked sales order.
               </p>
             ) : null}
 
@@ -685,9 +777,11 @@ export function CreateJobCardModal({
                   onClick={async () => {
                     setCreating(true);
                     // Split the unified list: all-but-last = WIP; the last row is
-                    // the terminal Final-FG (packaging) stage.
-                    const term = wipSteps[wipSteps.length - 1];
-                    const wipOnly = wipSteps.slice(0, -1);
+                    // the terminal Final-FG (packaging) stage. The standard SFG
+                    // fills a last process left blank (lib/job-card-sfg).
+                    const rows = seedStandardSfg(wipSteps, canonicalSfg);
+                    const term = rows[rows.length - 1];
+                    const wipOnly = rows.slice(0, -1);
                     const ok = await onContinue({
                       planLineId: selected, qtyKg, qtyUnits,
                       wipSteps: wipOnly,
@@ -724,31 +818,63 @@ export function CreateJobCardModal({
 // (drag + ↑/↓ reorder, multi-select merge, remove) adapted to the WIP
 // { process, floor } shape. Merge joins process names with " + " and keeps a
 // floor only when the selected rows agree (conflict → blank, operator re-picks),
-// matching planning's mergeCardSteps. State (drag + merge-selection) is local;
-// committed changes flow up through onChange.
+// matching planning's mergeCardSteps, and the later process's SFG
+// (lib/job-card-sfg). State (drag + merge-selection) is local; committed
+// changes flow up through onChange.
 export type WipStep = {
+  // The row's own React key (newRowUid): set when the row is made — in the
+  // seed, a prefill from the config, Add process or a merge — and kept as it
+  // moves, so typing a new row's process doesn't remount it. Never sent.
+  // Optional: SO Creation's route rows have none and key by position.
+  uid?: string;
   process: string;
   floor: string;
   sfgOutput: string;
+  // sfgOutput is the article's standard SFG filled in on the last process
+  // (lib/job-card-sfg), not saved or typed — it moves when the rows do.
+  sfgAuto?: boolean;
   // Set when this row maps to an existing job card (live edit). `started` is
   // true once that card has progressed past locked/unlocked — the process can
   // no longer be changed/reordered, only its floor; removal force-records it.
   jobCardId?: number | null;
   started?: boolean;
+  // That card's status (live edit): what may still change on it (lib/job-card-edit).
+  status?: string | null;
+  // The saved card holds material the stage before sent it / the floor has
+  // asked for material for it (the config's holds_material / has_requisition):
+  // both keep it from being removed in place (lib/job-card-edit removeBlocked).
+  holdsMaterial?: boolean;
+  hasRequisition?: boolean;
 };
 
+let rowUidSeq = 0;
+/** A fresh WipStep key. */
+function newRowUid(): string {
+  rowUidSeq += 1;
+  return `wip-row-${rowUidSeq}`;
+}
+
 export function WipProcessList({
-  steps, floors, onChange, liveEdit = false, onRemoveStarted, canonicalSfg = "", entity, sfgReadOnly = false,
+  steps, floors = [], floorChoices, freeTextFloors, onChange, liveEdit = false, firstJobCardId = null,
+  onRemoveStarted, canonicalSfg = "", entity, sfgReadOnly = false,
 }: {
   steps: WipStep[];
-  floors: string[];
+  // A plain floor list (SO Creation's route). The job-card wizard passes
+  // floorChoices instead: the options for one row (lib/floorChoices).
+  floors?: string[];
+  floorChoices?: (s: WipStep) => FloorChoice[];
+  // Free text when the factory lists no floors (default: no floors given).
+  freeTextFloors?: boolean;
   onChange: (next: WipStep[]) => void;
   // Live edit of a started chain: started rows lock their process + reordering
-  // (floor stays editable) and removal force-records the job card first.
+  // (floor stays editable until the card finishes) and removal force-records
+  // the job card first.
   liveEdit?: boolean;
+  // The saved chain's first card: what may remove it differs (lib/job-card-edit).
+  firstJobCardId?: number | null;
   onRemoveStarted?: (jobCardId: number, reason: string) => void;
-  // Canonical SFG name for the article — drives the auto-fill placeholder + the
-  // non-match warning / "Use canonical" affordance (design §5.4).
+  // The article's standard SFG name: filled into the last process before
+  // packing, which also shows it with "Use" when it differs (design §5.4).
   canonicalSfg?: string;
   // Plan entity (cfpl/cdpl) — scopes the SFG catalogue typeahead ranking.
   entity?: string;
@@ -762,6 +888,9 @@ export function WipProcessList({
   const uid = useId();
   const sfgListId = `sfg-canon-options-${uid}`;
   const processListId = `process-options-${uid}`;
+  const choicesFor = floorChoices
+    ?? (() => floors.map((f): FloorChoice => ({ value: f, disabled: false, reason: null, saved: false })));
+  const freeText = freeTextFloors ?? (floorChoices == null && floors.length === 0);
   const dragFromRef = useRef<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   const [selectedIdxs, setSelectedIdxs] = useState<Set<number>>(new Set());
@@ -798,26 +927,38 @@ export function WipProcessList({
 
   const allSelected = steps.length > 0 && selectedIdxs.size === steps.length;
   const anySelected = selectedIdxs.size > 0;
+  const feedIdx = sfgFeedIndex(steps.length);
 
+  // Moving, removing or merging rows can change which is the last process, so
+  // the standard SFG is put where it now belongs. Typing doesn't re-fill it.
+  function arrange(next: WipStep[]) {
+    onChange(seedStandardSfg(next, canonicalSfg));
+  }
   function move(from: number, to: number) {
     if (from < 0 || from >= steps.length || to < 0 || to >= steps.length || from === to) return;
     const next = steps.slice();
     const [moved] = next.splice(from, 1);
     next.splice(to, 0, moved);
-    onChange(next);
+    arrange(next);
   }
   function setField(i: number, patch: Partial<WipStep>) {
     onChange(steps.map((x, j) => (j === i ? { ...x, ...patch } : x)));
   }
+  // Why a row's Remove is off (lib/job-card-edit): never the only row; in a
+  // live edit never the last (finished goods), a finished or running card, a
+  // card that already holds material, or a first stage the floor asked
+  // material for.
+  const removeOff = (i: number) => removeBlocked(i, steps, { inPlace: liveEdit, firstJobCardId });
   function remove(i: number) {
-    if (steps.length <= 1) return;
+    if (removeOff(i)) return;
     const s = steps[i];
-    // Removing a running stage force-records its job-card data, then cancels —
-    // confirm + capture a reason before dropping the row.
+    // Removing a started stage (only one with a team on it gets this far — a
+    // running one is stopped instead) force-records its job-card data, then
+    // cancels — confirm + capture a reason before dropping the row.
     if (liveEdit && s.started && s.jobCardId != null) {
       const entered = typeof window !== "undefined"
         ? window.prompt(
-            `Remove the running process "${s.process || "this stage"}"?\n` +
+            `Remove the process "${s.process || "this stage"}"? It has a team on it.\n` +
             "Its job-card data is recorded, then the process is cancelled.\n\nReason:",
             "",
           )
@@ -825,7 +966,7 @@ export function WipProcessList({
       if (entered == null) return;   // operator cancelled the prompt
       onRemoveStarted?.(s.jobCardId, entered.trim() || "Removed via live edit");
     }
-    onChange(steps.filter((_, j) => j !== i));
+    arrange(steps.filter((_, j) => j !== i));
   }
   function toggleSelect(i: number) {
     setSelectedIdxs((prev) => {
@@ -838,25 +979,14 @@ export function WipProcessList({
     setSelectedIdxs(on ? new Set(steps.map((_, i) => i)) : new Set());
   }
   function merge() {
-    const valid = [...selectedIdxs].filter((i) => i >= 0 && i < steps.length).sort((a, b) => a - b);
-    if (valid.length < 2) return;
-    const picked = valid.map((i) => steps[i]);
-    const process = picked.map((p) => p.process || "—").join(" + ");
-    const uniqueFloors = new Set(picked.map((p) => p.floor).filter(Boolean));
-    const floor = uniqueFloors.size === 1 ? [...uniqueFloors][0] : "";
-    // Preserve every distinct SFG output rather than silently keeping only the
-    // first — output identity is load-bearing for the SFG seam, so dropping the
-    // rest would lose the codes the operator entered. Distinct, in order; the
-    // operator can prune the joined value if the merge was a mistake.
-    const sfgOutput = [...new Set(picked.map((p) => p.sfgOutput).filter(Boolean))].join(" + ");
-    const [firstIdx, ...rest] = valid;
-    const next = steps.slice();
-    // Remove the trailing merged rows right-to-left so earlier indices stay put,
-    // then write the merged step into the first selected slot.
-    [...rest].reverse().forEach((i) => next.splice(i, 1));
-    next[firstIdx] = { process, floor, sfgOutput };
+    if (selectedIdxs.size < 2) return;
+    // The merged step makes what the later one made — joining the SFGs with
+    // " + " gave a code that exists nowhere (lib/job-card-sfg). It is a new
+    // process, so it gets a key of its own; the other rows keep theirs.
+    const next = mergeProcessRows(steps, selectedIdxs)
+      .map((r): WipStep => ("uid" in r && typeof r.uid === "string" ? r : { ...r, uid: newRowUid() }));
     setSelectedIdxs(new Set());
-    onChange(next);
+    arrange(next);
   }
 
   const iconBtn = "w-6 h-7 inline-flex items-center justify-center rounded-sm text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] disabled:opacity-30 disabled:cursor-not-allowed";
@@ -917,11 +1047,13 @@ export function WipProcessList({
         {steps.map((s, i) => {
           const isDragOver = dragOverIdx === i;
           const rowStarted = liveEdit && s.started === true;
+          // A finished card stays on its floor: the server refuses to move it.
+          const rowFinished = liveEdit && cardFinished(s.status);
           return (
             <li
               // Not keyed by the process name: typing in the Process box would
               // change the key on every letter and rebuild the row, losing focus.
-              key={`${s.jobCardId ?? "row"}-${i}`}
+              key={s.jobCardId ?? s.uid ?? `row-${i}`}
               draggable={!liveEdit}
               onDragStart={(e) => { if (liveEdit) return; dragFromRef.current = i; e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(i)); }}
               onDragEnd={() => { dragFromRef.current = null; setDragOverIdx(null); }}
@@ -976,24 +1108,19 @@ export function WipProcessList({
                     title={rowStarted ? "Process can't change once started — remove it to replace" : (s.process || undefined)}
                     className="w-full truncate h-7 px-1.5 text-[12px] font-semibold rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] disabled:bg-[var(--surface-subtle)] disabled:text-[var(--text-secondary)]"
                   />
-                  {floors.length > 0 ? (
-                    <select
-                      value={s.floor}
-                      onChange={(e) => setField(i, { floor: e.target.value })}
-                      title={s.floor || undefined}
-                      className="w-full truncate h-7 px-1.5 text-[12px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
-                    >
-                      <option value="">— Floor —</option>
-                      {floors.map((f) => <option key={f} value={f}>{f}</option>)}
-                    </select>
-                  ) : (
-                    <input
-                      value={s.floor}
-                      onChange={(e) => setField(i, { floor: e.target.value })}
-                      placeholder="Floor"
-                      className="w-full h-7 px-1.5 text-[12px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
-                    />
-                  )}
+                  <FloorPicker
+                    value={s.floor}
+                    choices={choicesFor(s)}
+                    freeText={freeText}
+                    onChange={(floor) => setField(i, { floor })}
+                    disabled={rowFinished}
+                    title={rowFinished ? `Finished, so it stays on ${s.floor || "its floor"}` : undefined}
+                    className="w-full truncate h-7 px-1.5 text-[12px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] disabled:bg-[var(--surface-subtle)] disabled:text-[var(--text-secondary)]"
+                  />
+                  {/* The SFG this process makes. On a plan's route (sfgReadOnly)
+                      it is only shown. Otherwise the last row makes the finished
+                      goods, so it has none, and a started card keeps the SFG it
+                      was saved with (the server keeps it too). */}
                   {sfgReadOnly ? (
                     s.sfgOutput ? (
                       <input
@@ -1004,32 +1131,43 @@ export function WipProcessList({
                         className="w-full truncate h-7 px-1.5 text-[12px] rounded-[2px] bg-[var(--surface-subtle)] text-[var(--text-secondary)] border border-[var(--aws-border)] outline-none"
                       />
                     ) : null
+                  ) : i === steps.length - 1 ? null : rowStarted ? (
+                    <input
+                      value={s.sfgOutput}
+                      disabled
+                      placeholder="No SFG"
+                      title={`${s.sfgOutput || "No SFG"} — a started process keeps the SFG it makes`}
+                      className="w-full truncate h-7 px-1.5 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-[var(--surface-subtle)] text-[var(--text-secondary)]"
+                    />
                   ) : (
-                  <input
-                    list={sfgListId}
-                    value={s.sfgOutput}
-                    onChange={(e) => { setField(i, { sfgOutput: e.target.value }); searchSfg(e.target.value); }}
-                    title={s.sfgOutput || undefined}
-                    placeholder={canonicalSfg || "SFG output — search catalogue…"}
-                    className="w-full truncate h-7 px-1.5 text-[12px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
-                  />
+                    <input
+                      list={sfgListId}
+                      value={s.sfgOutput}
+                      onChange={(e) => { setField(i, { sfgOutput: e.target.value, sfgAuto: false }); searchSfg(e.target.value); }}
+                      title={s.sfgOutput || undefined}
+                      placeholder={i === feedIdx
+                        ? (canonicalSfg || "SFG output — search catalogue…")
+                        : "SFG output (optional) — search catalogue…"}
+                      className="w-full truncate h-7 px-1.5 text-[12px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
+                    />
                   )}
-                  {/* Canonical-SFG affordance (design §5.4): show the catalogue
-                      value; warn + offer one-click apply when the typed value
-                      diverges, so any drift stays visible and auditable. */}
-                  {sfgReadOnly ? null : canonicalSfg ? (
-                    s.sfgOutput.trim() === canonicalSfg ? (
+                  {/* Standard-SFG affordance (design §5.4), on the last process
+                      before packing only — the one that makes what packing takes
+                      in: a saved or typed SFG stays, with the standard one beside
+                      it and "Use" when they differ. */}
+                  {!sfgReadOnly && canonicalSfg && i === feedIdx && !rowStarted ? (
+                    s.sfgOutput.trim() === canonicalSfg.trim() ? (
                       <span className="block text-[10px] text-[var(--text-success)] truncate" title={canonicalSfg}>
-                        ✓ Canonical SFG
+                        ✓ Standard SFG
                       </span>
                     ) : (
                       <span className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] min-w-0">
                         <span className="truncate" title={canonicalSfg}>
-                          Canonical: {canonicalSfg}
+                          Standard SFG: {canonicalSfg}
                         </span>
                         <button
                           type="button"
-                          onClick={() => setField(i, { sfgOutput: canonicalSfg })}
+                          onClick={() => setField(i, { sfgOutput: canonicalSfg, sfgAuto: true })}
                           className="shrink-0 text-[var(--aws-link)] hover:underline font-semibold"
                         >
                           Use
@@ -1045,7 +1183,7 @@ export function WipProcessList({
                   <button type="button" onClick={() => move(i, i + 1)} disabled={i === steps.length - 1 || liveEdit} aria-label="Move down" className={iconBtn}>
                     <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
                   </button>
-                  <button type="button" onClick={() => remove(i)} disabled={steps.length <= 1} aria-label="Remove process" className={[iconBtn, "hover:text-[var(--aws-error)]"].join(" ")}>
+                  <button type="button" onClick={() => remove(i)} disabled={removeOff(i) != null} title={removeOff(i) ?? undefined} aria-label="Remove process" className={[iconBtn, "hover:text-[var(--aws-error)]"].join(" ")}>
                     <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
                   </button>
                 </div>

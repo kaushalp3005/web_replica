@@ -18,6 +18,7 @@ import { DispatchModal, MergeActionBar, MergeProcessModal, RowActions } from "@/
 import { CreateJobCardModal, submitJobCardWizard } from "@/lib/planJobCardModal";
 import { PlanLineProcesses, routeKey } from "@/lib/planLineProcesses";
 import { planRowFlags } from "@/lib/planRowActions";
+import { planAllowsJobCardEdit } from "@/lib/job-card-edit";
 import {
   type PlanDetail,
   type PlanLineRow,
@@ -283,6 +284,7 @@ function PlansCreated({ planIds, onDismiss }: {
                       <td className={`${GRID_TD} whitespace-nowrap`} onClick={(e) => e.stopPropagation()}>
                         <RowActions
                           cancelled={(row.status ?? "").toLowerCase() === "cancelled"}
+                          jobCardsEditable={planAllowsJobCardEdit(row.status)}
                           anyCarded={anyCarded}
                           anyRemaining={anyRemaining}
                           onOpen={() => router.push(`${PLAN_PAGE}/${id}`)}
