@@ -10,7 +10,7 @@
 import { useEffect, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { useParams, useRouter } from "next/navigation";
-import { useRequireAuth, useUserInitial, useIsAdmin, useHasPermission } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useIsAdmin, useHasPermission, useUserScope } from "@/lib/user";
 import { friendlyApiError } from "@/lib/apiErrors";
 import { approveSummary, retireSummary } from "@/lib/plan-outcome";
 import { BackLink } from "@/components/BackLink";
@@ -37,30 +37,13 @@ import {
   fmtDateRange,
 } from "@/lib/plans";
 import { PROCESS_OPTIONS, canonProcess, stageFromProcess, classifyProcess, STAGE_FINAL_FG } from "@/lib/processCatalog";
-import { normaliseWarehouseCode } from "@/lib/warehouseScope";
-
-// Warehouse → allowed floor list. Same source-of-truth as the Planning
-// page's FLOORS_BY_FACTORY mapping.  Keys are pre-normalised ("W202",
-// "A185") so the lookup tolerates the hyphenated / lowercased /
-// padded admin-typed variants we see in the wild.
-const WAREHOUSE_TO_FLOORS: Record<string, readonly string[]> = {
-  W202: [
-    "Lower Basement", "Upper Basement",
-    "First Floor", "First Floor Mezz",
-    "Second Floor", "Second Floor Mezz",
-    "Terrace",
-  ],
-  A185: [
-    "Roasting Area", "Mezzanine", "Sorting Area", "Printing Area",
-    "Dmart Production Area", "Dmart Packing Area",
-    "Cheese Floor", "FG store", "FFS Packing Area",
-  ],
-};
-
-function floorsForWarehouse(wh: string | null | undefined): readonly string[] {
-  if (!wh) return [];
-  return WAREHOUSE_TO_FLOORS[normaliseWarehouseCode(wh)] ?? [];
-}
+// Warehouse → floor list and who may use which: lib/floorChoices, the one list
+// every floor picker shares (it tolerates "A-185" / "a185" / " A185 ").
+import {
+  chainFloorProblems, floorChoicesFor, floorScopeNote, productionFloors, stepFloorTouched, type FloorChoice,
+} from "@/lib/floorChoices";
+// A merged run's or a several-chain line keeps its steps (server steps_locked).
+import { stepsLockOf, stepsLockRefusal } from "@/lib/plan-steps-lock";
 
 export default function PlanDetailPage() {
   const router = useRouter();
@@ -843,10 +826,16 @@ function StageGroupedSteps({ steps }: { steps: PlanStepRow[] }) {
 //   • PUT  /plans-v2/steps/{step_id}               (per changed step)
 //   • DELETE /plans-v2/steps/{step_id}             (steps marked deleted by a merge)
 //   • PUT  /plans-v2/lines/{plan_line_id}/steps/reorder (if order changed)
+//   • POST /plans-v2/lines/{plan_line_id}/steps       (steps added)
 //
-// Order matters: deletes go first (so the reorder body only references
-// still-existing step_ids), then per-step PUTs, then reorder, then the
-// line PUT last.
+// Order matters: the step structure goes first — deletes (so the reorder body
+// only references still-existing step_ids), then reorder, then adds — because
+// the server refuses a structural change before writing anything (a merged
+// run's or a several-chain line, steps_locked_by_cards), so such a refusal
+// lands before any of this save is committed. Then the per-step PUTs, then the
+// line PUT last. A line whose steps are locked (line.steps_locked) has Add step,
+// move / drag and merge off, and a save that would add, move or remove a step
+// is refused here before the first request.
 
 function LineCardEdit({
   line, idx, warehouse, planId, requireApproval, onCancel, onSaved, onMessage,
@@ -897,9 +886,23 @@ function LineCardEdit({
 
   const [busy, setBusy] = useState(false);
 
-  const floors = floorsForWarehouse(warehouse);
+  // Step floors: planners (plans › approve, the server's own test) any floor of
+  // the factory, others their own; a step's saved floor stays pickable as
+  // stored. The Area is not checked by the server, so it lists every floor.
+  const scope = useUserScope();
+  const anyFloorInFactory = useHasPermission("production", "plans", "approve", "create");
+  const floors = productionFloors(warehouse);
+  const savedStepFloor = new Map((line.steps ?? [])
+    .filter((s) => s.step_id != null).map((s) => [s.step_id as number, s.floor ?? null]));
+  const stepFloorChoices = (s: StepDraft): FloorChoice[] => floorChoicesFor(scope, warehouse, {
+    anyFloorInFactory, saved: s.step_id != null ? savedStepFloor.get(s.step_id) ?? null : null,
+  });
+  const areaChoices = floorChoicesFor(scope, warehouse, { anyFloorInFactory: true, saved: line.area });
   const activeSteps = stepDrafts.filter((s) => !s.isDeleted);
   const mergeable = activeSteps.length >= 2;
+  // Merged run / several chains: no step is added, moved or removed (merging
+  // removes the merged-in steps). null on an older server.
+  const stepsLock = stepsLockOf(line);
 
   function patchStep(idx: number, patch: Partial<StepDraft>) {
     setStepDrafts((cur) => cur.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
@@ -909,6 +912,7 @@ function LineCardEdit({
   // at the end so the operator's expected order matches the saved
   // result — a reorder is a separate edit if they want it elsewhere.
   function addStep() {
+    if (stepsLock) return;
     setStepDrafts((cur) => [
       ...cur,
       {
@@ -922,6 +926,7 @@ function LineCardEdit({
     ]);
   }
   function moveStep(fromIdx: number, toIdx: number) {
+    if (stepsLock) return;
     setStepDrafts((cur) => {
       // Map active-index → real-index so reorder only swaps visible rows.
       const active: number[] = [];
@@ -953,7 +958,7 @@ function LineCardEdit({
     else setSelectedSteps(new Set());
   }
   function fireMerge() {
-    if (selectedSteps.size < 2) return;
+    if (stepsLock || selectedSteps.size < 2) return;
     const idxs = [...selectedSteps].sort((a, b) => a - b);
     const picked = idxs.map((i) => activeSteps[i]);
     if (picked.length < 2) return;
@@ -1119,16 +1124,42 @@ function LineCardEdit({
       return;
     }
 
+    // The save goes out as several requests, so anything the server would
+    // refuse is checked before the first one: a refusal midway would leave the
+    // line half saved. A line whose steps are locked keeps them as they are.
+    const lockRefusal = stepsLockRefusal(stepsLock, {
+      deletes: deletes.length, orderChanged, newSteps: newSteps.length,
+    });
+    if (lockRefusal) {
+      onMessage(lockRefusal);
+      return;
+    }
+    // The floors these step changes touch. A step's waiting job cards move with
+    // its floor, so every floor they leave counts too — where those cards are
+    // (the step's `card_floors`), as update_step_v2 checks; an older server
+    // without it: the step's floor when it is carded, else when the line is.
+    const lineCarded = (line.job_card_count ?? 0) > 0;
+    const structuralFirst = deletes.length > 0 || orderChanged || newSteps.length > 0;
+    const floorProblem = chainFloorProblems(scope, warehouse, [
+      ...patches.flatMap((p) => (p.body.floor
+        ? stepFloorTouched(originalById.get(p.step_id), p.body.floor, lineCarded, { structuralFirst })
+        : [])),
+      ...newSteps.map((s) => s.floor),
+    ], { anyFloorInFactory });
+    if (floorProblem) {
+      onMessage(floorProblem.message);
+      return;
+    }
+
     setBusy(true);
     onMessage(null);
     try {
-      // Deletes first (so reorder only references existing step_ids).
+      // The step structure first: the server refuses a structural change
+      // before writing anything, so a refusal comes before any of this save
+      // is committed. Deletes first (so reorder only references existing
+      // step_ids).
       for (const id of deletes) {
         await deletePlanStep(id);
-      }
-      // Per-step PUTs in parallel.
-      if (patches.length > 0) {
-        await Promise.all(patches.map((p) => updatePlanStep(p.step_id, p.body)));
       }
       // Reorder before inserting new steps — the surviving-ids list
       // doesn't include the new ones yet, and the server appends
@@ -1154,6 +1185,10 @@ function LineCardEdit({
             loss_pct:     ns.loss_pct ?? null,
           });
         }
+      }
+      // Per-step PUTs in parallel, once the structure is in.
+      if (patches.length > 0) {
+        await Promise.all(patches.map((p) => updatePlanStep(p.step_id, p.body)));
       }
       // Line PUT last so its successful response confirms the unit.
       if (Object.keys(lineDiff).length > 0 && line.plan_line_id != null) {
@@ -1220,7 +1255,7 @@ function LineCardEdit({
               className="w-full h-8 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e]"
             >
               <option value="">— Any —</option>
-              {floors.map((fl) => <option key={fl} value={fl}>{fl}</option>)}
+              {areaChoices.map((c) => <option key={c.value} value={c.value}>{c.value}</option>)}
             </select>
           ) : (
             <input
@@ -1247,8 +1282,11 @@ function LineCardEdit({
       {stepDrafts.length > 0 ? (
         <EditableStepsList
           activeSteps={activeSteps}
-          floors={floors}
+          hasFloorList={floors.length > 0}
+          floorChoices={stepFloorChoices}
+          floorNote={floorScopeNote(scope, warehouse, { anyFloorInFactory })}
           mergeable={mergeable}
+          structureLock={stepsLock?.message ?? null}
           selected={selectedSteps}
           dragOverIdx={dragOverIdx}
           onPatch={(activeIdx, patch) => {
@@ -1289,7 +1327,8 @@ function LineCardEdit({
         <button
           type="button"
           onClick={addStep}
-          disabled={busy}
+          disabled={busy || !!stepsLock}
+          title={stepsLock?.message}
           className="inline-flex items-center gap-1 h-7 px-2.5 text-[11px] font-semibold rounded-[2px] border border-dashed border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-orange)] hover:text-[var(--aws-orange)] text-[var(--text-secondary)] disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round">
@@ -1298,9 +1337,15 @@ function LineCardEdit({
           </svg>
           Add step
         </button>
-        <p className="text-[10px] text-[var(--text-muted)] italic">
-          New steps are appended at the end.
-        </p>
+        {stepsLock ? (
+          <p role="note" className="flex-1 text-right text-[10px] text-[var(--aws-error)]">
+            {stepsLock.message}
+          </p>
+        ) : (
+          <p className="text-[10px] text-[var(--text-muted)] italic">
+            New steps are appended at the end.
+          </p>
+        )}
       </div>
 
       {/* Save / Cancel footer */}
@@ -1330,13 +1375,19 @@ function LineCardEdit({
 // Receives the *visible* (non-deleted) steps in display order; the parent
 // translates active-index back to draft-index for state updates.
 function EditableStepsList({
-  activeSteps, floors, mergeable, selected, dragOverIdx,
+  activeSteps, hasFloorList, floorChoices, floorNote, mergeable, structureLock, selected, dragOverIdx,
   onPatch, onMove, onToggleSelect, onSelectAll, onMerge,
   onDragStartIdx, onDragOverIdx, onDragEnd, onDrop,
 }: {
   activeSteps: StepDraft[];
-  floors: readonly string[];
+  hasFloorList: boolean;
+  // One step's floor options (lib/floorChoices) and the "your floors" line.
+  floorChoices: (s: StepDraft) => FloorChoice[];
+  floorNote: string | null;
   mergeable: boolean;
+  // Why the steps can't be moved or merged (line.steps_locked), or null; the
+  // step fields stay editable.
+  structureLock: string | null;
   selected: Set<number>;
   dragOverIdx: number | null;
   onPatch: (activeIdx: number, patch: Partial<StepDraft>) => void;
@@ -1357,10 +1408,13 @@ function EditableStepsList({
         <span className="text-[10px] uppercase tracking-wide font-bold text-[var(--text-muted)]">
           Process steps · {activeSteps.length}
         </span>
-        <span className="text-[10px] text-[var(--text-muted)] hidden sm:inline">
-          Drag to reorder · select 2+ to merge
-        </span>
+        {structureLock ? null : (
+          <span className="text-[10px] text-[var(--text-muted)] hidden sm:inline">
+            Drag to reorder · select 2+ to merge
+          </span>
+        )}
       </div>
+      {floorNote ? <p className="mb-1.5 text-[10px] text-[var(--text-muted)]">{floorNote}</p> : null}
       {mergeable ? (
         <div className="flex flex-wrap items-center gap-2 mb-1.5 px-2 py-1.5 bg-[var(--surface-subtle)] border border-[var(--aws-border)] rounded">
           <label className="inline-flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)] cursor-pointer">
@@ -1369,6 +1423,7 @@ function EditableStepsList({
               checked={allSelected}
               ref={(el) => { if (el) el.indeterminate = anySelected && !allSelected; }}
               onChange={(e) => onSelectAll(e.target.checked)}
+              disabled={!!structureLock}
               className="accent-[var(--aws-orange)]"
             />
             <span>Select all</span>
@@ -1380,12 +1435,12 @@ function EditableStepsList({
           <div className="flex-1" />
           <button
             type="button"
-            disabled={selected.size < 2}
+            disabled={selected.size < 2 || !!structureLock}
             onClick={onMerge}
-            title="Combine selected steps · time SUM, name joined with +"
+            title={structureLock ?? "Combine selected steps · time SUM, name joined with +"}
             className={[
               "h-7 px-2.5 text-[11px] rounded-[2px] font-semibold border inline-flex items-center gap-1.5",
-              selected.size < 2
+              selected.size < 2 || structureLock
                 ? "bg-[var(--surface-disabled)] border-[var(--aws-border)] text-[var(--text-disabled)] cursor-not-allowed"
                 : "bg-[var(--aws-orange)] border-[var(--aws-orange-active)] hover:bg-[var(--aws-orange-hover)] text-white",
             ].join(" ")}
@@ -1405,15 +1460,17 @@ function EditableStepsList({
           return (
             <li
               key={s.step_id ?? `new-${i}`}
-              draggable
+              draggable={!structureLock}
               onDragStart={(e) => {
+                if (structureLock) { e.preventDefault(); return; }
                 onDragStartIdx(i);
                 e.dataTransfer.effectAllowed = "move";
                 e.dataTransfer.setData("text/plain", String(i));
               }}
               onDragEnd={onDragEnd}
-              onDragOver={(e) => { e.preventDefault(); onDragOverIdx(i); }}
-              onDrop={(e) => { e.preventDefault(); onDrop(i); }}
+              // Without preventDefault the browser refuses the drop.
+              onDragOver={(e) => { if (structureLock) return; e.preventDefault(); onDragOverIdx(i); }}
+              onDrop={(e) => { e.preventDefault(); if (!structureLock) onDrop(i); }}
               className={[
                 "border rounded bg-white px-2 py-1.5 grid grid-cols-1 sm:grid-cols-[auto_auto_minmax(0,1fr)_auto_auto_auto_auto] gap-1.5 sm:gap-2 items-center",
                 isDragOver ? "border-[var(--aws-orange)] bg-[#fdf0f1]" : "border-[var(--aws-border)]",
@@ -1425,6 +1482,7 @@ function EditableStepsList({
                     type="checkbox"
                     checked={selected.has(i)}
                     onChange={() => onToggleSelect(i)}
+                    disabled={!!structureLock}
                     className="accent-[var(--aws-orange)]"
                   />
                 </label>
@@ -1478,11 +1536,15 @@ function EditableStepsList({
               <select
                 value={s.floor ?? ""}
                 onChange={(e) => onPatch(i, { floor: e.target.value || null })}
-                disabled={floors.length === 0}
+                disabled={!hasFloorList}
                 className="h-7 w-full sm:w-[160px] px-2 text-[11px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e] focus:shadow-[0_0_0_1px_#9a393e] disabled:bg-[var(--surface-disabled)] disabled:text-[var(--text-disabled)]"
               >
-                <option value="">{floors.length === 0 ? "— Pick warehouse —" : "— Any floor —"}</option>
-                {floors.map((fl) => <option key={fl} value={fl}>{fl}</option>)}
+                <option value="">{!hasFloorList ? "— Pick warehouse —" : "— Any floor —"}</option>
+                {floorChoices(s).map((c) => (
+                  <option key={c.value} value={c.value} disabled={c.disabled}>
+                    {c.reason ? `${c.value} (${c.reason})` : c.value}
+                  </option>
+                ))}
               </select>
               {/* Trailing trio: std_time, loss%, reorder buttons.
                   On mobile (< sm) the wrapper is a flex row so all three
@@ -1524,7 +1586,8 @@ function EditableStepsList({
                   <button
                     type="button"
                     onClick={() => onMove(i, i - 1)}
-                    disabled={i === 0}
+                    disabled={i === 0 || !!structureLock}
+                    title={structureLock ?? undefined}
                     aria-label="Move step up"
                     className="w-7 h-7 inline-flex items-center justify-center rounded-sm text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] disabled:opacity-30 disabled:cursor-not-allowed"
                   >
@@ -1535,7 +1598,8 @@ function EditableStepsList({
                   <button
                     type="button"
                     onClick={() => onMove(i, i + 1)}
-                    disabled={i === activeSteps.length - 1}
+                    disabled={i === activeSteps.length - 1 || !!structureLock}
+                    title={structureLock ?? undefined}
                     aria-label="Move step down"
                     className="w-7 h-7 inline-flex items-center justify-center rounded-sm text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] disabled:opacity-30 disabled:cursor-not-allowed"
                   >

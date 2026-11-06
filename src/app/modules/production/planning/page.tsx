@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BrandMark } from "@/components/BrandMark";
 import { useRouter } from "next/navigation";
-import { useRequireAuth, useUserInitial, useUserScope, useRequireModuleAccess } from "@/lib/user";
+import { useRequireAuth, useUserInitial, useUserScope, useRequireModuleAccess, useHasPermission } from "@/lib/user";
 import { friendlyApiError } from "@/lib/apiErrors";
 import { usePlanBuilder, SelectedArticlesPanel } from "@/lib/planBuilder";
 import { BackLink } from "@/components/BackLink";
@@ -55,6 +55,9 @@ export default function PlanningPage() {
   useRequireModuleAccess("production/planning", router.replace);
   const initial = useUserInitial();
   const scope = useUserScope();
+  // Planners (plans › approve, the server's _may_approve_plans) may plan any
+  // floor of the factory; others with floor grants only their own (lib/floorChoices).
+  const anyFloorInFactory = useHasPermission("production", "plans", "approve", "create");
 
   // Filter state
   const [entity, setEntity] = useState<Entity>("");
@@ -82,7 +85,7 @@ export default function PlanningPage() {
   // Create-Plan path all live in the shared hook. It owns selectedIds,
   // cardCfg, selectedRowsCache, expandedCardId, creatingPlan + every card
   // handler — the page only feeds rows in on selection (see toggleSelection).
-  const pb = usePlanBuilder({ entity, scope, onToast: setToast });
+  const pb = usePlanBuilder({ entity, scope, anyFloorInFactory, onToast: setToast });
 
   // Adapter: the shared hook splits selection into selectRow(row)/deselect(id);
   // the planning list/mobile checkboxes call a single toggleSelection(id). Mirror
@@ -318,6 +321,7 @@ export default function PlanningPage() {
           cardCfg={pb.cardCfg}
           expandedCardId={pb.expandedCardId}
           scope={scope}
+          anyFloorInFactory={anyFloorInFactory}
           factoryOpts={pb.factoryOpts}
           onToggleExpand={(id) => {
             pb.setExpandedCardId((c) => (c === id ? null : id));

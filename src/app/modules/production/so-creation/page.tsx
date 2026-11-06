@@ -252,6 +252,9 @@ export default function SoCreationPage() {
   const canEditSO = useHasPermission("so", null, null, "edit");
   const canExportSO = useHasPermission("so", null, null, "view");
   const canCreatePlan = useHasPermission("production", "plans", null, "create");
+  // Planners (plans › approve, the server's _may_approve_plans) may plan any
+  // floor of the factory; others with floor grants only their own (lib/floorChoices).
+  const anyFloorInFactory = useHasPermission("production", "plans", "approve", "create");
 
   // Upload drop-zone visibility. SOs are upload-only now (manual creation was
   // removed) so there's no method picker — a header "Upload Excel" button
@@ -366,6 +369,7 @@ export default function SoCreationPage() {
   const pb = usePlanBuilder({
     entity: (company ? company.toLowerCase() : "") as "" | "cfpl" | "cdpl",
     scope,
+    anyFloorInFactory,
     onToast: (m) => setSyncMsg({ kind: "ok", text: m }),
   });
   // Page-level article selection lifted out of SoLineDetail so the checkbox
@@ -959,6 +963,7 @@ export default function SoCreationPage() {
         cardCfg={pb.cardCfg}
         expandedCardId={pb.expandedCardId}
         scope={scope}
+        anyFloorInFactory={anyFloorInFactory}
         factoryOpts={pb.factoryOpts}
         onToggleExpand={(id) => {
           pb.setExpandedCardId((c) => (c === id ? null : id));
