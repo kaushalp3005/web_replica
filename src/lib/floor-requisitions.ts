@@ -146,6 +146,38 @@ export async function listFloorRequisitions(
   return readOrThrow(await apiFetch(`${BASE}?${p}`, { signal }), "Failed to load floor requisitions");
 }
 
+/** One place an article is in Fresh Stock right now (Stock Take's figures). */
+export interface StockPlace {
+  /** Normalised code: "A185", "D39". */
+  warehouse: string;
+  /** What people call it: "Savla D-39"; a factory comes back as its code. */
+  warehouse_label: string;
+  floor: string;
+  /** Weight, for a kg request. */
+  kg: number;
+  /** Count, for a pcs request. */
+  qty: number;
+}
+
+/** An article's identity, as the server keys it: trimmed, upper-case. */
+export function articleKey(name: string | null | undefined): string {
+  return (name ?? "").trim().toUpperCase();
+}
+
+/** Live Fresh Stock of each article at every place it is above zero, largest
+ *  first, within the caller's Stock Take read scope. Keyed by articleKey; an
+ *  article in stock nowhere visible maps to []. */
+export async function fetchFloorAvailability(
+  articles: string[],
+  signal?: AbortSignal,
+): Promise<Record<string, StockPlace[]>> {
+  const p = new URLSearchParams();
+  for (const a of articles) p.append("article", a);
+  const body = await readOrThrow<{ articles: Record<string, StockPlace[]> }>(
+    await apiFetch(`${BASE}/availability?${p}`, { signal }), "Failed to load floor stock");
+  return body.articles;
+}
+
 export async function raiseFloorRequisition(body: {
   job_card_id: number;
   material_sku_name: string;

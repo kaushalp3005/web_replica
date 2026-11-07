@@ -41,12 +41,13 @@ const DEFAULT_QUERY: PoListQuery = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Build a stable fingerprint for the five advanced filter fields. */
+/** Build a stable fingerprint for the advanced filter fields. */
 function advKey(q: PoListQuery): string {
   return [
     q.vendor_supplier_name_contains ?? "",
     q.order_reference_no_contains ?? "",
     q.narration_contains ?? "",
+    q.consignee_address_contains ?? "",
     q.supplier_id ?? "",
     q.voucher_type ?? "",
   ].join("|");
@@ -132,6 +133,7 @@ export default function PoCreationPage(): React.JSX.Element {
       vendor_supplier_name_contains: cache.adv?.vendor_supplier_name_contains ?? "",
       order_reference_no_contains: cache.adv?.order_reference_no_contains ?? "",
       narration_contains: cache.adv?.narration_contains ?? "",
+      consignee_address_contains: cache.adv?.consignee_address_contains ?? "",
       supplier_id: cache.adv?.supplier_id ?? "",
       voucher_type: cache.adv?.voucher_type ?? "",
     };
@@ -171,6 +173,7 @@ export default function PoCreationPage(): React.JSX.Element {
         vendor_supplier_name_contains: query.vendor_supplier_name_contains ?? "",
         order_reference_no_contains: query.order_reference_no_contains ?? "",
         narration_contains: query.narration_contains ?? "",
+        consignee_address_contains: query.consignee_address_contains ?? "",
         supplier_id: query.supplier_id ?? "",
         voucher_type: query.voucher_type ?? "",
       },

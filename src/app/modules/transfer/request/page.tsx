@@ -6,20 +6,34 @@
 // section (its own cascading dropdowns + quick search), so added articles stay
 // editable. Cascading dropdowns + quick search are backed by all_sku. Feedback
 // via an inline banner (no toast lib in web_replica).
+// ?editId=<id> edits a Pending request instead (PUT /requests/{id}): only its raiser or
+// an admin, and only before the store accepts it — the server refuses the rest. A
+// warehouse-locked user raises (and edits) requests for their own site only: the To
+// list offers just their sites, as the server checks it.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
-import { useRequireAuth } from "@/lib/user";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useMe, useRequireAuth, useUserScope } from "@/lib/user";
 import { TransferChrome } from "../_chrome";
 import {
+  REQUEST_STATUS,
   TransferApi,
   type WarehouseSite,
   type CategorialSearchItem,
   type ArticleCreateInput,
+  type RequestLine,
 } from "@/lib/transfer";
+import { TO_SITES, canonicalSite, sameSite } from "@/lib/sites";
+import { isToSite, siteOptions } from "../_siteRules";
 
 const UOM_OPTIONS = ["BOX", "CARTON", "KG", "PCS"];   // DB chk_uom-valid set
-const WAREHOUSE_FALLBACK = ["W202", "A185", "A68", "A101", "F53"];
+// The sites offered are warehouse_sites (IMS's site master) and every site of the shared
+// site table (lib/sites TO_SITES: the warehouses and cold stores, Savla Bond among them,
+// which the master may not hold), as canonical names, one per site ("ESKIMO" and "Eskimo"
+// are one option, Eskimo); a request stores those names. The master's own order comes
+// first, then the table's sites it lacks; a master site the table does not know is kept.
+// When the master can't be read, the table's sites alone.
+const TABLE_SITES: readonly string[] = TO_SITES;
 
 function todayDMY(): string {
   const d = new Date();
@@ -72,6 +86,16 @@ function patchArticle(prev: Article, patch: Partial<Article>): Article {
   return next;
 }
 
+// A stored request line as the form edits it ("N/A" placeholders shown blank).
+function fromRequestLine(l: RequestLine): Article {
+  const v = (s?: string | null) => (!s || s === "N/A" ? "" : s);
+  return {
+    materialType: v(l.material_type), itemCategory: v(l.item_category), subCategory: v(l.sub_category),
+    itemDescription: v(l.item_description), unitPackSize: v(l.unit_pack_size), uom: v(l.uom),
+    packSize: v(l.pack_size), quantity: v(l.quantity), netWeight: v(l.net_weight) || "0", lotNumber: v(l.lot_number),
+  };
+}
+
 function toApiArticle(a: Article): ArticleCreateInput {
   return {
     material_type: a.materialType, item_category: a.itemCategory, sub_category: a.subCategory,
@@ -89,7 +113,8 @@ function validate(
   if (!form.request_date.trim()) e.push("Request date is required");
   if (!form.from_warehouse) e.push("From warehouse is required");
   if (!form.to_warehouse) e.push("To warehouse is required");
-  if (form.from_warehouse && form.to_warehouse && form.from_warehouse === form.to_warehouse) e.push("From and To warehouse must be different");
+  // One site by any spelling ("A185" / "Warehouse A185"), as the server checks it.
+  if (sameSite(form.from_warehouse, form.to_warehouse)) e.push("From and To warehouse must be different");
   if (!form.reason_description.trim()) e.push("Reason is required");
   if (articles.length === 0) e.push("Add at least one complete article");
   articles.forEach((a, i) => {
@@ -104,8 +129,25 @@ function validate(
 }
 
 export default function NewTransferRequestPage() {
+  return (
+    <Suspense fallback={<TransferChrome title="Transfer Request"><div className="py-16 text-center text-[13px] text-[var(--text-secondary)]">Loading…</div></TransferChrome>}>
+      <TransferRequestForm />
+    </Suspense>
+  );
+}
+
+function TransferRequestForm() {
   const router = useRouter();
   const allowed = useRequireAuth(router.replace);
+  const editId = useSearchParams().get("editId");
+  const editing = !!editId;
+  const me = useMe();
+  const { isAdmin, warehouses: myWarehouses } = useUserScope();
+  // A warehouse-locked user (not an admin, with warehouses) raises requests for their own site.
+  const locked = !isAdmin && myWarehouses.length > 0;
+  // Why the loaded request can't be edited (not Pending, not theirs, or it failed to load).
+  const [editBlock, setEditBlock] = useState<string | null>(null);
+  const [loadingEdit, setLoadingEdit] = useState(editing);
 
   // Seeded empty so the initial render is deterministic (genRequestNo()/todayDMY() read
   // the wall clock and would mismatch between the SSR render and client hydration). Filled on mount below.
@@ -115,7 +157,7 @@ export default function NewTransferRequestPage() {
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set([0]));
   const nextUid = useRef(1);
 
-  const [warehouses, setWarehouses] = useState<string[]>([]);
+  const [warehouses, setWarehouses] = useState<readonly string[]>([]);
   const [materialTypes, setMaterialTypes] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [banner, setBanner] = useState<{ type: "error" | "success"; text: string } | null>(null);
@@ -126,9 +168,9 @@ export default function NewTransferRequestPage() {
     let off = false;
     (async () => {
       try {
-        const sites = await TransferApi.getWarehouseSites();
-        if (!off) setWarehouses(sites.length ? sites.map((s: WarehouseSite) => s.site_code) : WAREHOUSE_FALLBACK);
-      } catch { if (!off) setWarehouses(WAREHOUSE_FALLBACK); }
+        const master = (await TransferApi.getWarehouseSites()).map((s: WarehouseSite) => s.site_code);
+        if (!off) setWarehouses(siteOptions([...master, ...TABLE_SITES]));
+      } catch { if (!off) setWarehouses(TABLE_SITES); }
       try {
         const d = await TransferApi.categorialDropdown({});
         if (!off) setMaterialTypes(d.options.material_types);
@@ -140,13 +182,56 @@ export default function NewTransferRequestPage() {
   // ── Seed clock-derived defaults on the client (avoids the SSR hydration mismatch). ──
   // Deferred via setTimeout so the setState isn't synchronous in the effect body
   // (react-hooks/set-state-in-effect).
+  // An edit keeps the request's own number and date (loaded below).
   useEffect(() => {
+    if (editing) return;
     const id = setTimeout(() => {
       setRequestNo(genRequestNo());
       setForm((f) => ({ ...f, request_date: todayDMY() }));
     }, 0);
     return () => clearTimeout(id);
-  }, []);
+  }, [editing]);
+
+  // ── Edit: load the request into the form ──
+  const myEmail = (me?.email || "").trim().toLowerCase();
+  useEffect(() => {
+    if (!allowed || !editId) return;
+    let off = false;
+    (async () => {
+      try {
+        const r = await TransferApi.getRequest(Number(editId));
+        if (off) return;
+        const no = r.request_no || String(r.id);
+        setRequestNo(no);
+        setForm({
+          request_date: r.request_date || "", from_warehouse: canonicalSite(r.from_warehouse),
+          to_warehouse: canonicalSite(r.to_warehouse), reason_description: r.reason_description || "",
+        });
+        const arts = (r.lines || []).map(fromRequestLine);
+        setRows(arts.length ? arts.map((data, uid) => ({ uid, data })) : [{ uid: 0, data: { ...EMPTY_ARTICLE } }]);
+        nextUid.current = Math.max(arts.length, 1);
+        setExpanded(new Set());
+        // The server refuses these too; saying so up front saves a wasted edit.
+        if ((r.status || REQUEST_STATUS.PENDING) !== REQUEST_STATUS.PENDING)
+          setEditBlock(`Request ${no} is ${r.status}; only a Pending request can be edited, before the store accepts it.`);
+        else if (!isAdmin && myEmail && (r.created_by || "").trim().toLowerCase() !== myEmail)
+          setEditBlock("Only the person who raised this request, or an admin, can edit it.");
+      } catch (e) {
+        if (!off) setEditBlock(e instanceof Error ? e.message : "Failed to load the request.");
+      } finally {
+        if (!off) setLoadingEdit(false);
+      }
+    })();
+    return () => { off = true; };
+  }, [allowed, editId, isAdmin, myEmail]);
+
+  // The To sites offered: never the From site nor a site nothing is sent to (the legacy
+  // "Cold Storage"), and for a warehouse-locked user only their own sites. A new request
+  // of a user with exactly one such site has it as the To from the start.
+  const toChoices = warehouses.filter((w) => isToSite(w) && !sameSite(w, form.from_warehouse)
+    && (!locked || myWarehouses.some((m) => sameSite(m, w))));
+  const mySites = locked ? warehouses.filter((w) => isToSite(w) && myWarehouses.some((m) => sameSite(m, w))) : [];
+  const toWarehouse = form.to_warehouse || (!editing && mySites.length === 1 && !sameSite(mySites[0], form.from_warehouse) ? mySites[0] : "");
 
   // ── row ops ──
   const patchRow = useCallback((uid: number, patch: Partial<Article>) => {
@@ -171,35 +256,47 @@ export default function NewTransferRequestPage() {
     setSubmitting(true);
     setBanner(null);
     const filled = rows.map((r) => r.data).filter((a) => a.materialType || a.itemDescription);
-    const errs = validate(form, filled);
+    const errs = validate({ ...form, to_warehouse: toWarehouse }, filled);
+    if (locked && toWarehouse && !myWarehouses.some((m) => sameSite(m, toWarehouse)))
+      errs.push(`You can raise requests only for your warehouse (${myWarehouses.map(canonicalSite).join(", ")})`);
     if (errs.length) { setBanner({ type: "error", text: errs.join(" · ") }); setSubmitting(false); return; }
+    const formData = { ...form, from_warehouse: canonicalSite(form.from_warehouse), to_warehouse: canonicalSite(toWarehouse) };
     try {
-      const res = await TransferApi.createRequest({
-        form_data: { ...form },
-        article_data: filled.map(toApiArticle),
-        computed_fields: { request_no: requestNo },
-      });
-      setBanner({ type: "success", text: `Request ${res.request_no || requestNo} created.` });
-      setTimeout(() => router.push("/modules/transfer"), 700);
+      if (editing) {
+        const res = await TransferApi.updateRequest(Number(editId), { form_data: formData, article_data: filled.map(toApiArticle) });
+        setBanner({ type: "success", text: `Request ${res.request_no || requestNo} saved.` });
+        setTimeout(() => router.push(`/modules/transfer/request/${editId}`), 700);
+      } else {
+        const res = await TransferApi.createRequest({
+          form_data: formData, article_data: filled.map(toApiArticle), computed_fields: { request_no: requestNo },
+        });
+        setBanner({ type: "success", text: `Request ${res.request_no || requestNo} created.` });
+        setTimeout(() => router.push("/modules/transfer"), 700);
+      }
     } catch (err) {
-      setBanner({ type: "error", text: err instanceof Error ? err.message : "Failed to create request." });
+      setBanner({ type: "error", text: err instanceof Error ? err.message : editing ? "Failed to save request." : "Failed to create request." });
       setSubmitting(false);
     }
   };
+  const title = editing ? "Edit Transfer Request" : "New Transfer Request";
+  const cannotSave = editing && (loadingEdit || !!editBlock);
 
   // No `if (!allowed) return null` gate: useRequireAuth returns true on the server but
   // false on the client's first render, so gating the render on it causes a hydration
   // mismatch. Effects are gated on `allowed`; the hook redirects unauthenticated users.
 
   return (
-    <TransferChrome title="New Transfer Request">
+    <TransferChrome title={title}>
       <button onClick={() => router.push("/modules/transfer")}
         className="text-[12px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] mb-3">← Transfer</button>
 
       <div className="flex flex-wrap items-end justify-between gap-2 mb-4">
-        <h1 className="text-[20px] font-semibold text-[var(--text-primary)]">New Transfer Request</h1>
+        <h1 className="text-[20px] font-semibold text-[var(--text-primary)]">{title}</h1>
         <span className="text-[12px] text-[var(--text-secondary)]">Request No <span className="font-mono text-[var(--text-primary)]">{requestNo}</span></span>
       </div>
+
+      {loadingEdit && <div className="mb-4 rounded-md p-3 text-[13px] bg-[var(--background)] border border-[var(--aws-border)] text-[var(--text-secondary)]">Loading request…</div>}
+      {editBlock && <div className="mb-4 rounded-md p-3 text-[13px] border bg-amber-50 border-amber-200 text-amber-800">{editBlock}</div>}
 
       {banner && (
         <div className={`mb-4 rounded-md p-3 text-[13px] border ${banner.type === "error" ? "bg-rose-50 border-rose-200 text-rose-700" : "bg-emerald-50 border-emerald-200 text-emerald-700"}`}>
@@ -217,19 +314,22 @@ export default function NewTransferRequestPage() {
                 placeholder="DD-MM-YYYY" className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md" />
             </Field>
             <div />
-            <Field label="From (Requesting)" required>
+            <Field label="From (Supplying)" required>
               <select value={form.from_warehouse} onChange={(e) => setForm({ ...form, from_warehouse: e.target.value })}
                 className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-white">
                 <option value="">Select warehouse…</option>
                 {warehouses.map((w) => <option key={w} value={w}>{w}</option>)}
               </select>
             </Field>
-            <Field label="To (Supplying)" required>
-              <select value={form.to_warehouse} onChange={(e) => setForm({ ...form, to_warehouse: e.target.value })}
+            <Field label="To (Requesting)" required>
+              <select value={toWarehouse} onChange={(e) => setForm({ ...form, to_warehouse: e.target.value })}
                 className="w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-white">
                 <option value="">Select warehouse…</option>
-                {warehouses.filter((w) => w !== form.from_warehouse).map((w) => <option key={w} value={w}>{w}</option>)}
+                {toChoices.map((w) => <option key={w} value={w}>{w}</option>)}
+                {/* A stored To outside the choices (edit) stays visible so it isn't silently changed. */}
+                {toWarehouse && !toChoices.includes(toWarehouse) && <option value={toWarehouse}>{toWarehouse}</option>}
               </select>
+              {locked && <span className="block mt-1 text-[11px] text-[var(--text-secondary)]">You can raise requests only for your warehouse ({myWarehouses.map(canonicalSite).join(", ")}).</span>}
             </Field>
             <div className="sm:col-span-2">
               <Field label="Reason" required>
@@ -264,13 +364,15 @@ export default function NewTransferRequestPage() {
 
         {/* Footer */}
         <section className="bg-white border border-[var(--aws-border)] rounded-lg p-4 flex flex-wrap items-center justify-between gap-3">
-          <span className="text-[12px] text-[var(--text-secondary)]">The request will be created with status <span className="font-medium text-amber-600">Pending</span>.</span>
+          {editing
+            ? <span className="text-[12px] text-[var(--text-secondary)]">The request stays <span className="font-medium text-amber-600">Pending</span>; the store sees the saved details.</span>
+            : <span className="text-[12px] text-[var(--text-secondary)]">The request will be created with status <span className="font-medium text-amber-600">Pending</span>.</span>}
           <div className="flex items-center gap-2">
             <button type="button" onClick={() => router.back()}
               className="px-3 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md hover:border-[var(--aws-navy)]">Cancel</button>
-            <button type="submit" disabled={submitting}
+            <button type="submit" disabled={submitting || cannotSave}
               className="px-4 py-1.5 text-[13px] rounded-md bg-[var(--aws-navy)] text-white hover:opacity-90 disabled:opacity-50">
-              {submitting ? "Submitting…" : "Submit Request"}
+              {submitting ? (editing ? "Saving…" : "Submitting…") : (editing ? "Save Changes" : "Submit Request")}
             </button>
           </div>
         </section>

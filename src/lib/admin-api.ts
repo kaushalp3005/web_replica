@@ -12,6 +12,7 @@
 // PUT /users/{id} (status flip) and PUT /users/{id}/scope.
 
 import { apiFetch } from "@/lib/auth";
+import { COLD_SITES, GRANTABLE_SITES, WAREHOUSE_SITES } from "@/lib/sites";
 
 // ── shared shapes ────────────────────────────────────────────────────────
 
@@ -348,29 +349,22 @@ export const ENTITY_OPTIONS: { value: string; label: string }[] = [
   { value: "cdpl", label: "CDPL" },
 ];
 
-// Canonical warehouse codes (match the sample backend's WAREHOUSES list + the
-// transfer module). Production floors are only defined for the two production
+// Every warehouse, then every cold store, by canonical name (the shared site table,
+// lib/sites): the sites purchase's walk-in intimation offers as its Warehouse, the
+// same ones the inward form books to ("Savla D-39", Savla Bond — a store of its own
+// — and Eskimo included). Production floors are only defined for the two production
 // sites (W202, A185); the remaining sites are warehouse/cold-storage with no
 // shop-floor breakdown, so floorsAvailable() returns [] for them.
-export const WAREHOUSE_OPTIONS: { value: string; label: string }[] = [
-  { value: "W202", label: "W202" },
-  { value: "A185", label: "A185" },
-  { value: "A68", label: "A68" },
-  { value: "A101", label: "A101" },
-  { value: "F53", label: "F53" },
-  { value: "D-39", label: "D-39" },
-  { value: "D-514", label: "D-514" },
-  { value: "Rishi", label: "Rishi" },
-  { value: "Supreme", label: "Supreme" },
-];
+export const WAREHOUSE_OPTIONS: { value: string; label: string }[] =
+  [...WAREHOUSE_SITES, ...COLD_SITES].map((site) => ({ value: site, label: site }));
 
-// What a user's profile may be granted: the list above plus Eskimo, the fifth
-// cold store (its stock is on Stock Take). Kept apart from WAREHOUSE_OPTIONS
-// because purchase's walk-in form offers that list as destinations.
-export const GRANTABLE_WAREHOUSE_OPTIONS: { value: string; label: string }[] = [
-  ...WAREHOUSE_OPTIONS,
-  { value: "Eskimo", label: "Eskimo" },
-];
+// What a user's profile may be granted: every grant code in the shared site
+// table (lib/sites GRANTABLE_SITES): the warehouses, "D-39" / "D-514" for the
+// Savla stores, Rishi, Supreme, and the cold stores Eskimo and Savla Bond (a
+// store of its own, not Savla D-39). Kept apart from WAREHOUSE_OPTIONS, which
+// names the sites canonically for purchase's walk-in form.
+export const GRANTABLE_WAREHOUSE_OPTIONS: { value: string; label: string }[] =
+  GRANTABLE_SITES.map((code) => ({ value: code, label: code }));
 
 export const FLOORS_BY_WAREHOUSE: Record<string, string[]> = {
   "W202": [

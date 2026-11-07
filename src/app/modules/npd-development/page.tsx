@@ -22,6 +22,7 @@ import {
 } from "@/lib/sample";
 import { SampleStatusPill, billingSummary } from "../sample/_shared";
 import { DISPLAY_STATUS_FILTERS } from "@/lib/sample-status";
+import { dispatchDateError, todayLocalISO } from "@/lib/npd-link";
 import { CELL, Sub, Hover, Field, Pair, day, joinLines, shouldFlip } from "./_queue-ui";
 import {
   BillingFields, billingError, billingPayload, billingFrom, EMPTY_BILLING, type BillingValue,
@@ -859,8 +860,11 @@ export default function NpdQueuePage() {
               </div>
               <div>
                 <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Expected dispatch date</label>
-                <input type="date" className="form-input" value={editForm.expected_dispatch_date}
+                <input type="date" className="form-input" min={todayLocalISO()} value={editForm.expected_dispatch_date}
                   onChange={(e) => setEditForm((f) => ({ ...f, expected_dispatch_date: e.target.value }))} />
+                {dispatchDateError(editForm.expected_dispatch_date, modal.row.expected_dispatch_date) && (
+                  <p className="mt-1 text-[12px] text-[var(--aws-error)]">{dispatchDateError(editForm.expected_dispatch_date, modal.row.expected_dispatch_date)}</p>
+                )}
               </div>
               <div className="sm:col-span-2">
                 <label className="block text-[11px] text-[var(--text-secondary)] mb-0.5">Customer ship-to address</label>
@@ -880,7 +884,8 @@ export default function NpdQueuePage() {
               <button onClick={() => setModal(null)}
                 className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:bg-[var(--surface-subtle)]">Cancel</button>
               <div className="flex-1" />
-              <button disabled={busyId === modal.row.id || !editForm.npd_target_name.trim() || !!editBillErr}
+              <button disabled={busyId === modal.row.id || !editForm.npd_target_name.trim() || !!editBillErr
+                || !!dispatchDateError(editForm.expected_dispatch_date, modal.row.expected_dispatch_date)}
                 onClick={() => saveEdit(modal.row)}
                 className="h-9 px-5 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">{busyId === modal.row.id ? "Saving…" : "Save changes"}</button>
             </div>

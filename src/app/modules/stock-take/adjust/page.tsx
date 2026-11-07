@@ -19,12 +19,19 @@
 //
 // Every post is FINAL: stocktake_transactions blocks UPDATE and DELETE at the
 // database level. Corrections are new balancing rows.
+//
+// The As of date makes the screen read-only for any day before today. A post is
+// always stamped now, so a + beside an old figure would land somewhere other than
+// where it looks, and its overdraw warning would check against old stock. Verify
+// goes too: it signs off a whole line, including postings after the chosen day.
 
 import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { BackLink } from "@/components/BackLink";
 import { useRequireAuth, useUserInitial, useHasPermission } from "@/lib/user";
+import { istToday } from "@/app/modules/customer-returns/_dates";
+import { clampAsOf, isPastView } from "@/lib/stock-take-as-of";
 import { NewArticleDialog } from "@/components/stock-take/NewArticleDialog";
 import {
   createStockTransaction,
@@ -126,6 +133,10 @@ function StockAdjustScreen() {
   const [data, setData] = useState<LatestStockResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  // Empty = live stock. See the file header for what a past day switches off.
+  const [asOf, setAsOf] = useState("");
+  const today = istToday();
+  const viewingPast = isPastView(asOf, today);
 
   // A focus narrows to exactly one article (name + stock type, the row's real
   // identity); the search box narrows by substring. Focus is dismissible.
@@ -174,6 +185,15 @@ function StockAdjustScreen() {
   const [showNew, setShowNew] = useState(false);
   const [flash, setFlash] = useState<string | null>(null);
 
+  // The breakdowns already read were cut off at the old day, so they go with it.
+  function changeAsOf(value: string) {
+    setAsOf(clampAsOf(value, today));
+    setData(null);
+    setExpanded(null);
+    setTxns({});
+    setFlash(null);
+  }
+
   // ── Scope ────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!canPost) return;
@@ -210,7 +230,7 @@ function StockAdjustScreen() {
     // effect never cascades a render (react-hooks/set-state-in-effect).
     fetchLatestStock(
       { warehouse: [warehouse], floorName: [location], search: serverSearch || undefined,
-        adjustedOnly: adjustedOnly || undefined,
+        adjustedOnly: adjustedOnly || undefined, asOf: asOf || undefined,
         pageSize: PAGE_SIZE, sortBy: "itemName", sortOrder: "asc" },
       signal,
     ).then(
@@ -220,7 +240,7 @@ function StockAdjustScreen() {
         setError(e.message); setData(null);
       },
     );
-  }, [warehouse, location, serverSearch, adjustedOnly]);
+  }, [warehouse, location, serverSearch, adjustedOnly, asOf]);
 
   useEffect(() => {
     const c = new AbortController();
@@ -259,7 +279,8 @@ function StockAdjustScreen() {
     // than one page would drop whichever of its two stock types sorted later —
     // and the breakdown would quietly show a Net short of the row above it.
     listStockTransactions({ warehouse, location, itemName: item.item_name,
-                            stockType: item.stock_type as StockTypeName, pageSize: 200 })
+                            stockType: item.stock_type as StockTypeName,
+                            dateTo: asOf || undefined, pageSize: 200 })
       .then(
         (r) => setTxns((prev) => ({ ...prev, [key]: r.transactions })),
         () => setTxns((prev) => ({ ...prev, [key]: [] })),
@@ -443,7 +464,7 @@ function StockAdjustScreen() {
           <>
             {/* ── Where. Straight from your profile access scope. ───────────── */}
             <section className="bg-white border border-[var(--aws-border)] rounded-md p-4 mb-5">
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                 <div>
                   <label className={LABEL} htmlFor="wh">Warehouse</label>
                   <select id="wh" className={FIELD} value={warehouse}
@@ -479,6 +500,11 @@ function StockAdjustScreen() {
                   <input id="q" className={FIELD} type="search" value={search}
                          onChange={(e) => setSearch(e.target.value)} placeholder="Search every article on this floor" />
                 </div>
+                <div>
+                  <label className={LABEL} htmlFor="asof">As of date</label>
+                  <input id="asof" className={FIELD} type="date" value={asOf} max={today}
+                         onChange={(e) => changeAsOf(e.target.value)} />
+                </div>
               </div>
               <label className="flex items-center gap-2 mt-3 text-[13px] text-[var(--text-primary)] cursor-pointer select-none w-fit">
                 <input type="checkbox" checked={adjustedOnly}
@@ -504,6 +530,19 @@ function StockAdjustScreen() {
               </p>
             </section>
 
+            {viewingPast && (
+              <section className="bg-white border border-[var(--aws-orange)] rounded-md p-3 mb-3 text-[13px] flex items-center justify-between gap-3">
+                <span className="text-[var(--text-primary)]">
+                  Showing stock as it stood on <span className="font-medium">{formatDate(asOf)}</span>.
+                  {" "}This view is read-only, because every entry is recorded against today.
+                </span>
+                <button onClick={() => changeAsOf("")}
+                        className="text-[12px] text-[var(--aws-orange)] hover:underline shrink-0">
+                  Back to today
+                </button>
+              </section>
+            )}
+
             {focused && (
               <section className="bg-white border border-[var(--aws-orange)] rounded-md p-3 mb-3 text-[13px] flex items-center justify-between gap-3">
                 <span className="text-[var(--text-primary)]">
@@ -525,21 +564,27 @@ function StockAdjustScreen() {
             <div className="flex items-center justify-between gap-3 mb-2">
               <p className="text-[13px] text-[var(--text-secondary)]">
                 {data?.as_of_date
-                  ? <>Stock here as of <span className="font-medium text-[var(--text-primary)]">{formatDate(data.as_of_date)}</span>, including adjustments since.</>
+                  ? viewingPast
+                    ? <>Stock here on <span className="font-medium text-[var(--text-primary)]">{formatDate(asOf)}</span>, from counts up to {formatDate(data.as_of_date)} plus adjustments up to that day.</>
+                    : <>Stock here as of <span className="font-medium text-[var(--text-primary)]">{formatDate(data.as_of_date)}</span>, including adjustments since.</>
                   : !warehouse || !location ? "Choose a warehouse and floor."
                   /* Never counted, but stock HAS been posted here. Saying "no
                      counted stock" over a populated table reads as "nothing is
                      here", which is what made 33.8 tonnes on A185 Cold look
                      lost. */
                   : rows.length > 0
-                    ? <>Never physically counted here — these figures come from adjustments alone.</>
-                    : "No counted stock at this location yet."}
+                    ? viewingPast
+                      ? <>Not physically counted here by {formatDate(asOf)} — these figures come from adjustments alone.</>
+                      : <>Never physically counted here — these figures come from adjustments alone.</>
+                    : viewingPast
+                      ? `Nothing on record here on or before ${formatDate(asOf)}.`
+                      : "No counted stock at this location yet."}
                 {data && data.pagination.total > data.pagination.page_size && (
                   <> Showing the first {data.pagination.page_size} of {data.pagination.total} lines — type in
                   {" "}<span className="font-medium text-[var(--text-primary)]">Find an item</span> to reach the rest.</>
                 )}
               </p>
-              <button onClick={() => setShowNew(true)} disabled={!warehouse || !location}
+              <button onClick={() => setShowNew(true)} disabled={!warehouse || !location || viewingPast}
                       className="h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] disabled:opacity-40 hover:border-[var(--aws-orange)]">
                 + New article
               </button>
@@ -550,7 +595,7 @@ function StockAdjustScreen() {
                 <table className="w-full text-[13px] border-collapse">
                   <thead>
                     <tr className="bg-[#fafafa]">
-                      {["Item", "Type", "Group", "Stock type", "Counted (kg)", "Adjusted (kg)", "Current (kg)", "Action"].map((h) => (
+                      {["Item", "Type", "Group", "Stock type", "Counted (kg)", "Adjusted (kg)", viewingPast ? "Stock (kg)" : "Current (kg)", "Action"].map((h) => (
                         <th key={h} scope="col"
                             className="border border-[var(--aws-border)] px-3 py-2 font-semibold text-[var(--text-primary)] whitespace-nowrap text-center">
                           {h}
@@ -565,6 +610,7 @@ function StockAdjustScreen() {
                     {!loading && rows.length === 0 && (
                       <tr><td colSpan={8} className="px-3 py-8 text-center text-[var(--text-secondary)]">
                         {!warehouse || !location ? "Choose a warehouse and floor to see its stock."
+                          : viewingPast ? `No stock on record here${search ? ` matching “${search}”` : ""} on or before ${formatDate(asOf)}.`
                           : focused ? `${focusItem} has no stock at ${warehouse} · ${location}. Pick another floor, or use “+ New article” to record it here.`
                           : adjustedOnly && search ? `Nothing matching “${search}” has been adjusted here. Untick “Only lines with an adjustment” to see what was counted.`
                           : adjustedOnly ? "No adjustments have been posted at this location."
@@ -603,12 +649,16 @@ function StockAdjustScreen() {
                         <td className="border border-[var(--aws-border)] px-3 py-2 text-center tabular-nums font-medium">{formatNumber(it.total_weight)}</td>
                         <td className="border border-[var(--aws-border)] px-3 py-2">
                           <div className="flex gap-1 justify-center">
-                            <button onClick={() => openFor(it, "ADDITION")} title={`Add to ${it.item_name}`}
-                                    aria-label={`Add to ${it.item_name}`}
-                                    className="h-7 w-7 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[#1d7324] font-bold hover:border-[#1d7324]">+</button>
-                            <button onClick={() => openFor(it, "SUBTRACTION")} title={`Subtract from ${it.item_name}`}
-                                    aria-label={`Subtract from ${it.item_name}`}
-                                    className="h-7 w-7 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[#a8500a] font-bold hover:border-[#a8500a]">−</button>
+                            {!viewingPast && (
+                              <>
+                                <button onClick={() => openFor(it, "ADDITION")} title={`Add to ${it.item_name}`}
+                                        aria-label={`Add to ${it.item_name}`}
+                                        className="h-7 w-7 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[#1d7324] font-bold hover:border-[#1d7324]">+</button>
+                                <button onClick={() => openFor(it, "SUBTRACTION")} title={`Subtract from ${it.item_name}`}
+                                        aria-label={`Subtract from ${it.item_name}`}
+                                        className="h-7 w-7 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[#a8500a] font-bold hover:border-[#a8500a]">−</button>
+                              </>
+                            )}
                             {it.verified ? (
                               // The point of the indicator: before this, a
                               // successful verify changed nothing on screen, so
@@ -617,6 +667,8 @@ function StockAdjustScreen() {
                                     title={`Verified by ${it.verified_by ?? "—"}${it.verified_at ? ` · ${formatWhen(it.verified_at)}` : ""}`}>
                                 ✓ Verified
                               </span>
+                            ) : viewingPast ? (
+                              <span className="text-[var(--text-muted)]">—</span>
                             ) : canVerify ? (
                               <button onClick={() => onVerifyRow(it)}
                                       disabled={verifyBusy === rowKey(it)}
@@ -674,7 +726,7 @@ function StockAdjustScreen() {
                                             posting signs the whole line off, and un-ticking
                                             any one takes that signature back off — the
                                             server reconciles, onToggleTxnVerified re-reads. */}
-                                        {canVerify ? (
+                                        {canVerify && !viewingPast ? (
                                           <button
                                             type="button"
                                             disabled={txnVerifyBusy !== null}
@@ -711,7 +763,7 @@ function StockAdjustScreen() {
                                       {it.net_adjustment_kg > 0 ? "+" : ""}{formatNumber(it.net_adjustment_kg)}
                                     </td>
                                     <td colSpan={3} className="py-1 text-[var(--text-muted)]">
-                                      {formatNumber(it.counted_weight)} counted → {formatNumber(it.total_weight)} current
+                                      {formatNumber(it.counted_weight)} counted → {formatNumber(it.total_weight)} {viewingPast ? "on that day" : "current"}
                                     </td>
                                   </tr>
                                 </tbody>
@@ -758,6 +810,7 @@ function StockAdjustScreen() {
 
       {showNew && (
         <NewArticleDialog
+          requireClassified
           onCancel={() => setShowNew(false)}
           onPick={(a) => {
             const t: Target = { ...a, available_kg: null };

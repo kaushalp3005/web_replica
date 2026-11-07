@@ -7,7 +7,11 @@
 //
 // The rule: the mapped Business Head AND the standing deputy approvers receive the
 // action buttons; everyone else is TO(notify_to)/CC. The BH remains THE approver
-// for display — the deputies act only when the primary does not.
+// for display — the deputies act only when the primary does not. The same approvers
+// are the only people the server lets Approve / Reject / Hold, on every channel,
+// and never the person who raised the return (approval_service.apply_cr_action) —
+// so the deciders, the approvers who get the buttons and lead TO, leave the creator
+// out; a creator who is an approver is copied (CC) instead.
 
 import { normalizeWarehouseName } from "@/lib/transferBuildSummary";
 import type { CrEmailRouting } from "@/lib/customer-returns";
@@ -79,15 +83,17 @@ export interface CRRecipientHeader {
 
 export interface ApprovalRecipients {
   approver: { name: string; email: string } | null; // the BH — displayed as THE approver
-  approvers: { name: string; email: string }[]; // everyone holding buttons, BH first
-  to: string[]; // TO line (approvers + notify_to)
+  approvers: { name: string; email: string }[]; // everyone the rule names, BH first
+  deciders: { name: string; email: string }[]; // approvers minus the creator: who gets the buttons
+  to: string[]; // TO line (deciders + notify_to)
   cc: string[]; // deduped CC line
 }
 
 // Resolve the recipient matrix, mirroring the backend mail_service.resolve_recipients:
-// the mapped BH (if any) plus the standing deputies lead the TO alongside notify_to
-// and are the approvers; CC = sales POC (mapped + manual) + constants + creator +
-// warehouse owner, deduped, with the TO addresses removed.
+// the mapped BH (if any) plus the standing deputies are the approvers; the deciders
+// (approvers minus whoever raised the return — mail_service.eligible_approvers) lead
+// the TO alongside notify_to; CC = sales POC (mapped + manual) + constants + creator
+// + warehouse owner, deduped, with the TO addresses removed.
 export function resolveRecipients(routing: CrEmailRouting, h: CRRecipientHeader): ApprovalRecipients {
   const bhEmail = lookupBusinessHeadEmail(routing, h.business_head);
   const approver = bhEmail ? { name: (h.business_head || "").trim() || bhEmail, email: bhEmail } : null;
@@ -99,8 +105,10 @@ export function resolveRecipients(routing: CrEmailRouting, h: CRRecipientHeader)
       approvers.push({ name: (d.name || "").trim() || email, email });
     }
   }
+  const raisedBy = (h.created_by ?? "").trim().toLowerCase();
+  const deciders = approvers.filter((a) => !raisedBy || a.email.trim().toLowerCase() !== raisedBy);
 
-  const to = [...approvers.map((a) => a.email), ...(routing.notify_to ? [routing.notify_to] : [])];
+  const to = [...deciders.map((a) => a.email), ...(routing.notify_to ? [routing.notify_to] : [])];
   const toLower = new Set(to.map((a) => a.trim().toLowerCase()));
 
   const candidates: string[] = [];
@@ -120,7 +128,13 @@ export function resolveRecipients(routing: CrEmailRouting, h: CRRecipientHeader)
     seen.add(n);
     cc.push(addr.trim());
   }
-  return { approver, approvers, to, cc };
+  return { approver, approvers, deciders, to, cc };
+}
+
+// The e-mails of everyone who may decide, trimmed and lower-cased — the server
+// compares the decider's e-mail the same way.
+export function approverEmails(r: ApprovalRecipients): string[] {
+  return r.approvers.map((a) => a.email.trim().toLowerCase()).filter(Boolean);
 }
 
 // ── Runnable self-check (ponytail: one assert-based demo for the routing) ──
@@ -165,6 +179,8 @@ export function demo(): void {
   // appear in CC (rmpatil is a constant CC as well; TO wins, one copy each).
   assert(r.approvers.map((a) => a.email).join() ===
     "yash@candorfoods.in,satyendra@candorfoods.in,rmpatil@candorfoods.in", "approvers = BH then deputies");
+  assert(approverEmails(r).join() === "yash@candorfoods.in,satyendra@candorfoods.in,rmpatil@candorfoods.in",
+    "approverEmails = who may decide");
   assert(r.to.includes("satyendra@candorfoods.in") && r.to.includes("rmpatil@candorfoods.in"), "deputies in TO");
   assert(!r.cc.some((a) => a.toLowerCase() === "rmpatil@candorfoods.in"), "deputy not duplicated into CC");
   assert(r.cc.includes("shubham.seth@candorfoods.in"), "POC email in CC");
@@ -193,6 +209,16 @@ export function demo(): void {
   assert(r2.to.includes("pooja.parkar@candorfoods.in") && r2.to.includes("satyendra@candorfoods.in"),
     "TO = deputies + notify_to");
   assert(r2.cc.includes("pankaj.ranga@candorfoods.in"), "A68 warehouse CC");
+
+  // A BH who raised the return is still THE approver for display, but not a decider:
+  // the deputies get the buttons and lead TO, and the BH is copied instead.
+  const rOwn = resolveRecipients(routing, { business_head: "Yash Gawdi", created_by: " YASH@candorfoods.in" });
+  assert(rOwn.approver?.email === "yash@candorfoods.in" && rOwn.approvers.length === 3, "creator BH still an approver");
+  assert(rOwn.deciders.map((a) => a.email).join() === "satyendra@candorfoods.in,rmpatil@candorfoods.in",
+    "creator BH is not a decider");
+  assert(!rOwn.to.includes("yash@candorfoods.in") && rOwn.cc.some((a) => a.toLowerCase() === "yash@candorfoods.in"),
+    "creator BH copied, not asked");
+  assert(r.deciders.length === r.approvers.length, "a creator who is no approver leaves every approver a decider");
 
   // A deputy who is also the CR's own BH is one approver, not two.
   const rDup = resolveRecipients(

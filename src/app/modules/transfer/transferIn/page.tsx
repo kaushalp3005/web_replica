@@ -9,6 +9,9 @@
 // "Entries" unify the two source shapes: when the transfer carries scanned boxes,
 // each box is one entry; otherwise each line is expanded into `qty` entries (one per
 // box) with a synthetic LINE-<lineId>-<n> box_id so per-entry acknowledge still works.
+// What is acknowledged is kept by entry key (the box row), never by box_id: two boxes of
+// one transfer can share a box_id under different transactions. A resumed receipt is read
+// back by the server's rule (_receipt: by box row, else box_id and transaction).
 //
 // ───────────────────────── FUNCTION BLOCKS ─────────────────────────
 // WIRED:  doSearch · ensurePending · onAck/onAckAll/onUnack · openIssue/submitIssue ·
@@ -23,23 +26,21 @@
 
 import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useRequireAuth, useMe } from "@/lib/user";
+import { useHasPermission, useRequireAuth, useMe, useUserScope } from "@/lib/user";
 import { TransferChrome } from "../_chrome";
-import { TransferApi, type TransferDetail, type AcknowledgeBoxInput } from "@/lib/transfer";
+import { TransferApi, type TransferDetail, type AcknowledgeBoxInput, type AckConflict, type TransferInBox } from "@/lib/transfer";
 import { getDisplayWarehouseName } from "@/lib/transferBuildSummary";
+import { canonicalSite, isColdSite } from "@/lib/sites";
 import { QrScanBox } from "@/components/QrScanBox";
 import { apiFetch, readApiErrorMessage } from "@/lib/auth";
 import { friendlyApiError } from "@/lib/apiErrors";
+import { acknowledgedEntries, conflictedKeys, sharesBoxId } from "./_receipt";
 
 function num(v: unknown): number {
   const n = typeof v === "number" ? v : parseFloat(String(v ?? ""));
   return Number.isFinite(n) ? n : 0;
 }
 function str(v: unknown): string { return v == null ? "" : String(v); }
-
-const ACK_EMAILS = new Set(["yash@candorfoods.in", "b.hrithik@candorfoods.in", "sunil.jasoria@candorfoods.in"]);
-const COLD_SITES = new Set(["cold storage", "rishi", "savla d-39", "savla d-514", "supreme", "eskimo"]);
-const REOPEN_EMAILS = new Set(["b.hrithik@candorfoods.in"]);
 
 type IssueData = { net_weight: string; gross_weight: string; qty: string; remarks: string };
 const EMPTY_ISSUE: IssueData = { net_weight: "", gross_weight: "", qty: "", remarks: "" };
@@ -84,6 +85,31 @@ function buildEntries(t: TransferDetail | null): Entry[] {
     }
   }
   return out;
+}
+
+// A receipt's rows as the page keeps them: the entries they acknowledge, and the issue
+// flagged on each entry recorded as not matched, both by entry key.
+function receiptState(entries: Entry[], rows: TransferInBox[]): { acked: Set<string>; issues: Map<string, IssueData> } {
+  const acked = new Set<string>(); const issues = new Map<string, IssueData>();
+  for (const [key, b] of acknowledgedEntries(entries, rows)) {
+    acked.add(key);
+    if (b.is_matched === false) {
+      const i = parseIssueObj(b.issue) || {};
+      issues.set(key, { net_weight: str(i.net_weight), gross_weight: str(i.gross_weight), qty: str(i.qty), remarks: str(i.remarks) });
+    }
+  }
+  return { acked, issues };
+}
+
+// An acknowledge-batch's refusals in one line: the first few as the server words them.
+function conflictText(conflicts: AckConflict[]): string {
+  const say = (c: AckConflict) => {
+    const d = c.detail;
+    const why = typeof d === "string" ? d : d && typeof d === "object" && "message" in d ? String((d as { message: unknown }).message) : "refused";
+    return `${(c.box_id || "").trim() || "?"}: ${why}`;
+  };
+  const listed = conflicts.slice(0, 3).map(say).join(" · ");
+  return `${conflicts.length} box(es) were not acknowledged — ${listed}${conflicts.length > 3 ? ` · and ${conflicts.length - 3} more` : ""}`;
 }
 
 function toAck(e: Entry, matched: boolean, issue?: IssueData): AcknowledgeBoxInput {
@@ -140,9 +166,13 @@ function ReceiveInner() {
   const searchParams = useSearchParams();
   const resumeNo = searchParams.get("resume");
 
-  const email = (me?.email || "").toLowerCase();
-  const canAcknowledge = me?.is_admin === true || ACK_EMAILS.has(email);
-  const canReopen = me?.is_admin === true || REOPEN_EMAILS.has(email);
+  // Receiving (acknowledge, confirm, close with shortage) and re-opening a receipt:
+  // admins and inventory managers (holders of the approve permission), as the server
+  // checks it; a user tied to a warehouse still receives only into their own site.
+  const { isAdmin } = useUserScope();
+  const isManager = useHasPermission("transfer", "requests", null, "approve") === true;
+  const canAcknowledge = isAdmin || isManager;
+  const canReopen = isAdmin || isManager;
   const receivedBy = me?.full_name || me?.email || "web";
 
   const [transferNumber, setTransferNumber] = useState("");
@@ -191,18 +221,10 @@ function ReceiveInner() {
             // Already received → offer Re-open (don't adopt its boxes as in-progress).
             setReceivedHeaderId(pend.header.id);
           } else {
-            // Pending → resume: adopt the acknowledged / issued boxes.
+            // Pending → resume: adopt the acknowledged / issued boxes, entry by entry.
             setPendingHeaderId(pend.header.id);
-            const a = new Set<string>(); const iss = new Map<string, IssueData>();
-            for (const b of pend.header.boxes) {
-              if (!b.box_id) continue;
-              a.add(b.box_id);
-              if (b.is_matched === false) {
-                const i = parseIssueObj(b.issue) || {};
-                iss.set(b.box_id, { net_weight: str(i.net_weight), gross_weight: str(i.gross_weight), qty: str(i.qty), remarks: str(i.remarks) });
-              }
-            }
-            setAcked(a); setIssues(iss);
+            const s = receiptState(buildEntries(t), pend.header.boxes);
+            setAcked(s.acked); setIssues(s.issues);
           }
         }
       } catch { /* resume best-effort */ }
@@ -228,81 +250,109 @@ function ReceiveInner() {
     gross: entries.reduce((s, e) => s + e.gross_weight, 0),
   }), [transferData, entries]);
 
-  const resolved = acked.size;
-  const issueCount = issues.size;
+  const resolved = entries.filter((e) => acked.has(e.key)).length;
+  const issueCount = entries.filter((e) => issues.has(e.key)).length;
   const pendingCount = Math.max(entries.length - resolved, 0);
   const allResolved = entries.length > 0 && resolved === entries.length;
-  const isCold = !!transferData?.from_cold_unit ||
-    (transferData ? COLD_SITES.has((transferData.from_warehouse || "").trim().toLowerCase()) : false);
+  // Sent from cold storage: it carries cold units, or its From is a cold site by any of
+  // its spellings (lib/sites: "Supreme Cold", "D-39", "Old Savla", "Cold Storage", …).
+  const isCold = !!transferData?.from_cold_unit || isColdSite(transferData?.from_warehouse);
   const boxCount = (transferData?.boxes ?? []).filter((b) => !!b.box_id).length;
 
   // ── FUNCTION BLOCK: ensurePending (WIRED) ──
   const ensurePending = useCallback(async (): Promise<number> => {
     if (pendingHeaderId) return pendingHeaderId;
     if (!transferData) throw new Error("No transfer loaded.");
+    // The transfer's To, by its canonical name (a legacy "Warehouse A185" is received as A185).
     const hdr = await TransferApi.createPendingTransferIn({
       transfer_out_id: transferData.id, grn_number: `GRN-${transferData.challan_no}`,
-      receiving_warehouse: transferData.to_warehouse, received_by: receivedBy,
+      receiving_warehouse: canonicalSite(transferData.to_warehouse), received_by: receivedBy,
       box_condition: boxCondition, condition_remarks: conditionRemarks,
     });
     setPendingHeaderId(hdr.id);
-    if (hdr.boxes?.length) setAcked(new Set(hdr.boxes.map((b) => b.box_id).filter(Boolean) as string[]));
+    if (hdr.boxes?.length) {
+      const s = receiptState(entries, hdr.boxes);
+      setAcked(s.acked); setIssues(s.issues);
+    }
     return hdr.id;
-  }, [pendingHeaderId, transferData, receivedBy, boxCondition, conditionRemarks]);
+  }, [pendingHeaderId, transferData, entries, receivedBy, boxCondition, conditionRemarks]);
 
   // ── FUNCTION BLOCK: onAck / onAckAll / onUnack (WIRED) ──
+  // Each by entry key, so of two boxes sharing a box_id only the one acted on changes.
   const onAck = async (e: Entry): Promise<boolean> => {
     setBusy(true); setError(null);
     try {
       const hid = await ensurePending();
       await TransferApi.acknowledgeBox(hid, toAck(e, true));
-      setAcked((p) => new Set(p).add(e.box_id));
-      setIssues((p) => { const n = new Map(p); n.delete(e.box_id); return n; });
+      setAcked((p) => new Set(p).add(e.key));
+      setIssues((p) => { const n = new Map(p); n.delete(e.key); return n; });
       return true;
     } catch (err) { setError(err instanceof Error ? err.message : "Acknowledge failed."); return false; }
     finally { setBusy(false); }
   };
+  // Marks only the boxes the batch recorded: the rows it wrote, else every box it did not
+  // refuse. A refused box (e.g. a second box with the same box id on one receipt) stays
+  // pending, and the server's reason is shown.
   const onAckAll = async () => {
     setBusy(true); setError(null);
     try {
       const hid = await ensurePending();
-      const todo = entries.filter((e) => !acked.has(e.box_id));
+      const todo = entries.filter((e) => !acked.has(e.key));
       if (todo.length) {
         const res = await TransferApi.acknowledgeBatch(hid, todo.map((e) => toAck(e, true)));
-        if (res.conflicts?.length) setError(`${res.conflicts.length} entr(ies) had conflicts.`);
+        const conflicts = res.conflicts ?? [];
+        const refused = conflictedKeys(todo, conflicts);
+        const done = res.boxes
+          ? [...acknowledgedEntries(todo, res.boxes).keys()].filter((k) => !refused.has(k))
+          : todo.filter((e) => !refused.has(e.key)).map((e) => e.key);
+        setAcked((p) => new Set([...p, ...done]));
+        if (conflicts.length) setError(conflictText(conflicts));
       }
-      setAcked(new Set(entries.map((e) => e.box_id)));
     } catch (err) { setError(err instanceof Error ? err.message : "Acknowledge-all failed."); }
     finally { setBusy(false); }
   };
+  // A box whose box_id another box of the transfer shares is taken off by its transaction
+  // too, and the receipt is read back: a server that does not read the transaction takes
+  // off every row of that box_id, and the page then shows what it holds.
   const onUnack = async (e: Entry) => {
     setBusy(true); setError(null);
     try {
-      if (pendingHeaderId) await TransferApi.unacknowledgeBox(pendingHeaderId, e.box_id);
-      setAcked((p) => { const n = new Set(p); n.delete(e.box_id); return n; });
-      setIssues((p) => { const n = new Map(p); n.delete(e.box_id); return n; });
+      const shared = sharesBoxId(entries, e);
+      if (pendingHeaderId) await TransferApi.unacknowledgeBox(pendingHeaderId, e.box_id, shared ? e.transaction_no : null);
+      setAcked((p) => { const n = new Set(p); n.delete(e.key); return n; });
+      setIssues((p) => { const n = new Map(p); n.delete(e.key); return n; });
+      if (pendingHeaderId && shared && transferData) {
+        const pend = await TransferApi.getPendingByTransferOut(transferData.id);
+        if (pend.exists && pend.header) {
+          const s = receiptState(entries, pend.header.boxes);
+          setAcked(s.acked); setIssues(s.issues);
+        }
+      }
     } catch (err) { setError(err instanceof Error ? err.message : "Un-acknowledge failed."); }
     finally { setBusy(false); }
   };
 
   // ── FUNCTION BLOCK: openIssue / submitIssue (WIRED) ──
   const openIssue = (e: Entry) => {
-    setDraft(issues.get(e.box_id) || { ...EMPTY_ISSUE, net_weight: String(e.net_weight), gross_weight: String(e.gross_weight) });
-    setIssueOpen(e.box_id);
+    setDraft(issues.get(e.key) || { ...EMPTY_ISSUE, net_weight: String(e.net_weight), gross_weight: String(e.gross_weight) });
+    setIssueOpen(e.key);
   };
   const submitIssue = async (e: Entry) => {
     setBusy(true); setError(null);
     try {
       const hid = await ensurePending();
       await TransferApi.acknowledgeBox(hid, toAck(e, false, draft));
-      setAcked((p) => new Set(p).add(e.box_id));
-      setIssues((p) => new Map(p).set(e.box_id, draft));
+      setAcked((p) => new Set(p).add(e.key));
+      setIssues((p) => new Map(p).set(e.key, draft));
       setIssueOpen(null);
     } catch (err) { setError(err instanceof Error ? err.message : "Flagging issue failed."); }
     finally { setBusy(false); }
   };
 
   // ── FUNCTION BLOCK: onConfirm (WIRED) ──
+  // Record only: finalizing marks the GRN and the transfer Received and clears the boxes'
+  // in-transit rows. No stock table is written (IMS keeps stock); re-open, close with
+  // shortage and the receipt delete likewise only change the transfer records.
   const onConfirm = async () => {
     setBusy(true); setError(null);
     try {
@@ -320,7 +370,7 @@ function ReceiveInner() {
     setBusy(true); setError(null);
     try {
       await TransferApi.reopenTransferIn(receivedHeaderId);
-      setNotice("Receipt re-opened — stock moved back to in-transit. Re-acknowledge to correct.");
+      setNotice("Receipt re-opened — its boxes are back on the in-transit list. Re-acknowledge to correct.");
       await doSearch(transferData?.challan_no || transferNumber);
     } catch (e) { setError(e instanceof Error ? e.message : "Re-open failed."); }
     finally { setBusy(false); }
@@ -375,14 +425,19 @@ function ReceiveInner() {
   //    so the operator sees WHAT they scanned and why it isn't here (red bar).
   // A monotonic scanReqRef drops a stale identify response once a newer scan supersedes it.
   const onScanDetected = async (text: string): Promise<boolean> => {
-    const { box_id } = parseScan(text);
+    const { box_id, transaction_no } = parseScan(text);
     const reqId = ++scanReqRef.current;
     setScan({ status: "loading", value: box_id });
 
     // Expected on this transfer? (real, non-synthetic boxes only — synthetic line units have no QR)
-    const entry = entries.find((e) => !e.synthetic && e.box_id === box_id);
+    // A QR naming its transaction is that box only: of two boxes sharing a box_id it picks
+    // its own, and one under another transaction is not on this transfer. A plain sticker
+    // (box_id only) takes the first of that box_id not yet acknowledged.
+    const tno = transaction_no.trim();
+    const same = entries.filter((e) => !e.synthetic && e.box_id === box_id && (!tno || e.transaction_no.trim() === tno));
+    const entry = same.find((e) => !acked.has(e.key)) ?? same[0];
     if (entry) {
-      if (acked.has(entry.box_id)) { setScan({ status: "already", value: box_id, entry }); return true; }
+      if (acked.has(entry.key)) { setScan({ status: "already", value: box_id, entry }); return true; }
       const ok = await onAck(entry);
       if (scanReqRef.current === reqId) setScan(ok ? { status: "matched", value: box_id, entry } : { status: "err", value: box_id, error: "Acknowledge failed." });
       return ok;
@@ -410,7 +465,7 @@ function ReceiveInner() {
   const fromName = transferData ? (transferData.from_cold_unit || getDisplayWarehouseName(transferData.from_warehouse) || transferData.from_warehouse) : "";
   const toName = transferData ? (getDisplayWarehouseName(transferData.to_warehouse) || transferData.to_warehouse) : "";
   const isReceived = (transferData?.status || "").toLowerCase() === "received";
-  const stateOf = (e: Entry) => issues.has(e.box_id) ? "issue" : acked.has(e.box_id) ? "ok" : "pending";
+  const stateOf = (e: Entry) => issues.has(e.key) ? "issue" : acked.has(e.key) ? "ok" : "pending";
 
   return (
     <TransferChrome title="Transfer In (Receive)">
@@ -444,7 +499,7 @@ function ReceiveInner() {
       {doneGrn ? (
         <div className="py-12 text-center">
           <div className="text-[15px] font-semibold text-emerald-700 mb-1">Receipt confirmed — {doneGrn}</div>
-          <div className="text-[12px] text-[var(--text-secondary)]">Stock posted to destination. Returning to the dashboard…</div>
+          <div className="text-[12px] text-[var(--text-secondary)]">Transfer recorded as received (stock is kept in IMS and not changed here). Returning to the dashboard…</div>
         </div>
       ) : loading && !transferData ? (
         <div className="space-y-3">{[0, 1, 2].map((i) => <div key={i} className="h-24 bg-white border border-[var(--aws-border)] rounded-md animate-pulse" />)}</div>
@@ -521,7 +576,7 @@ function ReceiveInner() {
             </div>
 
             {byArticle.map(([article, items]) => {
-              const aResolved = items.filter((e) => acked.has(e.box_id)).length;
+              const aResolved = items.filter((e) => acked.has(e.key)).length;
               return (
                 <div key={article} className="border-b border-[var(--aws-border)]/50 last:border-b-0">
                   <div className="px-4 py-2 bg-violet-50/40 flex items-center justify-between gap-2">
@@ -545,7 +600,7 @@ function ReceiveInner() {
                       <tbody>
                         {items.map((e) => {
                           const st = stateOf(e);
-                          const iss = issues.get(e.box_id);
+                          const iss = issues.get(e.key);
                           return (
                             <Fragment key={e.key}>
                               <tr className={`border-b border-[var(--aws-border)]/40 ${st === "ok" ? "bg-emerald-50/40" : st === "issue" ? "bg-rose-50/30" : "hover:bg-gray-50/50"}`}>
@@ -575,7 +630,7 @@ function ReceiveInner() {
                                     )}
                                 </td>
                               </tr>
-                              {issueOpen === e.box_id && (
+                              {issueOpen === e.key && (
                                 <tr className="bg-rose-50/60"><td colSpan={10} className="px-4 py-3">
                                   <IssueForm draft={draft} setDraft={setDraft} busy={busy} onCancel={() => setIssueOpen(null)} onSubmit={() => submitIssue(e)} />
                                 </td></tr>
@@ -591,7 +646,7 @@ function ReceiveInner() {
                   <div className="md:hidden p-3 space-y-2">
                     {items.map((e) => {
                       const st = stateOf(e);
-                      const iss = issues.get(e.box_id);
+                      const iss = issues.get(e.key);
                       return (
                         <div key={e.key} className={`border rounded p-2 ${st === "ok" ? "border-emerald-200 bg-emerald-50/40" : st === "issue" ? "border-rose-200 bg-rose-50/30" : "border-[var(--aws-border)]"}`}>
                           <div className="flex items-center justify-between">
@@ -617,7 +672,7 @@ function ReceiveInner() {
                               <button onClick={() => notWired("Print QR")} className="px-2 py-0.5 text-[11px] text-[var(--text-secondary)] underline decoration-dotted">🖨 Print QR</button>
                             </div>
                           )}
-                          {issueOpen === e.box_id && (
+                          {issueOpen === e.key && (
                             <div className="mt-2"><IssueForm draft={draft} setDraft={setDraft} busy={busy} onCancel={() => setIssueOpen(null)} onSubmit={() => submitIssue(e)} /></div>
                           )}
                         </div>
@@ -670,7 +725,7 @@ function ReceiveInner() {
           <div className="bg-white rounded-md max-w-md w-full p-4">
             <div className="text-[14px] font-semibold text-amber-800 mb-1">Close with shortage</div>
             <p className="text-[12px] text-[var(--text-secondary)] mb-3">
-              Receive {resolved} acknowledged item(s) and write off {pendingCount} un-received. The GRN is marked Received.
+              Receive {resolved} acknowledged item(s) and write off {pendingCount} un-received: they come off the in-transit list as a shortage (stock is not changed here). The GRN is marked Received.
             </p>
             <input value={shortageReason} onChange={(e) => setShortageReason(e.target.value)}
               placeholder="Shortage reason (optional)…"

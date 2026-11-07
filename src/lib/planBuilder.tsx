@@ -19,7 +19,7 @@
 // adopt this module in a later step. Keeping the two in sync until then is
 // deliberate: extracting without touching planning avoids regressions.
 
-import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
   type FulfillmentRow,
   type CreateBomLineInput,
@@ -34,6 +34,9 @@ import {
 import { PROCESS_OPTIONS, canonProcess, stageFromProcess } from "@/lib/processCatalog";
 import { userHasAnyWarehouse } from "@/lib/warehouseScope";
 import { lookupSku } from "@/lib/so";
+import { searchBomMaterials, type BomMaterialOption } from "@/lib/bom";
+import { SearchSelect } from "@/components/SearchSelect";
+import { MaterialBrowser, type BrowsedMaterial } from "@/components/MaterialBrowser";
 import {
   cellText, commonFactory, earliestDate, factorySummary, groupBySo, onlyFactory, parseQtyInput,
 } from "@/lib/selectedGroups";
@@ -105,6 +108,10 @@ export interface PlanStep {
 // shortage_kg, etc.) come back too but planning leaves shortage/inventory
 // rendering to the Plan-Detail page where the operator can act on it.
 export interface BomLineRow {
+  /** bom_line.bom_line_id — kept so an edit can be matched back to its row
+   *  by whichever save path is wired up for it. Null for a line the server
+   *  synthesised (e.g. an override-added item). */
+  bom_line_id?: number | null;
   material_sku_name: string | null;
   item_type: string | null;
   quantity_per_unit: number | null;
@@ -539,6 +546,7 @@ export function usePlanBuilder(opts: {
       const bomLines: BomLineRow[] = rawLines
         .filter((l) => !(l.is_removed === true))
         .map((l) => ({
+          bom_line_id: typeof l.bom_line_id === "number" ? l.bom_line_id : null,
           material_sku_name: (l.material_sku_name as string | null) ?? null,
           item_type: (l.item_type as string | null) ?? null,
           quantity_per_unit:
@@ -875,7 +883,7 @@ export function SelectedArticlesPanel({
   onToggleExpand, onPatch, onReset, onRemove, onClearAll,
   onSetFactory, onSetStepFloor, onSetStepProcess, onMoveStep, onMergeSteps,
   onAddStep,
-  onRemoveStep, onRefreshSteps, onCreateBom,
+  onRemoveStep, onRefreshSteps, onCreateBom, onUpdateBom,
   showSteps = true,
 }: {
   selectedIds: Set<number>;
@@ -898,6 +906,11 @@ export function SelectedArticlesPanel({
   onRemoveStep: (id: number, idx: number) => void;
   onRefreshSteps: (id: number) => void;
   onCreateBom: (id: number, lines: CreateBomLineInput[]) => Promise<boolean>;
+  /** Save the edited lines of a card's EXISTING BOM. Optional on purpose: where
+   *  such an edit is persisted has not been decided yet, so a host that does
+   *  not pass this gets the Edit BOM editor with its Save disabled and a note
+   *  saying so. `id` is the fulfillment id, `bomId` the BOM being edited. */
+  onUpdateBom?: (id: number, bomId: number, lines: BomEditLineInput[]) => Promise<boolean>;
   // Show the editable Process Steps (process route) section on each card. The
   // SO-Creation plan-builder passes false — routing there comes from the SFG
   // stage, not a hand-edited route. Defaults true so planning-style callers
@@ -1094,6 +1107,7 @@ export function SelectedArticlesPanel({
                       onRemoveStep={(idx) => onRemoveStep(r.fulfillment_id, idx)}
                       onRefreshSteps={() => onRefreshSteps(r.fulfillment_id)}
                       onCreateBom={(lines) => onCreateBom(r.fulfillment_id, lines)}
+                      onUpdateBom={onUpdateBom ? (bomId, lines) => onUpdateBom(r.fulfillment_id, bomId, lines) : undefined}
                       showSteps={showSteps}
                     />
                   )) : null}
@@ -1146,7 +1160,7 @@ function SelectedCard({
   row, cfg, isExpanded, scope, factoryOpts,
   onToggleExpand, onPatch, onReset, onRemove,
   onSetFactory, onSetStepFloor, onSetStepProcess, onMoveStep, onMergeSteps,
-  onAddStep, onRemoveStep, onRefreshSteps, onCreateBom, showSteps = true,
+  onAddStep, onRemoveStep, onRefreshSteps, onCreateBom, onUpdateBom, showSteps = true,
 }: {
   row: FulfillmentRow;
   cfg: CardOverride;
@@ -1166,6 +1180,7 @@ function SelectedCard({
   onRemoveStep: (idx: number) => void;
   onRefreshSteps: () => void;
   onCreateBom: (lines: CreateBomLineInput[]) => Promise<boolean>;
+  onUpdateBom?: (bomId: number, lines: BomEditLineInput[]) => Promise<boolean>;
   showSteps?: boolean;
 }) {
   const defaultKg = toNum(row.pending_qty_kg);
@@ -1428,17 +1443,19 @@ function SelectedCard({
             />
           ) : null}
 
-          {/* BOM materials (read-only). Mirrors StepsSection's load
+          {/* BOM materials (view / add / edit). Mirrors StepsSection's load
               gating so the operator sees a single source of truth for both
               process route AND material list while configuring the plan. */}
           <BomMaterialsSection
             loaded={!!cfg.stepsLoaded}
             loading={!!cfg.stepsLoading}
             lines={cfg.bomLines ?? []}
+            bomId={cfg.bomId ?? null}
             bomNote={cfg.bomNote}
             fgSkuName={row.fg_sku_name ?? null}
             entity={(row.entity ?? null) as string | null}
             onCreateBom={onCreateBom}
+            onUpdateBom={onUpdateBom}
           />
 
         </div>
@@ -1822,92 +1839,180 @@ function StepsSection({
   );
 }
 
-// ── BOM materials (read-only) ────────────────────────────────────────────
-// Loaded alongside the process route on first expand (same fetch). For RM
-// SOs / SKUs without a BOM the list is empty and the bomNote drives the
-// empty-state copy. Read-only here — overrides happen on the Plan-Detail
-// page once the plan is created.
-type BomDraftRow = { material_sku_name: string; item_type: "rm" | "pm"; quantity_per_unit: string; uom: string; loss_pct: string };
-const blankBomDraft = (): BomDraftRow => ({ material_sku_name: "", item_type: "rm", quantity_per_unit: "", uom: "", loss_pct: "" });
+// ── BOM materials ────────────────────────────────────────────────────────
+// Loaded alongside the process route on first expand (same fetch). The table
+// IS the editor — an always-editable row grid, no separate "edit" state:
+//
+//   * article HAS a BOM   — rows are seeded from the loaded lines (bom_line_id
+//                           kept on each) and editable in place. "Reset" puts
+//                           the loaded lines back. WHERE AN EDIT IS SAVED IS
+//                           NOT DECIDED YET: the section takes an optional
+//                           onUpdateBom, the SO Creation page passes none, and
+//                           until it does "Save changes" stays disabled with a
+//                           note. Nothing is written from this path today.
+//   * article has NO BOM  — "+ Add BOM for this article" opens the same grid
+//                           empty; "Save BOM" goes through onCreateBom →
+//                           POST /plans-v2/bom, exactly as before.
+//
+// Material is picked the same two ways as on the BOM module form (see
+// app/modules/bom/_BomForm.tsx): the SearchSelect type-ahead over
+// /api/v1/bom/lookups/materials, which also sets Type from the article when it
+// is RM or PM, and the four-dropdown MaterialBrowser cascade behind ☰. Free
+// text stays allowed for a material not yet in the all_sku master.
+//
+// Type is RM / PM only because POST /plans-v2/bom accepts nothing else; a line
+// that arrived with another type (sfg) keeps it, shown as an extra option.
+//
+// Why the seed is derived, not stored: the lines arrive AFTER mount (lazy
+// load), and copying them into state when they land would be a setState in an
+// effect, which this repo lints as an error. So `draft` is null until the
+// first keystroke; until then the rows are built from `lines` on each render
+// with STABLE keys (the bom_line_id), which is what keeps focus in an input
+// across re-renders.
+
+export type BomEditLineInput = Omit<CreateBomLineInput, "item_type"> & {
+  item_type: string;
+  /** Set for a line that already exists on the BOM; absent for an added row. */
+  bom_line_id?: number | null;
+};
+
+type BomDraftRow = {
+  key: number;
+  bom_line_id: number | null;
+  material_sku_name: string;
+  item_type: string;
+  quantity_per_unit: string;
+  uom: string;
+  loss_pct: string;
+};
+let bomDraftSeq = 1;
+// Seeded rows use their bom_line_id as the React key (or a small negative for
+// a line without one); rows the operator adds take keys far above any id.
+const newRowKey = () => 1_000_000_000 + bomDraftSeq++;
+const blankBomDraft = (): BomDraftRow => ({
+  key: newRowKey(), bom_line_id: null, material_sku_name: "", item_type: "rm",
+  quantity_per_unit: "", uom: "", loss_pct: "",
+});
+const draftFromLine = (l: BomLineRow, i: number): BomDraftRow => ({
+  key: typeof l.bom_line_id === "number" ? l.bom_line_id : -(i + 1),
+  bom_line_id: typeof l.bom_line_id === "number" ? l.bom_line_id : null,
+  material_sku_name: l.material_sku_name ?? "",
+  item_type: (l.item_type ?? "rm").trim().toLowerCase() || "rm",
+  quantity_per_unit: l.quantity_per_unit != null ? String(l.quantity_per_unit) : "",
+  uom: l.uom ?? "",
+  loss_pct: l.loss_pct != null ? String(l.loss_pct) : "",
+});
+// What picking an article changes on a row: the name, plus Type when all_sku
+// knows it as rm / pm. An fg pick (a hamper component) keeps the row's type.
+const materialPick = (particulars: string, itemType: unknown): Partial<BomDraftRow> => {
+  const t = typeof itemType === "string" ? itemType.trim().toLowerCase() : "";
+  return { material_sku_name: particulars, ...(t === "rm" || t === "pm" ? { item_type: t } : {}) };
+};
+
+const BOM_ROW_INPUT =
+  "min-w-0 w-full h-6 px-1 text-[11px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e]";
+const BOM_TH = "px-1.5 py-1 font-semibold whitespace-nowrap";
+const BOM_TD = "px-1 py-0.5 align-middle";
+const BOM_LINK_BTN = "text-[11px] font-semibold text-[var(--aws-link)] hover:underline disabled:opacity-50 disabled:no-underline";
 
 function BomMaterialsSection({
-  loaded, loading, lines, bomNote, fgSkuName, entity, onCreateBom,
+  loaded, loading, lines, bomId, bomNote, fgSkuName, entity, onCreateBom, onUpdateBom,
 }: {
   loaded: boolean;
   loading: boolean;
   lines: BomLineRow[];
+  bomId: number | null;
   bomNote: string | null | undefined;
   fgSkuName: string | null;
   entity: string | null;
   onCreateBom: (lines: CreateBomLineInput[]) => Promise<boolean>;
+  onUpdateBom?: (bomId: number, lines: BomEditLineInput[]) => Promise<boolean>;
 }) {
-  // Inline "Add BOM" editor state — hooks MUST precede the early returns below.
-  const [adding, setAdding] = useState(false);
+  // Hooks MUST precede the early returns below.
+  const [adding, setAdding] = useState(false);          // no-BOM path only
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [draft, setDraft] = useState<BomDraftRow[]>([blankBomDraft()]);
-  const resetDraft = () => { setDraft([blankBomDraft()]); setError(null); };
-  const patchRow = (i: number, f: keyof BomDraftRow, v: string) => {
-    setError(null);
-    setDraft((d) => d.map((r, j) => (j === i ? { ...r, [f]: v } : r)));
-  };
-  const addRow = () => setDraft((d) => [...d, blankBomDraft()]);
-  const removeRow = (i: number) => setDraft((d) => (d.length > 1 ? d.filter((_, j) => j !== i) : d));
+  // null = untouched (rows come straight from `lines`); set on first edit.
+  const [draft, setDraft] = useState<BomDraftRow[] | null>(null);
+  // Row key the ☰ browse cascade is open for.
+  const [browseKey, setBrowseKey] = useState<number | null>(null);
 
-  // Global SKU-name typeahead for the Material field — a native <datalist> fed
-  // by a debounced /so/sku-lookup search (same pattern as the SFG catalogue on
-  // the plan-list page). Free text stays allowed for materials not yet in the
-  // all_sku master.
-  const [skuSuggestions, setSkuSuggestions] = useState<string[]>([]);
-  // Per-instance datalist id — this section renders once per selected card, so a
-  // hardcoded id would collide across cards and cross-wire their suggestions.
-  const dlId = useId();
-  const skuSearchRef = useRef<{ t: ReturnType<typeof setTimeout> | null; ctrl: AbortController | null }>({ t: null, ctrl: null });
-  const searchSku = (term: string) => {
-    const s = skuSearchRef.current;
-    if (s.t) clearTimeout(s.t);
-    if (!term.trim()) { setSkuSuggestions([]); return; }
-    s.t = setTimeout(() => {
-      s.ctrl?.abort();
-      const ctrl = new AbortController();
-      s.ctrl = ctrl;
-      void lookupSku({ search: term }, ctrl.signal)
-        // Master can list the same name under multiple sku_ids / entities —
-        // dedupe so the datalist keys stay unique.
-        .then((data) => { if (!ctrl.signal.aborted) setSkuSuggestions([...new Set(data.options?.particulars ?? [])]); })
-        .catch(() => { /* silent — free text still allowed */ });
-    }, 250);
+  const hasBom = lines.length > 0;
+  const seed = (): BomDraftRow[] => (hasBom ? lines.map(draftFromLine) : [blankBomDraft()]);
+  const rows: BomDraftRow[] = draft ?? seed();
+  const dirty = draft !== null;
+
+  const patchRow = (key: number, patch: Partial<BomDraftRow>) => {
+    setError(null);
+    setDraft((d) => (d ?? seed()).map((r) => (r.key === key ? { ...r, ...patch } : r)));
   };
-  useEffect(() => {
-    const s = skuSearchRef.current;
-    return () => { if (s.t) clearTimeout(s.t); s.ctrl?.abort(); };
-  }, []);
+  const addRow = () => setDraft((d) => [...(d ?? seed()), blankBomDraft()]);
+  const removeRow = (key: number) =>
+    setDraft((d) => {
+      const cur = d ?? seed();
+      return cur.length > 1 ? cur.filter((r) => r.key !== key) : cur;
+    });
+  const reset = () => { setDraft(null); setError(null); setBrowseKey(null); };
+  const cancelAdd = () => { setAdding(false); reset(); };
 
   const entOk = entity === "cfpl" || entity === "cdpl";
   const gateOk = !!fgSkuName && entOk && !bomNote?.startsWith("Failed to load BOM");
-  const hasMaterial = draft.some((d) => d.material_sku_name.trim());
-  const onSaveBom = async () => {
-    const kept = draft.filter((d) => d.material_sku_name.trim());
-    // Backend requires quantity_per_unit > 0 (else 422). Catch it here with a
-    // clear message instead of a silent failure.
+  const hasMaterial = rows.some((d) => d.material_sku_name.trim());
+  // Edits of an existing BOM can only be saved once a host wires onUpdateBom.
+  const editSaveWired = !!onUpdateBom && bomId != null;
+  const canSave = hasBom ? editSaveWired && dirty : hasMaterial;
+
+  // The rows with a material, checked the way the backend checks them so the
+  // message names the row instead of a 422.
+  const collect = (): BomEditLineInput[] | null => {
+    const kept = rows.filter((d) => d.material_sku_name.trim());
     const bad = kept.find((d) => !(Number(d.quantity_per_unit) > 0));
     if (bad) {
       setError(`Qty/unit must be greater than 0 for "${bad.material_sku_name.trim()}".`);
-      return;
+      return null;
     }
-    const payloadLines: CreateBomLineInput[] = kept.map((d) => ({
+    return kept.map((d) => ({
+      ...(d.bom_line_id != null ? { bom_line_id: d.bom_line_id } : {}),
       material_sku_name: d.material_sku_name.trim(),
       item_type: d.item_type,
       quantity_per_unit: Number(d.quantity_per_unit),
       uom: d.uom.trim() || null,
       loss_pct: d.loss_pct === "" ? null : Number(d.loss_pct),
     }));
+  };
+
+  const onSave = async () => {
+    const payloadLines = collect();
+    if (!payloadLines) return;
     setError(null);
     setSaving(true);
-    const ok = await onCreateBom(payloadLines);
-    setSaving(false);
-    if (ok) { setAdding(false); resetDraft(); }
+    let ok = false;
+    try {
+      if (!hasBom) {
+        // POST /plans-v2/bom accepts rm / pm only.
+        const notAllowed = payloadLines.find((l) => l.item_type !== "rm" && l.item_type !== "pm");
+        if (notAllowed) {
+          setError(`"${notAllowed.material_sku_name}": type must be RM or PM for a new BOM.`);
+          return;
+        }
+        ok = await onCreateBom(payloadLines.map((l) => ({
+          material_sku_name: l.material_sku_name,
+          item_type: l.item_type as "rm" | "pm",
+          quantity_per_unit: l.quantity_per_unit,
+          uom: l.uom,
+          loss_pct: l.loss_pct,
+        })));
+        if (ok) cancelAdd();
+      } else if (editSaveWired && onUpdateBom && bomId != null) {
+        ok = await onUpdateBom(bomId, payloadLines);
+        if (ok) reset();
+      }
+    } finally {
+      setSaving(false);
+    }
   };
+
+  const browseRow = browseKey != null ? rows.find((d) => d.key === browseKey) : undefined;
 
   if (loading) {
     return (
@@ -1919,14 +2024,24 @@ function BomMaterialsSection({
   }
   if (!loaded) return null;
 
+  const showGrid = hasBom || adding;
+
   return (
     <div className="mt-3">
       <div className="flex items-center justify-between gap-2 mb-1.5 px-0.5">
         <span className="text-[10px] uppercase tracking-wide font-bold text-[var(--text-muted)]">
-          BOM materials · {lines.length}
+          BOM materials · {rows.filter((d) => d.material_sku_name.trim()).length}
+          {bomId != null ? <span className="ml-1 font-mono normal-case tracking-normal text-[var(--text-muted)]">(BOM {bomId})</span> : null}
+          {hasBom && dirty ? <span className="ml-1 normal-case tracking-normal text-[var(--aws-orange)]">· edited</span> : null}
         </span>
+        {hasBom && dirty ? (
+          <button type="button" onClick={reset} disabled={saving} className={BOM_LINK_BTN} title="Discard the changes and show the loaded lines again">
+            Reset
+          </button>
+        ) : null}
       </div>
-      {lines.length === 0 ? (
+
+      {!showGrid ? (
         <>
           <p
             className={
@@ -1939,129 +2054,178 @@ function BomMaterialsSection({
           >
             {bomNote ?? "No BOM materials configured for this SKU."}
           </p>
-          {!adding ? (
-            gateOk ? (
-              <button
-                type="button"
-                onClick={() => setAdding(true)}
-                className="text-[11px] font-semibold text-[var(--aws-link)] hover:underline"
-              >
-                + Add BOM for this article
-              </button>
-            ) : (
-              <p className="text-[10px] italic text-[var(--text-muted)]">
-                Add BOM needs the SKU name and entity (CFPL/CDPL).
-              </p>
-            )
+          {gateOk ? (
+            <button type="button" onClick={() => { reset(); setAdding(true); }} className={BOM_LINK_BTN}>
+              + Add BOM for this article
+            </button>
           ) : (
-            <div className="border border-[var(--aws-border)] rounded p-2 space-y-1.5 bg-white">
-              {/* Global SKU suggestions shared by this card's Material inputs. */}
-              <datalist id={dlId}>
-                {skuSuggestions.map((name, i) => <option key={`${name}-${i}`} value={name} />)}
-              </datalist>
-              <div className="grid grid-cols-[1fr_50px_64px_46px_54px_18px] gap-1 text-[9px] uppercase tracking-wide font-bold text-[var(--text-muted)] px-0.5">
-                <span>Material</span><span>Type</span><span>Qty/unit</span><span>UoM</span><span>Loss%</span><span />
-              </div>
-              {draft.map((d, i) => (
-                <div key={i} className="grid grid-cols-[1fr_50px_64px_46px_54px_18px] gap-1 items-center">
-                  <input
-                    value={d.material_sku_name} placeholder="Material SKU"
-                    list={dlId} autoComplete="off"
-                    onChange={(e) => { patchRow(i, "material_sku_name", e.target.value); searchSku(e.target.value); }}
-                    className="min-w-0 h-6 px-1 text-[11px] rounded-[2px] border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e]"
-                  />
-                  <select
-                    value={d.item_type}
-                    onChange={(e) => patchRow(i, "item_type", e.target.value)}
-                    className="h-6 px-0.5 text-[11px] rounded-[2px] border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e]"
-                  >
-                    <option value="rm">rm</option>
-                    <option value="pm">pm</option>
-                  </select>
-                  <input
-                    value={d.quantity_per_unit} type="number" step="any" inputMode="decimal" placeholder="0"
-                    onChange={(e) => patchRow(i, "quantity_per_unit", e.target.value)}
-                    className="h-6 px-1 text-[11px] rounded-[2px] border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e]"
-                  />
-                  <input
-                    value={d.uom} placeholder="kg"
-                    onChange={(e) => patchRow(i, "uom", e.target.value)}
-                    className="h-6 px-1 text-[11px] rounded-[2px] border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e]"
-                  />
-                  <input
-                    value={d.loss_pct} type="number" step="any" inputMode="decimal" placeholder="0"
-                    onChange={(e) => patchRow(i, "loss_pct", e.target.value)}
-                    className="h-6 px-1 text-[11px] rounded-[2px] border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e]"
-                  />
-                  <button
-                    type="button" onClick={() => removeRow(i)} aria-label="Remove material"
-                    className="text-[var(--text-muted)] hover:text-[var(--aws-error)] text-[13px] leading-none"
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
-              {error ? (
-                <p className="text-[10px] text-[var(--aws-error)] px-0.5">{error}</p>
-              ) : null}
-              <div className="flex items-center justify-between gap-2 pt-0.5">
-                <button
-                  type="button" onClick={addRow}
-                  className="text-[11px] font-semibold text-[var(--aws-link)] hover:underline"
-                >
-                  + Add material
-                </button>
-                <div className="flex gap-2">
-                  <button
-                    type="button" disabled={saving}
-                    onClick={() => { setAdding(false); resetDraft(); }}
-                    className="h-6 px-2 text-[11px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)] disabled:opacity-50"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button" disabled={saving || !hasMaterial}
-                    onClick={() => void onSaveBom()}
-                    className="h-6 px-2 text-[11px] font-semibold rounded-[2px] bg-[var(--aws-orange)] text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {saving ? "Saving…" : "Save BOM"}
-                  </button>
-                </div>
-              </div>
-            </div>
+            <p className="text-[10px] italic text-[var(--text-muted)]">
+              Add BOM needs the SKU name and entity (CFPL/CDPL).
+            </p>
           )}
         </>
       ) : (
-        <div className="overflow-hidden border border-[var(--aws-border)] rounded">
-          <table className="w-full text-[11px]">
+        <div className="border border-[var(--aws-border)] rounded p-2 space-y-1.5 bg-white">
+          <div className="overflow-x-auto">
+          <table className="w-full text-[11px] border-collapse" style={{ tableLayout: "fixed", minWidth: 640 }}>
+            <colgroup>
+              <col />
+              <col style={{ width: 64 }} />
+              <col style={{ width: 84 }} />
+              <col style={{ width: 60 }} />
+              <col style={{ width: 68 }} />
+              <col style={{ width: 28 }} />
+            </colgroup>
             <thead>
               <tr className="bg-[var(--surface-subtle)] text-left text-[var(--text-secondary)]">
-                <th className="px-2 py-1 font-semibold">Material</th>
-                <th className="px-2 py-1 font-semibold w-[60px]">Type</th>
-                <th className="px-2 py-1 font-semibold w-[90px] text-right">Qty / unit</th>
-                <th className="px-2 py-1 font-semibold w-[50px]">UoM</th>
-                <th className="px-2 py-1 font-semibold w-[60px] text-right">Loss %</th>
+                <th className={BOM_TH} title="Type to search the article master, or ☰ to browse by type → category → sub category">Material</th>
+                <th className={BOM_TH}>Type</th>
+                <th className={`${BOM_TH} text-right`}>Qty / unit</th>
+                <th className={BOM_TH}>UoM</th>
+                <th className={`${BOM_TH} text-right`}>Loss %</th>
+                <th className={BOM_TH}><span className="sr-only">Remove</span></th>
               </tr>
             </thead>
             <tbody>
-              {lines.map((l, i) => (
-                <tr
-                  key={`${l.material_sku_name ?? "x"}-${i}`}
-                  className="border-t border-[var(--surface-divider)]"
+          {rows.map((d, i) => (
+            <tr key={d.key} className="border-t border-[var(--surface-divider)]">
+              <td className={BOM_TD}>
+              <div className="flex items-center gap-1 min-w-0">
+                <div className="min-w-0 flex-1">
+                  <SearchSelect<BomMaterialOption>
+                    value={d.material_sku_name}
+                    onChange={(v) => patchRow(d.key, { material_sku_name: v })}
+                    onPick={(o) => patchRow(d.key, materialPick(o.particulars, o.item_type))}
+                    load={(q, signal) => searchBomMaterials(q, { limit: 20 }, signal)}
+                    getKey={(o) => String(o.sku_id)}
+                    getLabel={(o) => o.particulars}
+                    renderOption={(o) => (
+                      <>
+                        <span className="truncate">{o.particulars}</span>
+                        <span className="ml-auto shrink-0 font-mono text-[10px] uppercase text-[var(--text-muted)]">
+                          {o.item_type ?? "—"}{o.item_group ? ` · ${o.item_group}` : ""}
+                        </span>
+                      </>
+                    )}
+                    className={BOM_ROW_INPUT}
+                    placeholder="Search all_sku…"
+                    ariaLabel={`Material ${i + 1}`}
+                    emptyText="No article matches — the text you typed is kept."
+                    menuWidth={460}
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setBrowseKey(d.key)}
+                  title="Browse the article master: material type → item category → sub category → article"
+                  aria-label={`Browse articles for material ${i + 1}`}
+                  className="shrink-0 inline-flex items-center justify-center w-5 h-5 rounded-sm border border-[var(--aws-border)] bg-white text-[var(--text-secondary)] hover:text-[var(--aws-navy)] hover:border-[var(--aws-navy)]"
                 >
-                  <td className="px-2 py-1 text-[var(--text-primary)]">{l.material_sku_name ?? "—"}</td>
-                  <td className="px-2 py-1 uppercase text-[var(--text-secondary)]">{l.item_type ?? "—"}</td>
-                  <td className="px-2 py-1 text-right font-mono">
-                    {l.quantity_per_unit != null ? l.quantity_per_unit : "—"}
-                  </td>
-                  <td className="px-2 py-1 text-[var(--text-secondary)]">{l.uom ?? "—"}</td>
-                  <td className="px-2 py-1 text-right font-mono text-[var(--text-secondary)]">
-                    {l.loss_pct != null ? l.loss_pct : "—"}
-                  </td>
-                </tr>
-              ))}
+                  <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" aria-hidden>
+                    <line x1="4" y1="6" x2="20" y2="6" /><line x1="4" y1="12" x2="20" y2="12" /><line x1="4" y1="18" x2="20" y2="18" />
+                  </svg>
+                </button>
+              </div>
+              </td>
+              <td className={BOM_TD}>
+              <select
+                value={d.item_type}
+                onChange={(e) => patchRow(d.key, { item_type: e.target.value })}
+                aria-label={`Material ${i + 1} type`}
+                className={BOM_ROW_INPUT}
+              >
+                {/* A pre-existing type outside rm/pm (sfg) stays selectable so an
+                    edit does not silently retype the line. */}
+                {d.item_type !== "rm" && d.item_type !== "pm" ? <option value={d.item_type}>{d.item_type}</option> : null}
+                <option value="rm">rm</option>
+                <option value="pm">pm</option>
+              </select>
+              </td>
+              <td className={BOM_TD}>
+              <input
+                value={d.quantity_per_unit} type="number" step="any" inputMode="decimal" placeholder="0"
+                aria-label={`Material ${i + 1} quantity per unit`}
+                onChange={(e) => patchRow(d.key, { quantity_per_unit: e.target.value })}
+                onWheel={(e) => e.currentTarget.blur()}
+                className={`${BOM_ROW_INPUT} text-right font-mono`}
+              />
+              </td>
+              <td className={BOM_TD}>
+              <input
+                value={d.uom} placeholder="kg"
+                aria-label={`Material ${i + 1} UoM`}
+                onChange={(e) => patchRow(d.key, { uom: e.target.value })}
+                className={BOM_ROW_INPUT}
+              />
+              </td>
+              <td className={BOM_TD}>
+              <input
+                value={d.loss_pct} type="number" step="any" inputMode="decimal" placeholder="0"
+                aria-label={`Material ${i + 1} loss percent`}
+                onChange={(e) => patchRow(d.key, { loss_pct: e.target.value })}
+                onWheel={(e) => e.currentTarget.blur()}
+                className={`${BOM_ROW_INPUT} text-right font-mono`}
+              />
+              </td>
+              <td className={`${BOM_TD} text-center`}>
+              <button
+                type="button" onClick={() => removeRow(d.key)} aria-label={`Remove material ${i + 1}`}
+                title={d.bom_line_id != null ? `Remove (bom_line_id ${d.bom_line_id})` : "Remove"}
+                className="text-[var(--text-muted)] hover:text-[var(--aws-error)] text-[13px] leading-none"
+              >
+                ×
+              </button>
+              </td>
+            </tr>
+          ))}
             </tbody>
           </table>
+          </div>
+          {error ? (
+            <p className="text-[10px] text-[var(--aws-error)] px-0.5">{error}</p>
+          ) : null}
+          {hasBom && !editSaveWired ? (
+            <p className="text-[10px] italic text-[var(--text-muted)] px-0.5">
+              Edit the rows freely — where these edits are saved is still to be decided, so “Save changes” stays disabled until that is connected.
+            </p>
+          ) : null}
+          <div className="flex items-center justify-between gap-2 pt-0.5">
+            <button type="button" onClick={addRow} className={BOM_LINK_BTN}>
+              + Add material
+            </button>
+            <div className="flex gap-2">
+              {!hasBom ? (
+                <button
+                  type="button" disabled={saving} onClick={cancelAdd}
+                  className="h-6 px-2 text-[11px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white hover:border-[var(--aws-navy)] disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              ) : null}
+              <button
+                type="button"
+                disabled={saving || !canSave}
+                title={
+                  hasBom && !editSaveWired
+                    ? "Save destination for BOM edits is not configured yet"
+                    : hasBom && !dirty ? "No changes yet" : undefined
+                }
+                onClick={() => void onSave()}
+                className="h-6 px-2 text-[11px] font-semibold rounded-[2px] bg-[var(--aws-orange)] text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {saving ? "Saving…" : hasBom ? "Save changes" : "Save BOM"}
+              </button>
+            </div>
+          </div>
+          {browseRow ? (
+            <MaterialBrowser
+              key={browseRow.key}
+              initialType={browseRow.item_type}
+              lineLabel={`material ${rows.indexOf(browseRow) + 1}${browseRow.material_sku_name.trim() ? ` (${browseRow.material_sku_name.trim()})` : ""}`}
+              onPick={(m: BrowsedMaterial) => { patchRow(browseRow.key, materialPick(m.particulars, m.item_type)); setBrowseKey(null); }}
+              onClose={() => setBrowseKey(null)}
+            />
+          ) : null}
         </div>
       )}
     </div>

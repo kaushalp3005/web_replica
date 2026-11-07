@@ -199,7 +199,7 @@ export default function VendorNewPage(): React.JSX.Element {
   const authed = useRequireAuth(router.replace);
 
   // Onboarding (extract + submit) maps to vendor/master/create (UX gate).
-  const canCreateVendor = useHasPermission("purchase", "vendor", "master", "create");
+  const canCreateVendor = useHasPermission("vendor", "master", null, "create");
 
   // Hydration gate. This page is server-rendered, where useRequireAuth returns
   // true (no token store) but the first browser render starts authed=false — so

@@ -94,9 +94,9 @@ export function VendorDetail({ vendorId }: { vendorId: string }): React.JSX.Elem
   const canManage = useHasRole("purchase_manager");
   // Fine-grained action gates (UX only — server enforces). Editing basics →
   // vendor/master/update; approve/delete → their own actions.
-  const canEdit = useHasPermission("purchase", "vendor", "master", "update");
-  const canApprove = useHasPermission("purchase", "vendor", "master", "approve");
-  const canDelete = useHasPermission("purchase", "vendor", "master", "delete");
+  const canEdit = useHasPermission("vendor", "master", null, "update");
+  const canApprove = useHasPermission("vendor", "master", null, "approve");
+  const canDelete = useHasPermission("vendor", "master", null, "delete");
 
   const { toast, showToast, clearToast } = useToast();
   const { confirm, confirmElement } = useConfirm();

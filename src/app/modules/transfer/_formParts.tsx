@@ -6,15 +6,20 @@
 // SearchableSelect, QuickSearch). Kept in one place so both forms stay in lockstep.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { TransferApi, type CategorialSearchItem } from "@/lib/transfer";
+import { TransferApi, type CategorialSearchItem, type LookupBox } from "@/lib/transfer";
+import { TO_SITES } from "@/lib/sites";
+import { articleKey, articleName } from "@/lib/transferBoxMatch";
+import { ALL_SITES } from "./_siteRules";
 
 export const UOM_OPTIONS = ["KG", "PCS", "BOX", "BAG", "CARTON"];
-export const FROM_WAREHOUSES = ["W202", "A185", "A101", "A68", "F53", "Cold Storage"];
-export const TO_WAREHOUSES = ["W202", "A185", "A101", "A68", "F53", "Rishi", "Savla D-39", "Savla D-514", "Supreme"];
+// The sites come from the shared site table (lib/sites): a To is any warehouse or cold
+// store; a From may also be the legacy "Cold Storage" of an older direct transfer. Whether
+// a site is cold is lib/sites isColdSite.
+export const FROM_WAREHOUSES = ALL_SITES;
+export const TO_WAREHOUSES = TO_SITES;
 export const REASONS = ["Stock Requirement", "Material Movement", "Production Need", "Customer Order", "Inventory Balancing", "Other"];
 export const VEHICLES = ["MH43BP6885", "MH43BX1881", "MH46BM5987 (Contract Vehicle)"];
 export const DRIVERS = ["Tukaram (+919930056340)", "Sachin (8692885298)", "Gopal (+919975887148)"];
-export const COLD_STORAGE_WAREHOUSES = new Set(["Cold Storage", "Rishi", "Savla D-39", "Savla D-514", "Supreme"]);
 
 export function todayDMY(): string {
   const d = new Date();
@@ -31,13 +36,20 @@ export interface Article {
   materialType: string; itemCategory: string; subCategory: string; itemDescription: string;
   unitPackSize: string; uom: string; packSize: string; quantity: string; netWeight: string; lotNumber: string;
   // Cold-source identifiers (directtransferform cold mode); absent/empty for warehouse rows.
-  csCompany?: string; csInwardNo?: string; csMaxBoxes?: number;
+  // csUnit / csLocation are the picked row's unit and storage location, so the pick takes
+  // boxes of that row's store only; csItemMark is its item mark (blank for none), so the
+  // pick takes boxes of that mark only. csMaxBoxes is how many of its boxes can go from the
+  // From site (the search's available-here count, else its carton count); null = unknown.
+  // csCountedHere: csMaxBoxes is the available-here count, which counts an edited
+  // transfer's own boxes as in transit on it (the pick does not).
+  csCompany?: string; csInwardNo?: string; csUnit?: string; csLocation?: string; csItemMark?: string;
+  csMaxBoxes?: number | null; csCountedHere?: boolean;
   entryMode?: "regular" | "cold-storage";
 }
 export const EMPTY_ARTICLE: Omit<Article, "uid"> = {
   materialType: "", itemCategory: "", subCategory: "", itemDescription: "",
   unitPackSize: "", uom: "", packSize: "1", quantity: "1", netWeight: "0", lotNumber: "",
-  csCompany: "", csInwardNo: "", csMaxBoxes: 0, entryMode: "regular",
+  csCompany: "", csInwardNo: "", csUnit: "", csLocation: "", csItemMark: "", csMaxBoxes: null, entryMode: "regular",
 };
 
 export interface ScannedBox {
@@ -99,14 +111,44 @@ export function Field({ label, required, children }: { label: string; required?:
   );
 }
 
+// A value the operator can see but not change (a request's locked route, items and reason).
+// Empty shows a dash; `multiline` (reason descriptions) wraps the whole text instead of
+// clipping it in a small box.
+export function ReadOnlyField({ label, value, mono, multiline }: { label: string; value: string; mono?: boolean; multiline?: boolean }) {
+  const cls = `w-full px-2.5 py-1.5 text-[13px] border border-[var(--aws-border)] rounded-md bg-[var(--background)] text-[var(--text-primary)]${mono ? " font-mono" : ""}`;
+  return (
+    <Field label={label}>
+      {multiline
+        ? <span className={`block min-h-[52px] whitespace-pre-wrap break-words ${cls}`}>{value || <span className="text-[var(--text-secondary)]">—</span>}</span>
+        : <input value={value} readOnly placeholder="—" className={cls} />}
+    </Field>
+  );
+}
+
 // Outcome of one camera scan on a Transfer-OUT form (drives the "Scanned QR" result card,
-// the transfer-out analogue of the job-card RM tab's ScanResult).
+// the transfer-out analogue of the job-card RM tab's ScanResult). "refused" is a box that
+// was found but not added because the request doesn't take it (`reason` says why).
+// "saving" is a box Scan & send is saving on its transfer; "added" there names the
+// transfer it was saved on (`challan`). `label` is the name a Material In box's label
+// prints when the box goes by another article (labelName).
 export type OutScan =
-  | { status: "added"; box_id: string; article: string; lot: string; net: string; tno: string }
+  | { status: "added"; box_id: string; article: string; lot: string; net: string; tno: string; challan?: string; label?: string }
+  | { status: "saving"; box_id: string; article: string; lot: string; tno: string; label?: string }
   | { status: "dup"; box_id: string; tno: string }
+  | { status: "refused"; box_id: string; article: string; lot: string; tno: string; reason: string; label?: string }
   | { status: "err"; value: string; error: string };
 
-// Renders the last scan's result below the inline scanner: box added / already scanned / error.
+// The item name a Material In box's label prints (its PO line's Tally name) when the box
+// goes by another article (the item-master name it was matched to), so the operator can
+// check it against the carton; "" when the two are one name (whitespace and case aside) or
+// the box has no Tally name (an IMS box).
+export function labelName(box: Pick<LookupBox, "tally_name">, article: string): string {
+  const name = articleName(box.tally_name);
+  return name && articleKey(name) !== articleKey(article) ? name : "";
+}
+
+// Renders the last scan's result below the inline scanner: box added / being saved /
+// already scanned / refused / error.
 export function ScanAddResult({ scan, onDismiss }: { scan: OutScan; onDismiss: () => void }) {
   const head = (tone: string, label: string) => (
     <div className="flex items-center justify-between gap-2">
@@ -126,11 +168,18 @@ export function ScanAddResult({ scan, onDismiss }: { scan: OutScan; onDismiss: (
   );
   let body: React.ReactNode;
   if (scan.status === "added") {
-    body = <>{head("bg-emerald-100 text-emerald-800", "✓ Added to dispatch")}
-      {kv([["Box ID", scan.box_id], ["Article", scan.article], ["Txn", scan.tno || "—"], ["Lot", scan.lot || "—"], ["Net", scan.net]])}</>;
+    body = <>{head("bg-emerald-100 text-emerald-800", scan.challan ? "✓ Saved on the transfer" : "✓ Added to dispatch")}
+      {kv([["Box ID", scan.box_id], ["Article", scan.article], ["Label", scan.label], ["Txn", scan.tno || "—"], ["Lot", scan.lot || "—"], ["Net", scan.net], ["Transfer", scan.challan]])}</>;
+  } else if (scan.status === "saving") {
+    body = <>{head("bg-sky-100 text-sky-800", "Saving…")}
+      {kv([["Box ID", scan.box_id], ["Article", scan.article], ["Label", scan.label], ["Txn", scan.tno || "—"], ["Lot", scan.lot || "—"]])}</>;
   } else if (scan.status === "dup") {
     body = <>{head("bg-amber-100 text-amber-800", "Already scanned")}
       {kv([["Box ID", scan.box_id], ["Txn", scan.tno || "—"]])}</>;
+  } else if (scan.status === "refused") {
+    body = <>{head("bg-rose-100 text-rose-800", "✕ Not added")}
+      <div className="text-[12px] text-rose-700 mt-1 break-words">{scan.reason}</div>
+      {kv([["Box ID", scan.box_id], ["Article", scan.article], ["Label", scan.label], ["Txn", scan.tno || "—"], ["Lot", scan.lot || "—"]])}</>;
   } else {
     body = <>{head("bg-rose-100 text-rose-800", "Scan error")}
       <div className="text-[12px] text-rose-700 mt-1 break-all">{scan.error}</div></>;

@@ -1,5 +1,6 @@
-// Pure helper for ArticlePicker (app/modules/sample/_form.tsx), kept out of the
-// .tsx so Node can test it (article-picker.test.ts).
+// Pure helpers for ArticlePicker (app/modules/sample/_form.tsx) and stock take's
+// NewArticleDialog, kept out of the .tsx so Node can test them
+// (article-picker.test.ts).
 
 export type ArticlePick = {
   tab: "search" | "browse";
@@ -84,4 +85,28 @@ export function searchResults(
     for (const type of ts) out.push({ name, type, showType: ts.length > 1 });
   }
   return out.slice(0, limit);
+}
+
+/** Why a catalogue article can't be posted to stock take, or null when it can.
+ *
+ *  POST /stock-take/transactions requires all three descriptors, and all_sku has
+ *  rows missing them (a Tally load brought in names and GST only). Left alone,
+ *  those picks reach a dialog that can only answer "Request body failed
+ *  validation". */
+export function unclassifiedMessage(s: {
+  particulars?: string | null;
+  item_type?: string | null;
+  item_group?: string | null;
+  sub_group?: string | null;
+}): string | null {
+  const missing = ([
+    ["material type", s.item_type],
+    ["category", s.item_group],
+    ["sub category", s.sub_group],
+  ] as const).filter(([, v]) => !v?.trim()).map(([label]) => label);
+  if (missing.length === 0) return null;
+  const list = missing.length > 1
+    ? `${missing.slice(0, -1).join(", ")} or ${missing[missing.length - 1]}`
+    : missing[0];
+  return `"${s.particulars ?? ""}" can't be posted: the item master has no ${list} for it. Ask for it to be classified first.`;
 }

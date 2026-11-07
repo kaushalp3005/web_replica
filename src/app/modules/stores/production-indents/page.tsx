@@ -42,7 +42,8 @@ import {
   formatQty, formatWhen, REQUISITION_STATUSES, STATUS_LABEL, storeResponseLine, type RequisitionStatus,
 } from "@/lib/floor-requisition-form";
 import {
-  listFloorRequisitions, RequisitionApiError, type FloorRequisition, type FloorRequisitionPage,
+  articleKey, fetchFloorAvailability, listFloorRequisitions, RequisitionApiError,
+  type FloorRequisition, type FloorRequisitionPage, type StockPlace,
 } from "@/lib/floor-requisitions";
 import { useHasPermission, useMe, useRequireAuth, useRequireModuleAccess } from "@/lib/user";
 import { StoresChrome } from "../_chrome";
@@ -93,6 +94,81 @@ function anchorFor(row: Element, id: number, x: number, pinned = false, viaKeybo
 
 function Chrome({ children }: { children: React.ReactNode }) {
   return <StoresChrome title="Production Indents" showBackToStores wide>{children}</StoresChrome>;
+}
+
+/** Requests the store still acts on: issue a raised one, scan boxes for an issued one. */
+const OPEN_STATUSES = new Set<RequisitionStatus>(["raised", "issued"]);
+/** Places listed before "+N more". */
+const PLACES_SHOWN = 3;
+
+/** A place as people say it: "A185 Stores", "W202 Store", "Savla D-39", "Savla Bond". */
+function placeName(p: StockPlace): string {
+  const fl = p.floor.trim();
+  if (!fl || p.warehouse_label.toUpperCase().includes(fl.toUpperCase())) return p.warehouse_label;
+  if (fl.toUpperCase().startsWith(p.warehouse.toUpperCase())) return fl;
+  // A cold store's own area (Savla Bond) is known by that name alone.
+  if (p.warehouse_label !== p.warehouse) return fl;
+  return `${p.warehouse} ${fl}`;
+}
+
+/** Where the requested article is in Fresh Stock right now, across every place
+ *  the viewer can read — unlike the Fresh stock column, which is the requesting
+ *  floor only, frozen when the request was raised. */
+function FloorStockLine({ r, places, failed, expanded, onToggle }: {
+  r: FloorRequisition;
+  places: StockPlace[] | undefined;
+  failed: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  if (failed && places === undefined) return <span className={SUB}>Floor stock could not be loaded.</span>;
+  if (places === undefined) return <span className={SUB}>Checking floor stock…</span>;
+  const unit = r.requested_unit;
+  const amount = (p: StockPlace) => (unit === "pcs" ? p.qty : p.kg);
+  const inStock = places.filter((p) => amount(p) > 0);
+  if (!inStock.length) {
+    return <span className={`${SUB} text-[var(--aws-error)]`}>Not in stock on any floor</span>;
+  }
+  const wh = r.warehouse.replace(/-/g, "").toUpperCase();
+  const fl = r.floor.trim().toUpperCase();
+  const listed = expanded ? inStock : inStock.slice(0, PLACES_SHOWN);
+  const total = inStock.reduce((sum, p) => sum + amount(p), 0);
+  const cell = "border border-[var(--aws-border)] px-1.5 py-0.5";
+  const num = `${cell} text-right font-mono tabular-nums whitespace-nowrap`;
+  return (
+    <div>
+      <table className="w-full border-collapse text-[11px] text-[var(--text-secondary)]">
+        <thead>
+          <tr className="bg-[#fafafa] text-[10px] uppercase tracking-wide">
+            <th className={`${cell} text-left font-bold`}>Stock on floors</th>
+            <th className={`${cell} text-right font-bold`}>Fresh</th>
+          </tr>
+        </thead>
+        <tbody>
+          {listed.map((p) => {
+            const here = p.warehouse === wh && p.floor.trim().toUpperCase() === fl;
+            return (
+              <tr key={`${p.warehouse}|${p.floor}`} className={here ? "font-semibold text-[var(--text-primary)]" : undefined}>
+                <td className={`${cell} break-words`}>{placeName(p)}{here ? " (this floor)" : ""}</td>
+                <td className={num}>{formatQty(amount(p), unit)}</td>
+              </tr>
+            );
+          })}
+          {inStock.length > 1 ? (
+            <tr className="font-semibold text-[var(--text-primary)] bg-[#fafafa]">
+              <td className={cell}>Total · {inStock.length} places</td>
+              <td className={num}>{formatQty(total, unit)}</td>
+            </tr>
+          ) : null}
+        </tbody>
+      </table>
+      {inStock.length > PLACES_SHOWN ? (
+        <button type="button" onClick={onToggle} className="mt-0.5 text-[11px] text-[var(--aws-link)] underline">
+          {expanded ? "Show fewer" : `Show all ${inStock.length} places`}
+        </button>
+      ) : null}
+    </div>
+  );
 }
 
 function qtyOrDash(n: number | null, unit: string | null | undefined, fallbackUnit: string) {
@@ -225,6 +301,38 @@ export default function StoresProductionIndentsPage() {
     });
     return () => ctrl.abort();
   }, [canView, status, plant, floor, searchApplied, page, attempt, clearTimers, rescueFocus]);
+
+  // Live floor stock for the open requests on this page, one call per load.
+  const [avail, setAvail] = useState<Record<string, StockPlace[]> | null>(null);
+  const [availFailed, setAvailFailed] = useState(false);
+  const [expandedStock, setExpandedStock] = useState<ReadonlySet<number>>(() => new Set());
+  useEffect(() => {
+    const articles = [...new Set((data?.items ?? [])
+      .filter((r) => OPEN_STATUSES.has(r.status)).map((r) => r.material_sku_name))];
+    if (!articles.length) return;
+    const ctrl = new AbortController();
+    queueMicrotask(() => {
+      setAvailFailed(false);
+      fetchFloorAvailability(articles, ctrl.signal)
+        .then((a) => { if (!ctrl.signal.aborted) setAvail(a); })
+        .catch(() => { if (!ctrl.signal.aborted) setAvailFailed(true); });
+    });
+    return () => ctrl.abort();
+  }, [data]);
+  const toggleStock = useCallback((id: number) => setExpandedStock((s) => {
+    const next = new Set(s);
+    if (!next.delete(id)) next.add(id);
+    return next;
+  }), []);
+  const floorStock = (r: FloorRequisition) => (
+    <FloorStockLine
+      r={r}
+      places={avail?.[articleKey(r.material_sku_name)]}
+      failed={availFailed}
+      expanded={expandedStock.has(r.requisition_id)}
+      onToggle={() => toggleStock(r.requisition_id)}
+    />
+  );
 
   const reload = useCallback(() => setAttempt((n) => n + 1), []);
   const pageCount = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
@@ -586,9 +694,10 @@ export default function StoresProductionIndentsPage() {
                         </td>
                         <td className={`${TD} min-w-[190px]`}><JobCardCell r={r} /></td>
                         <td className={`${TD} whitespace-nowrap`}>{r.warehouse}<span className={SUB}>{r.floor}</span></td>
-                        <td className={`${TD} min-w-[200px] text-[var(--text-primary)]`}>
+                        <td className={`${TD} min-w-[240px] text-[var(--text-primary)]`}>
                           {r.material_sku_name}
                           {r.item_type ? <span className="text-[var(--text-muted)]"> · {r.item_type}</span> : null}
+                          {OPEN_STATUSES.has(r.status) ? <div className="mt-1.5">{floorStock(r)}</div> : null}
                         </td>
                         <td className={`${NUM} font-semibold`}>{formatQty(r.requested_qty, u)}</td>
                         <td className={NUM}>{qtyOrDash(r.required_qty, r.required_unit, u)}</td>
@@ -654,6 +763,12 @@ export default function StoresProductionIndentsPage() {
                       <dd className="break-words">{r.warehouse} · {r.floor}</dd>
                       <dt className="text-[var(--text-muted)]">Requested</dt>
                       <dd className="font-mono tabular-nums">{formatQty(r.requested_qty, r.requested_unit)}</dd>
+                      {OPEN_STATUSES.has(r.status) ? (
+                        <>
+                          <dt className="text-[var(--text-muted)]">Stock</dt>
+                          <dd className="min-w-0">{floorStock(r)}</dd>
+                        </>
+                      ) : null}
                       <dt className="text-[var(--text-muted)]">Issued</dt>
                       <dd className="break-words">
                         {r.issued_qty != null

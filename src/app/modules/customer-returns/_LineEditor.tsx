@@ -78,7 +78,7 @@ export function CustomerReturnLineEditor({
   const [loading, setLoading] = useState(false);
   const ctrl = useRef<AbortController | null>(null);
 
-  // Patch helper that also folds in derived value/net_weight (+ integer qty).
+  // Patch helper that also folds in derived value/net_weight (qty kept as typed).
   const patch = (p: Partial<CRLineForm>) => onChange(index, deriveLine(line, p));
 
   // Browse cascade options refresh whenever a level changes (input mode only).

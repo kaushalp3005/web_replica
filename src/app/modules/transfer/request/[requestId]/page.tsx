@@ -2,22 +2,24 @@
 
 // Request Details (doc 06) — read-only view of a single transfer request:
 // header (route/dates/status/reason), summary tiles (item count + net weight),
-// its progress (raised → store → approval → sent, backend migration 119), and a
-// per-line breakdown. No approve/reject/edit/delete here — those live on the
-// dashboard. Backed by the existing GET /api/v1/transfer/requests/{id}.
+// its progress (raised → store → approval → sent, with any holds; backend migrations
+// 121 and 127), and a
+// per-line breakdown. No approve/reject/delete here — those live on the dashboard;
+// a Pending request shows Edit to the person who raised it (or an admin), which opens
+// the request form (?editId=). Backed by the existing GET /api/v1/transfer/requests/{id}.
 
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { useRequireAuth } from "@/lib/user";
+import { useMe, useRequireAuth, useUserScope } from "@/lib/user";
 import { TransferChrome } from "../../_chrome";
-import { REQUEST_STATUS, TransferApi, type TransferRequest } from "@/lib/transfer";
+import { REQUEST_STATUS, TransferApi, isStoreHeld, type TransferRequest } from "@/lib/transfer";
 import { getDisplayWarehouseName } from "@/lib/transferBuildSummary";
 
 function statusBadge(status: string): { label: string; cls: string } {
   switch ((status || "").toLowerCase()) {
     case "pending": return { label: "Pending", cls: "bg-amber-100 text-amber-800" };
     case "accepted": return { label: "Accepted", cls: "bg-sky-100 text-sky-800" };
-    case "on hold": return { label: "On Hold", cls: "bg-amber-100 text-amber-800" };
+    case "on hold": return { label: "On Hold", cls: "bg-orange-100 text-orange-800" };
     case "approved":
     case "accept": return { label: "Approved", cls: "bg-emerald-100 text-emerald-800" };
     case "transferred": return { label: "Transferred", cls: "bg-blue-100 text-blue-800" };
@@ -46,6 +48,8 @@ export default function RequestViewPage() {
   const allowed = useRequireAuth(router.replace);
   const params = useParams<{ requestId: string }>();
   const requestId = params?.requestId;
+  const myEmail = (useMe()?.email || "").trim().toLowerCase();
+  const { isAdmin } = useUserScope();
 
   const [request, setRequest] = useState<TransferRequest | null>(null);
   const [loading, setLoading] = useState(true);
@@ -96,6 +100,9 @@ export default function RequestViewPage() {
   const lines = request.lines ?? [];
   const totalNet = lines.reduce((s, l) => s + num(l.net_weight), 0);
   const badge = statusBadge(request.status);
+  // Pending only, by its raiser or an admin — as the server allows (it checks again).
+  const canEdit = (request.status || REQUEST_STATUS.PENDING) === REQUEST_STATUS.PENDING
+    && (isAdmin || (!!myEmail && (request.created_by || "").trim().toLowerCase() === myEmail));
 
   return (
     <TransferChrome title="Request Details">
@@ -105,7 +112,13 @@ export default function RequestViewPage() {
           <h1 className="text-[20px] font-semibold text-[var(--text-primary)] leading-tight">Request Details</h1>
           <div className="text-[12px] text-[var(--text-secondary)] font-mono">{request.request_no}</div>
         </div>
-        <span className={`px-2.5 py-1 rounded-full text-[12px] font-medium ${badge.cls}`}>{badge.label}</span>
+        <div className="flex items-center gap-2">
+          {canEdit && (
+            <button onClick={() => router.push(`/modules/transfer/request?editId=${request.id}`)}
+              className="px-3 py-1 text-[12px] border border-[var(--aws-navy)] text-[var(--aws-navy)] rounded-md hover:bg-[var(--aws-navy)] hover:text-white">Edit</button>
+          )}
+          <span className={`px-2.5 py-1 rounded-full text-[12px] font-medium ${badge.cls}`}>{badge.label}</span>
+        </div>
       </div>
 
       <div className="space-y-4 max-w-4xl">
@@ -179,19 +192,21 @@ export default function RequestViewPage() {
   );
 }
 
-// ── Progress (backend migration 119) ─────────────────────────────────────
-// Raised → the From store accepts or holds → an inventory manager (or their
-// substitute) approves, holds or rejects → the store scans and sends it.
+// ── Progress (backend migrations 121, 127) ───────────────────────────────
+// Raised → the From store accepts or rejects (or holds it first) → an inventory manager
+// (or their substitute) approves or rejects (or holds it first) → the store scans and
+// sends it. A hold that has been answered since shows only its reason: its who and when
+// were replaced by the answer's.
 type StepTone = "done" | "wait" | "hold" | "stop";
 type Step = { title: string; who?: string | null; at?: string | null; reason?: string | null; tone: StepTone };
 
 const STEP_DOT: Record<StepTone, string> = {
-  done: "bg-emerald-500", wait: "bg-slate-300", hold: "bg-amber-500", stop: "bg-rose-500",
+  done: "bg-emerald-500", wait: "bg-slate-300", hold: "bg-orange-400", stop: "bg-rose-500",
 };
 const STEP_REASON: Record<StepTone, string> = {
   done: "bg-slate-50 border-slate-200 text-[var(--text-primary)]",
   wait: "bg-slate-50 border-slate-200 text-[var(--text-primary)]",
-  hold: "bg-amber-50 border-amber-200 text-amber-800",
+  hold: "bg-orange-50 border-orange-200 text-orange-800",
   stop: "bg-rose-50 border-rose-200 text-rose-700",
 };
 
@@ -200,25 +215,42 @@ function progressSteps(r: TransferRequest): Step[] {
   const from = getDisplayWarehouseName(r.from_warehouse) || r.from_warehouse || "the supplying warehouse";
   const steps: Step[] = [{ title: "Raised", who: r.created_by, at: r.created_ts, tone: "done" }];
 
-  if (r.store_response === "accepted") {
-    steps.push({ title: "Accepted by the store", who: r.store_response_by, at: r.store_response_at, tone: "done" });
-  } else if (r.store_response === "on_hold") {
-    steps.push({ title: "Held by the store", who: r.store_response_by, at: r.store_response_at,
+  if (isStoreHeld(r)) {
+    steps.push({ title: "Put on hold by the store", who: r.store_decided_by, at: r.store_decided_at,
       reason: r.store_hold_reason, tone: "hold" });
+    steps.push({ title: `Waiting for the ${from} store team to accept or reject`, tone: "wait" });
+    return steps;
+  }
+  if (r.store_hold_reason) {
+    steps.push({ title: "Was on hold at the store", reason: r.store_hold_reason, tone: "hold" });
+  }
+  if (r.store_decision === "Rejected") {
+    // The store's rejection closes the request: it never reaches the inventory manager.
+    steps.push({ title: "Rejected by the store", who: r.store_decided_by, at: r.store_decided_at,
+      reason: r.store_reject_reason, tone: "stop" });
+    return steps;
+  }
+  if (r.store_decision === "Accepted") {
+    steps.push({ title: "Accepted by the store", who: r.store_decided_by, at: r.store_decided_at, tone: "done" });
   } else if (r.status === S.PENDING) {
     steps.push({ title: `Waiting for the ${from} store team to accept`, tone: "wait" });
   }
 
-  if (r.approval_held_by && r.status !== S.APPROVED && r.status !== S.TRANSFERRED) {
-    steps.push({ title: "Put on hold for approval", who: r.approval_held_by, at: r.approval_held_at,
-      reason: r.approval_hold_reason, tone: "hold" });
+  if (r.status === S.ON_HOLD) {
+    steps.push({ title: "Put on hold by the inventory manager", who: r.manager_decided_by, at: r.manager_decided_at,
+      reason: r.manager_hold_reason, tone: "hold" });
+    steps.push({ title: "Waiting for the inventory manager (or substitute) to approve or reject", tone: "wait" });
+    return steps;
   }
-  if (r.status === S.APPROVED || r.status === S.TRANSFERRED) {
-    steps.push({ title: "Approved", who: r.approval_decided_by, at: r.approval_decided_at, tone: "done" });
-  } else if (r.status === S.REJECTED) {
-    steps.push({ title: "Rejected", who: r.approval_decided_by, at: r.approval_decided_at || r.rejected_ts,
-      reason: r.reject_reason, tone: "stop" });
-  } else if (r.status === S.ACCEPTED || r.status === S.ON_HOLD) {
+  if (r.manager_hold_reason) {
+    steps.push({ title: "Was on hold with the inventory manager", reason: r.manager_hold_reason, tone: "hold" });
+  }
+  if (r.manager_decision === "Approved") {
+    steps.push({ title: "Approved", who: r.manager_decided_by, at: r.manager_decided_at, tone: "done" });
+  } else if (r.manager_decision === "Rejected") {
+    steps.push({ title: "Rejected by the inventory manager", who: r.manager_decided_by, at: r.manager_decided_at,
+      reason: r.manager_reject_reason, tone: "stop" });
+  } else if (r.status === S.ACCEPTED) {
     steps.push({ title: "Waiting for the inventory manager (or substitute) to approve", tone: "wait" });
   }
 

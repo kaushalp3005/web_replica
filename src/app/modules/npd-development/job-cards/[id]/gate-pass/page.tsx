@@ -4,9 +4,11 @@
 // interunit-transfer direct-out delivery challan (components/transfer/DeliveryChallan.tsx).
 // A dedicated print route: the whole page IS the document, and it auto-opens the browser
 // print dialog (Save as PDF) once the data loads — same mechanism as the IMS DC.
-// Read-only; no inventory side effects. Reached from the "Download outpass" button.
+// Read-only; no inventory side effects — so it prints ONLY parts already recorded as
+// dispatched (each its own goods issue). The job card's "Dispatch all remaining & print
+// outpass" records them first; this page refuses stock the system still holds in R&D.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useRequireAuth, useMe } from "@/lib/user";
 import { sampleCaps } from "@/lib/sample-roles";
@@ -95,27 +97,10 @@ export default function DevJcGatePassPage() {
     });
   }, [authed, id]);
 
-  // Auto-open the print dialog once the document has rendered (matches IMS: 500ms).
-  useEffect(() => {
-    if (!jc) return;
-    const t = setTimeout(() => { try { window.print(); } catch { /* ignore */ } }, 500);
-    return () => clearTimeout(t);
-  }, [jc]);
-
-  if (mounted && !authed) return null;
-  if (mounted && me !== null && !canViewOutpass) return null;
-
-  if (error) {
-    return <div style={{ padding: 24, fontFamily: "Arial, sans-serif", color: "#b1361e" }}>{error}</div>;
-  }
-  if (!jc) {
-    return <div style={{ padding: 24, fontFamily: "Arial, sans-serif", color: "#666" }}>Loading outpass…</div>;
-  }
-
   // The document itself — which lines, at which quantities, under which outpass number.
-  // See lib/outpass.ts: one part, a chosen SET of parts (?dispatch=a,b,c), every article
-  // (merge=1), or the card's full finalized output.
-  const doc = buildOutpass({
+  // See lib/outpass.ts: one part, a chosen SET of parts (?dispatch=a,b,c), every recorded
+  // part (merge=1), or an old single-shot dispatch's full output.
+  const doc = useMemo(() => (jc ? buildOutpass({
     jcId: id,
     selectedIds: dispatchIds,
     mergeAll,
@@ -129,7 +114,54 @@ export default function DevJcGatePassPage() {
     dispatchRecipient: jc.dispatch_recipient,
     closedAt: jc.closed_at,
     dispatchedAt: jc.dispatched_at,
-  });
+  }) : null), [jc, id, dispatchIds, mergeAll]);
+
+  // Auto-open the print dialog once the document has rendered (matches IMS: 500ms) —
+  // never for a document with no recorded dispatch behind it.
+  useEffect(() => {
+    if (!doc?.recorded) return;
+    const t = setTimeout(() => { try { window.print(); } catch { /* ignore */ } }, 500);
+    return () => clearTimeout(t);
+  }, [doc]);
+
+  if (mounted && !authed) return null;
+  if (mounted && me !== null && !canViewOutpass) return null;
+
+  if (error) {
+    return <div style={{ padding: 24, fontFamily: "Arial, sans-serif", color: "#b1361e" }}>{error}</div>;
+  }
+  if (!jc || !doc) {
+    return <div style={{ padding: 24, fontFamily: "Arial, sans-serif", color: "#666" }}>Loading outpass…</div>;
+  }
+  if (!doc.recorded) {
+    // Two different situations: nothing has gone out at all, or parts have but this link
+    // doesn't name any of them (an old bookmark / full-output link).
+    const hasParts = (jc.dispatches?.length ?? 0) > 0;
+    return (
+      <div style={{ padding: 24, fontFamily: "Arial, sans-serif", color: "#333", maxWidth: 560 }}>
+        <div style={{ fontSize: 16, fontWeight: "bold", color: BURGUNDY, marginBottom: 8 }}>
+          No dispatch recorded for this outpass
+        </div>
+        {hasParts ? (
+          <p style={{ fontSize: 13, lineHeight: 1.6, margin: "0 0 14px" }}>
+            This link doesn&apos;t point to a dispatch recorded on job card {id}. Each part sent from
+            this card has its own outpass — print it from the dispatch list on the job card.
+          </p>
+        ) : (
+          <p style={{ fontSize: 13, lineHeight: 1.6, margin: "0 0 14px" }}>
+            The stock on job card {id} has not been dispatched in the system yet, so an outpass
+            can&apos;t be printed for it. On the job card, use <strong>Dispatch all remaining &amp; print
+            outpass</strong> (or dispatch each article) — that issues the stock out of R&amp;D and
+            prints the outpass for exactly what was sent.
+          </p>
+        )}
+        <button onClick={() => router.replace(`/modules/npd-development/job-cards/${id}`)}
+          style={{ height: 34, padding: "0 16px", background: BURGUNDY, color: "#fff", border: 0, borderRadius: 4, fontSize: 13, cursor: "pointer" }}>
+          Open job card {id}
+        </button>
+      </div>
+    );
+  }
   const { items, totalQty, outpassNo, date, recipient } = doc;
   // With one unit on the document the total prints as a plain figure under its own unit
   // label; with several it prints the per-unit breakdown instead, because there is no

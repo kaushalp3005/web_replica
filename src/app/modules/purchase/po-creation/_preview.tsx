@@ -16,7 +16,8 @@ import {
   type CommitResponse,
   type CommitPo,
   type PreviewSummary,
-  commitPo,
+  commitPoInBatches,
+  CommitBatchError,
   fmtNum,
 } from "@/lib/po";
 
@@ -151,6 +152,8 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
   const [page, setPage] = useState(1);
   const [mode, setMode] = useState<CommitMode>("create_only");
   const [committing, setCommitting] = useState(false);
+  // POs committed so far while a commit runs in batches (lib/po commitPoInBatches).
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [commitError, setCommitError] = useState<string | null>(null);
   const [lastAttemptFailed, setLastAttemptFailed] = useState(false);
 
@@ -231,18 +234,24 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
     setCommitting(true);
     setCommitError(null);
     setLastAttemptFailed(false);
+    setProgress({ done: 0, total: selectedPos.length });
     try {
-      const result = await commitPo({
-        entity,
-        mode,
-        pos: selectedPos.map(stripMeta),
-      });
+      const result = await commitPoInBatches(
+        { entity, mode, pos: selectedPos.map(stripMeta) },
+        (done, total) => setProgress({ done, total }),
+      );
       onCommitted(result);
     } catch (err) {
+      // Batches that went through are committed: leave their POs out of a retry.
+      if (err instanceof CommitBatchError && err.committedKeys.length > 0) {
+        const committed = new Set(err.committedKeys);
+        setPos((prev) => prev.map((p) => (committed.has(p.duplicate_key) ? { ...p, _selected: false } : p)));
+      }
       setCommitError(err instanceof Error ? err.message : "Commit failed");
       setLastAttemptFailed(true);
     } finally {
       setCommitting(false);
+      setProgress(null);
     }
   }
 
@@ -363,6 +372,7 @@ export function PoPreview(props: PreviewProps): React.JSX.Element {
         dupSel={dupSel}
         hint={hint}
         committing={committing}
+        progress={progress}
         lastAttemptFailed={lastAttemptFailed}
         commitError={commitError}
         onCommit={handleCommit}
@@ -575,6 +585,10 @@ function PreviewCard({
               <strong className="text-[var(--text-primary)]">Supplier</strong>{" "}
               {String(header.vendor_supplier_name || header.supplier_id || "—")}
             </span>
+            <span className="max-w-[420px] truncate" title={String(header.consignee_address || "")}>
+              <strong className="text-[var(--text-primary)]">Consignee Address</strong>{" "}
+              {String(header.consignee_address || "—")}
+            </span>
             <span>
               <strong className="text-[var(--text-primary)]">Date</strong>{" "}
               {String(header.po_date || "—")}
@@ -664,6 +678,7 @@ const HEADER_FIELDS: HeaderField[] = [
   { f: "po_date",       label: "PO Date",        type: "date" },
   { f: "delivery_date", label: "Delivery Date",  type: "date" },
   { f: "vendor_supplier_name", label: "Supplier" },
+  { f: "consignee_address", label: "Consignee Address", wide: true },
   { f: "remarks",       label: "Remarks",        wide: true },
 ];
 
@@ -1082,6 +1097,7 @@ function CommitBar({
   dupSel,
   hint,
   committing,
+  progress,
   lastAttemptFailed,
   commitError,
   onCommit,
@@ -1095,6 +1111,7 @@ function CommitBar({
   dupSel: number;
   hint: string;
   committing: boolean;
+  progress: { done: number; total: number } | null;
   lastAttemptFailed: boolean;
   commitError: string | null;
   onCommit: () => void;
@@ -1108,7 +1125,9 @@ function CommitBar({
   ];
 
   const btnLabel = committing
-    ? "Committing…"
+    ? progress && progress.total > 0
+      ? `Committing ${progress.done.toLocaleString("en-IN")} / ${progress.total.toLocaleString("en-IN")}…`
+      : "Committing…"
     : lastAttemptFailed
       ? "Retry commit"
       : `Commit ${selected} PO${selected === 1 ? "" : "s"}`;

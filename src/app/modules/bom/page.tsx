@@ -30,7 +30,7 @@
 // bom_id, so collapsing and re-expanding costs nothing. Multiple rows can be
 // open at once — hence a Set of ids, not a single expandedId.
 
-import { memo, useCallback, useEffect, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { BrandMark } from "@/components/BrandMark";
 import { BackLink } from "@/components/BackLink";
@@ -39,12 +39,14 @@ import { friendlyApiError } from "@/lib/apiErrors";
 import {
   listBomAggregate,
   getBomDetail,
+  deleteBom,
   type BomAggregateRow,
   type BomDetail,
   type BomLineRow,
   type BomPagination,
   type BomRouteStep,
 } from "@/lib/bom";
+import { BomForm, type BomFormMode, type BomFormResult } from "./_BomForm";
 
 const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 300;
@@ -107,6 +109,13 @@ export default function BomModulePage() {
   // hydration-stable: server and first client paint agree on `me === null`.
   const me = useMe();
   const canView = useHasPermission("bom", null, null, "view");
+  // Write actions. Each is its own ('bom', NULL, NULL, <action>) tuple — 095
+  // seeds view + create, 139 seeds update + delete — so a role can hold any
+  // subset. Admins pass all four. The buttons are hidden, not just disabled,
+  // for a role without the grant: the server would 403 anyway.
+  const canCreate = useHasPermission("bom", null, null, "create");
+  const canUpdate = useHasPermission("bom", null, null, "update");
+  const canDelete = useHasPermission("bom", null, null, "delete");
 
   // ── Filters ──────────────────────────────────────────────────────────────
   const [search, setSearch] = useState("");
@@ -134,6 +143,16 @@ export default function BomModulePage() {
   const [pagination, setPagination] = useState<BomPagination>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Bumped after a create / update / deactivate so the aggregate row (counts,
+  // Active chip, Σ figures) is re-read from the server rather than patched by
+  // hand from a response that does not carry the rollups.
+  const [reloadKey, setReloadKey] = useState(0);
+
+  // ── Write state ──────────────────────────────────────────────────────────
+  const [formState, setFormState] = useState<BomFormMode | null>(null);
+  const [notice, setNotice] = useState<NoticeState | null>(null);
+  // bom_id with a write in flight (detail fetch before edit, or a deactivate).
+  const [busyId, setBusyId] = useState<number | null>(null);
 
   // Scalar fingerprint of the debounced text so the fetch effect isn't re-run
   // by the new object identity setDebounced hands back each tick.
@@ -184,7 +203,7 @@ export default function BomModulePage() {
     return () => c.abort();
     // textFp is the stable stand-in for the three debounced strings.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authed, canView, textFp, entity, activeFilter, itemType, page]);
+  }, [authed, canView, textFp, entity, activeFilter, itemType, page, reloadKey]);
 
   // ── Expansion + lazy detail cache ────────────────────────────────────────
   // A Set, not a single id: several BOMs are routinely compared side by side.
@@ -261,6 +280,125 @@ export default function BomModulePage() {
     });
   }, []);
 
+  // ── Write handlers ───────────────────────────────────────────────────────
+  const openCreate = useCallback(() => {
+    setNotice(null);
+    setFormState({ mode: "create" });
+  }, []);
+
+  // Always re-read the BOM before editing, even when the row's detail is
+  // cached: the form diffs against what it was opened with, and the line ids it
+  // sends back must be the ones on the server NOW, not from an earlier expand.
+  const openEdit = useCallback(async (bomId: number) => {
+    setNotice(null);
+    setBusyId(bomId);
+    try {
+      const detail = await getBomDetail(bomId);
+      setDetailCache((prev) => {
+        const next = new Map(prev);
+        next.set(bomId, { detail, loading: false });
+        return next;
+      });
+      setFormState({ mode: "edit", bomId, detail });
+    } catch (e: unknown) {
+      setNotice({ tone: "error", text: `Could not load BOM ${bomId} for editing: ${friendlyApiError(e)}` });
+    } finally {
+      setBusyId(null);
+    }
+  }, []);
+
+  const closeForm = useCallback(() => setFormState(null), []);
+
+  const onSaved = useCallback((r: BomFormResult) => {
+    setFormState(null);
+    if (r.kind === "created") {
+      const n = r.res.lines_created;
+      const m = r.res.route_steps_created;
+      setNotice({
+        tone: r.res.warnings.length ? "warn" : "ok",
+        text: `BOM ${r.res.bom_id} created for ${r.res.fg_sku_name} (version ${r.res.version}, ${n} line${n === 1 ? "" : "s"}, ${m} route step${m === 1 ? "" : "s"}).`,
+        lines: r.res.warnings,
+      });
+    } else {
+      const c = r.res.changes;
+      const parts: string[] = [];
+      if (c.header_fields.length) {
+        parts.push(`${c.header_fields.length} header field${c.header_fields.length === 1 ? "" : "s"}`);
+      }
+      if (c.lines) parts.push(`lines +${c.lines.inserted} / ~${c.lines.updated} / −${c.lines.deleted}`);
+      if (c.route) parts.push(`route rebuilt (${c.route.steps_created} step${c.route.steps_created === 1 ? "" : "s"})`);
+      // Drop the fresh detail straight into the cache so an open row updates
+      // without a refetch; the list itself is re-read via reloadKey.
+      setDetailCache((prev) => {
+        const next = new Map(prev);
+        next.set(r.res.bom_id, { detail: r.res.detail, loading: false });
+        return next;
+      });
+      setNotice({
+        tone: r.res.warnings.length ? "warn" : "ok",
+        text: `BOM ${r.res.bom_id} saved${parts.length ? ` — ${parts.join(", ")}` : ""}.`,
+        lines: r.res.warnings,
+      });
+    }
+    setReloadKey((k) => k + 1);
+  }, []);
+
+  const onDeactivate = useCallback(async (bomId: number, label: string) => {
+    // window.confirm is the house pattern for destructive-looking actions
+    // (admin/page.tsx). This one is reversible, and the text says so.
+    if (
+      !window.confirm(
+        `Deactivate ${label} (BOM ${bomId})?\n\nIt will be marked inactive and stop resolving for new plans and job cards. Nothing is deleted — existing job cards keep their recipe, and you can reactivate it from Edit → Active.`,
+      )
+    ) {
+      return;
+    }
+    setNotice(null);
+    setBusyId(bomId);
+    try {
+      const res = await deleteBom(bomId);
+      // Patch the cached header so an open row's chip + buttons flip at once;
+      // the list row is re-read via reloadKey.
+      setDetailCache((prev) => {
+        const entry = prev.get(bomId);
+        if (!entry?.detail) return prev;
+        const next = new Map(prev);
+        next.set(bomId, {
+          ...entry,
+          detail: { ...entry.detail, header: { ...entry.detail.header, is_active: false } },
+        });
+        return next;
+      });
+      setNotice({
+        tone: "ok",
+        text: res.already_inactive
+          ? `BOM ${bomId} was already inactive.`
+          : `BOM ${bomId} (${res.fg_sku_name}, version ${res.version}) marked inactive. Nothing was deleted.`,
+      });
+      setReloadKey((k) => k + 1);
+    } catch (e: unknown) {
+      setNotice({ tone: "error", text: `Could not deactivate BOM ${bomId}: ${friendlyApiError(e)}` });
+    } finally {
+      setBusyId(null);
+    }
+  }, []);
+
+  // One stable object so the memo'd rows only re-render when a flag changes.
+  const actions = useMemo<RowActions>(
+    () => ({
+      canUpdate,
+      canDelete,
+      busyId,
+      onEdit: (id) => {
+        void openEdit(id);
+      },
+      onDeactivate: (id, label) => {
+        void onDeactivate(id, label);
+      },
+    }),
+    [canUpdate, canDelete, busyId, openEdit, onDeactivate],
+  );
+
   const onPage = useCallback((p: number) => {
     setPage(p);
   }, []);
@@ -305,6 +443,15 @@ export default function BomModulePage() {
           <p className="hidden lg:inline text-[12px] text-[var(--text-muted)]">
             One row per bill of materials · expand for lines and the process route.
           </p>
+          {me && canView && canCreate ? (
+            <button
+              type="button"
+              onClick={openCreate}
+              className="ml-auto text-[13px] font-semibold rounded-md px-3 py-1.5 bg-[var(--aws-orange)] text-white hover:bg-[var(--aws-orange-hover)]"
+            >
+              + New BOM
+            </button>
+          ) : null}
         </div>
 
         {!me ? (
@@ -342,6 +489,8 @@ export default function BomModulePage() {
               onClear={clearFilters}
             />
 
+            {notice ? <Notice notice={notice} onClose={() => setNotice(null)} /> : null}
+
             <div
               aria-hidden
               className={[
@@ -371,6 +520,7 @@ export default function BomModulePage() {
                     expanded={expanded}
                     detailCache={detailCache}
                     onToggleExpand={onToggleExpand}
+                    actions={actions}
                   />
                 </div>
                 <Pagination pg={pagination} onPage={onPage} loading={loading} />
@@ -380,12 +530,108 @@ export default function BomModulePage() {
         )}
       </main>
 
+      {formState ? <BomForm {...formState} onClose={closeForm} onSaved={onSaved} /> : null}
+
       <Footer />
     </div>
   );
 }
 
 // ── Chrome ─────────────────────────────────────────────────────────────────
+
+// ── Write-side types + chrome ──────────────────────────────────────────────
+
+// Handed to every memo'd row as ONE stable object (useMemo in the page), so a
+// keystroke in the filter bar still does not re-render fifty rows.
+type RowActions = {
+  canUpdate: boolean;
+  canDelete: boolean;
+  busyId: number | null;
+  onEdit: (bomId: number) => void;
+  onDeactivate: (bomId: number, label: string) => void;
+};
+
+type NoticeState = { tone: "ok" | "warn" | "error"; text: string; lines?: string[] };
+
+function Notice({ notice, onClose }: { notice: NoticeState; onClose: () => void }) {
+  const cls =
+    notice.tone === "error"
+      ? "border-[var(--aws-error)] bg-[#fff5f5] text-[var(--aws-error)]"
+      : notice.tone === "warn"
+        ? "border-[var(--aws-orange)] bg-[#fff8f0] text-[var(--text-primary)]"
+        : "border-[#b6dbb1] bg-[#eaf6ed] text-[var(--text-success)]";
+  return (
+    <div
+      role={notice.tone === "error" ? "alert" : "status"}
+      className={`mb-3 flex items-start gap-2 rounded-md border px-3 py-2 text-[12px] ${cls}`}
+    >
+      <div className="flex-1 min-w-0">
+        <p className="font-medium">{notice.text}</p>
+        {notice.lines?.length ? (
+          <ul className="mt-1 list-disc pl-4 space-y-0.5 text-[var(--text-secondary)]">
+            {notice.lines.map((l, i) => (
+              <li key={i}>{l}</li>
+            ))}
+          </ul>
+        ) : null}
+      </div>
+      <button
+        type="button"
+        onClick={onClose}
+        aria-label="Dismiss"
+        className="h-5 w-5 inline-flex items-center justify-center rounded-sm hover:bg-white/60 text-current"
+      >
+        <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" aria-hidden>
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+// Edit / Deactivate for one expanded BOM. Rendered only once the detail has
+// loaded (Edit needs it) and only for roles holding the matching grant.
+function DetailActions({
+  row,
+  label,
+  header,
+  actions,
+}: {
+  row: BomAggregateRow;
+  label: string;
+  header: Record<string, unknown>;
+  actions: RowActions;
+}) {
+  if (!actions.canUpdate && !actions.canDelete) return null;
+  const busy = actions.busyId === row.bom_id;
+  const inactive = header.is_active === false;
+  return (
+    <div className="flex items-center justify-end gap-2">
+      {actions.canUpdate ? (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => actions.onEdit(row.bom_id)}
+          className="h-7 px-2.5 text-[11px] font-semibold rounded-sm border border-[var(--aws-border-strong)] bg-white text-[var(--text-primary)] hover:border-[var(--aws-navy)] disabled:opacity-50"
+        >
+          {busy ? "Opening…" : "Edit"}
+        </button>
+      ) : null}
+      {actions.canDelete ? (
+        <button
+          type="button"
+          disabled={busy || inactive}
+          onClick={() => actions.onDeactivate(row.bom_id, label)}
+          title={inactive ? "Already inactive — reactivate from Edit → Active" : "Mark this BOM inactive (nothing is deleted)"}
+          className="h-7 px-2.5 text-[11px] font-semibold rounded-sm border border-[var(--aws-border-strong)] bg-white text-[var(--aws-error)] hover:border-[var(--aws-error)] disabled:opacity-50 disabled:text-[var(--text-muted)]"
+        >
+          {inactive ? "Inactive" : busy ? "Working…" : "Deactivate"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
 
 function PageHeader({ initial, onNavigate }: { initial: string; onNavigate: (href: string) => void }) {
   return (
@@ -624,11 +870,13 @@ function BomTable({
   expanded,
   detailCache,
   onToggleExpand,
+  actions,
 }: {
   rows: BomAggregateRow[];
   expanded: Set<number>;
   detailCache: Map<number, DetailState>;
   onToggleExpand: (bomId: number) => void;
+  actions: RowActions;
 }) {
   return (
     <div className={GRID_WRAP}>
@@ -666,6 +914,7 @@ function BomTable({
               isOpen={expanded.has(row.bom_id)}
               state={detailCache.get(row.bom_id)}
               onToggleExpand={onToggleExpand}
+              actions={actions}
             />
           ))}
         </tbody>
@@ -681,11 +930,13 @@ const BomRow = memo(function BomRow({
   isOpen,
   state,
   onToggleExpand,
+  actions,
 }: {
   row: BomAggregateRow;
   isOpen: boolean;
   state: DetailState | undefined;
   onToggleExpand: (bomId: number) => void;
+  actions: RowActions;
 }) {
   const label = text(row.fg_sku_name) === DASH ? `BOM ${row.bom_id}` : text(row.fg_sku_name);
   const toggle = () => onToggleExpand(row.bom_id);
@@ -788,7 +1039,7 @@ const BomRow = memo(function BomRow({
             style={{ borderLeft: "3px solid var(--aws-orange)" }}
           >
             <div className="px-3 py-3">
-              <BomDetailPanel row={row} label={label} state={state} />
+              <BomDetailPanel row={row} label={label} state={state} actions={actions} />
             </div>
           </td>
         </tr>
@@ -815,10 +1066,12 @@ function BomDetailPanel({
   row,
   label,
   state,
+  actions,
 }: {
   row: BomAggregateRow;
   label: string;
   state: DetailState | undefined;
+  actions: RowActions;
 }) {
   if (state?.loading) {
     return (
@@ -847,7 +1100,12 @@ function BomDetailPanel({
 
   return (
     <div className="flex flex-col gap-3">
-      <HeaderStrip row={row} header={header} />
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <HeaderStrip row={row} header={header} />
+        </div>
+        <DetailActions row={row} label={label} header={header} actions={actions} />
+      </div>
 
       <section>
         <h3 className="text-[10px] uppercase tracking-wide font-bold text-[var(--text-muted)] mb-1.5">

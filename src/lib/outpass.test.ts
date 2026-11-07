@@ -98,14 +98,27 @@ check("empty when absent", parseDispatchIds(null), []);
   check("all ids unknown — carries the card's output", none.items, [{ desc: "Date Powder", qty: 0.6, uom: "kg" }]);
 }
 
-// ── merge=1 is unchanged: every article's FULL output ──────────────────────
+// ── merge=1: every RECORDED part, never each article's full output ─────────
+// It used to print 0.2 + 0.4 kg (the full outputs) whatever had gone out, and record
+// nothing — so the samples left while every article still read as pending.
 {
   const d = buildOutpass({ ...base, mergeAll: true });
-  check("merge=1 — one line per article at full output", d.items, [
-    { desc: "Date Powder", qty: 0.2, uom: "kg" },
-    { desc: "Date Syrup", qty: 0.4, uom: "kg" },
-  ]);
-  check("merge=1 — not sub-numbered", d.outpassNo, String(JC_ID));
+  check("merge=1 — one line per recorded part, at its own qty", d.items.map((i) => [i.qty, i.uom]),
+    [[0.05, "kg"], [0.08, "kg"], [500, "g"], [0.4, "kg"]]);
+  check("merge=1 — numbered by every part it carries", d.outpassNo, `${JC_ID}-1+2+3+4`);
+  check("merge=1 — backed by goods issues", d.recorded, true);
+  const shuffled = buildOutpass({ ...base, mergeAll: true, dispatches: [...DISPATCHES].reverse() });
+  check("merge=1 — in ledger order", shuffled.outpassNo, `${JC_ID}-1+2+3+4`);
+}
+{
+  const d = buildOutpass({ ...base, mergeAll: true, dispatches: [] });
+  check("merge=1, nothing dispatched — no lines", d.items, []);
+  check("merge=1, nothing dispatched — refused", d.recorded, false);
+}
+{
+  const d = buildOutpass({ ...base, mergeAll: true, dispatches: [DISPATCHES[3]] });
+  check("merge=1, one part — that part's own outpass", d.outpassNo, `${JC_ID}-4`);
+  check("merge=1, one part — its qty", d.items, [{ desc: "Date Syrup", qty: 0.4, uom: "kg" }]);
 }
 
 // ── no selection at all → the card's full finalized output ─────────────────
@@ -113,6 +126,18 @@ check("empty when absent", parseDispatchIds(null), []);
   const d = buildOutpass(base);
   check("no selection — full output", d.items, [{ desc: "Date Powder", qty: 0.6, uom: "kg" }]);
   check("no selection — plain outpass no", d.outpassNo, String(JC_ID));
+  check("no selection on a card with parts — refused (would double-count them)", d.recorded, false);
+}
+
+// ── an outpass is printable only for stock recorded as dispatched ──────────
+{
+  const fresh = { ...base, dispatches: [] };
+  check("nothing dispatched — full output refused", buildOutpass(fresh).recorded, false);
+  check("old single-shot dispatch (046 mirror, no ledger) — allowed",
+    buildOutpass({ ...fresh, dispatchedAt: "2026-07-01T00:00:00Z" }).recorded, true);
+  check("a recorded part — allowed", buildOutpass({ ...base, selectedIds: [902] }).recorded, true);
+  check("a chosen set — allowed", buildOutpass({ ...base, selectedIds: [901, 904] }).recorded, true);
+  check("only unknown ids — refused", buildOutpass({ ...base, selectedIds: [99999] }).recorded, false);
 }
 
 // ── units are totalled per LABEL, never summed across them ─────────────────

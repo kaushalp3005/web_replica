@@ -3,9 +3,9 @@
 // Folds the legacy line rules into a patch:
 //   • value      = qty × rate            (0 when either is non-positive)
 //   • net_weight = round3(uom × qty)     ("" when either is non-positive)
-//   • qty is floored to a non-negative INTEGER — the backend `qty` column is
-//     INTEGER and truncates, so a fractional entry would make the persisted qty
-//     and the derived Value disagree.
+//   • qty is kept as typed. The backend `qty` column is INTEGER, so a quantity must
+//     be a whole number: the form's save refuses 2.5 with a message (as the server
+//     does) instead of cutting it to 2, which made the saved qty and Value disagree.
 //
 // Run:  npx tsx -e "import('./src/app/modules/customer-returns/_lineEngine').then(m=>m.demo())"
 
@@ -18,11 +18,6 @@ const n = (v: string | number | null | undefined): number => {
 
 export function deriveLine(line: CRLineForm, patch: Partial<CRLineForm>): Partial<CRLineForm> {
   const out: Partial<CRLineForm> = { ...patch };
-
-  // Floor Total Qty to a non-negative integer (backend qty is INTEGER).
-  if ("qty" in patch) {
-    out.qty = patch.qty === "" ? "" : String(Math.max(0, Math.trunc(n(patch.qty))));
-  }
 
   const next = { ...line, ...out };
 
@@ -54,12 +49,10 @@ export function demo(): void {
   assert(deriveLine({ ...blank(), rate: "10" }, { qty: "3" }).value === "30", "value = qty*rate");
   assert(deriveLine({ ...blank(), qty: "4" }, { rate: "2.5" }).value === "10", "rate change recomputes value");
 
-  // F1: fractional qty is floored to an integer
-  assert(deriveLine(blank(), { qty: "2.5" }).qty === "2", "qty floored to integer");
-  assert(deriveLine(blank(), { qty: "-4" }).qty === "0", "negative qty floored to 0");
+  // F1: qty is kept as typed — never cut; the save refuses a decimal with a message
+  assert(deriveLine(blank(), { qty: "2.5" }).qty === "2.5", "a decimal qty is kept, not cut to 2");
   assert(deriveLine(blank(), { qty: "" }).qty === "", "empty qty stays empty");
-  // floored qty drives value, not the raw fraction
-  assert(deriveLine({ ...blank(), rate: "10" }, { qty: "2.5" }).value === "20", "value uses floored qty (2*10)");
+  assert(deriveLine({ ...blank(), rate: "10" }, { qty: "2.5" }).value === "25", "value from the qty as typed");
 
   // F2: clearing qty resets a previously-derived value to "0" (no stale 50)
   assert(deriveLine({ ...blank(), qty: "5", rate: "10", value: "50" }, { qty: "" }).value === "0", "cleared qty resets value");

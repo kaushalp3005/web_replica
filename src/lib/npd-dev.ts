@@ -126,6 +126,7 @@ export interface DevJobCard {
   // detail GET (a real column on npd_dev_job_cards); it was only ever declared on
   // DevJobCardCreate before, so reads of it did not typecheck.
   source_requisition_id?: number | null;
+  source_request_id?: number | null;         // that request's visible number (detail GET)
   // Read from the source requisition (085) — the card carries no columns of its own.
   source_requestor_name?: string | null;    // the BH this was raised for
   source_sales_poc_name?: string | null;    // sales point of contact
@@ -380,6 +381,12 @@ export async function replaceDevArticles(id: number, articles: DevArticleInput[]
     "Failed to save articles");
 }
 
+// Link a card made from the "Development job card" menu to the request it was for
+// (requisition row id). The server refuses an already-linked card or a finished request.
+export const linkDevJobCardToRequest = (id: number, requisitionId: number) =>
+  jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/link-request`, { requisition_id: requisitionId }),
+    "Failed to link the request");
+
 export const startDevJobCard = (id: number) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/start`), "Start failed");
 
@@ -445,3 +452,8 @@ export const completeDevPhase = (id: number, phaseId: number, body?: DevPhaseCom
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/phases/${phaseId}/complete`, body ?? {}), "Failed to complete phase");
 export const dispatchDevJobCard = (id: number, body: { recipient?: string; qty?: number; article_id?: number; uom?: string }) =>
   jsonOrThrow<DevJobCard>(post(`${BASE}/${id}/dispatch`, body), "Dispatch failed");
+/** Record EVERY remaining balance on a CLOSED card as dispatched (one part per article, all
+ *  or nothing). Returns the new parts — the ids the combined outpass is then printed for. */
+export const dispatchAllRemaining = (id: number, body: { recipient?: string }) =>
+  jsonOrThrow<{ dispatch_ids: number[]; job_card: DevJobCard }>(
+    post(`${BASE}/${id}/dispatch-all`, body), "Dispatch failed");

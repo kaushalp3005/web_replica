@@ -42,29 +42,42 @@ export interface TransferRequest {
   to_warehouse: string;
   reason_description: string;
   status: string;
-  reject_reason?: string | null;
   created_by?: string | null;
   created_ts?: string | null;
-  rejected_ts?: string | null;
   updated_at?: string | null;
-  // Backend migration 119: the store accepts, an inventory manager approves, then the
-  // store scans and sends. store_response "accepted" | "on_hold" is the store's answer
-  // (a store hold keeps the request Pending, with store_hold_reason).
-  store_response?: string | null;
-  store_response_by?: string | null;
-  store_response_by_email?: string | null;
-  store_response_at?: string | null;
+  // Backend migration 121: the store accepts or rejects, an inventory manager approves or
+  // rejects, then the store scans and sends. store_decision "Accepted" | "Rejected" |
+  // "Held" and manager_decision "Approved" | "Rejected" | "Held" are each one's answer
+  // (null = not answered yet); *_decided_by is the email of whoever answered.
+  store_decision?: string | null;
+  store_decided_by?: string | null;
+  store_decided_at?: string | null;
+  store_reject_reason?: string | null;
+  manager_decision?: string | null;
+  manager_decided_by?: string | null;
+  manager_decided_at?: string | null;
+  manager_reject_reason?: string | null;
+  // Backend migration 127: holds. A store hold keeps the request Pending (store_decision
+  // "Held"); a manager hold makes it "On Hold" (manager_decision "Held"). Each reason
+  // stays once the request is answered, as history.
   store_hold_reason?: string | null;
-  approval_decided_by?: string | null;
-  approval_decided_at?: string | null;
-  approval_hold_reason?: string | null;
-  approval_held_by?: string | null;
-  approval_held_at?: string | null;
+  manager_hold_reason?: string | null;
+  // Legacy: the only reason a request rejected before migration 121 has (both decisions
+  // above are null for it). The backend still returns it.
+  reject_reason?: string | null;
+  // The request's newest transfer, the one Scan & send adds boxes to (null when it has
+  // none). Filled when one request is read (getRequest); a listed request may leave it null.
+  transfer_id?: number | null;
+  transfer_challan_no?: string | null;
+  transfer_status?: string | null;
   lines: RequestLine[];
 }
 
-/** Request statuses: Pending → Accepted (store) → Approved | On Hold | Rejected
- *  (inventory manager) → Transferred (scanned and sent). */
+/** Request statuses: Pending → Accepted (store) → Approved (inventory manager) →
+ *  Transferred (scanned and sent). Rejected ends it: the store rejects a Pending
+ *  request, the inventory manager an Accepted (or On Hold) one. A store hold keeps a
+ *  request Pending (store_decision "Held"); an inventory manager's hold makes an
+ *  Accepted one On Hold, from which it can still be approved or rejected. */
 export const REQUEST_STATUS = {
   PENDING: "Pending",
   ACCEPTED: "Accepted",
@@ -73,6 +86,14 @@ export const REQUEST_STATUS = {
   REJECTED: "Rejected",
   TRANSFERRED: "Transferred",
 } as const;
+
+/** store_decision / manager_decision of a hold. */
+export const HELD = "Held";
+
+/** A Pending request the supplying store has put on hold (it can still accept or reject it). */
+export function isStoreHeld(r: Pick<TransferRequest, "status" | "store_decision">): boolean {
+  return (r.status || REQUEST_STATUS.PENDING) === REQUEST_STATUS.PENDING && r.store_decision === HELD;
+}
 
 // ── Transfers (OUT) ──────────────────────────────────────────────────────────
 export interface TransferBox {
@@ -156,6 +177,19 @@ export interface TransferDetail extends TransferHeader {
   grn_records: GrnRecord[];
 }
 
+// A transfer's own status that says it is still out: ERP's Dispatch / Partial, and IMS's
+// older In Transit / Completed (IMS shows Completed as Dispatch and parks its boxes as in
+// transit). The server's rule (backend lookup_service.is_in_transit_status).
+const IN_TRANSIT_STATUSES: ReadonlySet<string> = new Set(["dispatch", "partial", "in transit", "completed"]);
+
+/** Whether `status` says the transfer is still in transit (see IN_TRANSIT_STATUSES; case and
+ *  outer spaces aside). Received, IMS's Partially Received, a blank or any other status is
+ *  not: such a transfer can't be edited (409). Only the status: a transfer whose receipt has
+ *  begun is refused too. */
+export function isInTransitStatus(status: string | null | undefined): boolean {
+  return IN_TRANSIT_STATUSES.has((status || "").trim().toLowerCase());
+}
+
 // ── Transfers IN (GRN) ────────────────────────────────────────────────────────
 export interface TransferInBox {
   id: number;
@@ -182,6 +216,8 @@ export interface TransferInRecord {
   grn_date?: string | null;
   receiving_warehouse: string;
   from_warehouse?: string | null;
+  // The dispatch's cold units ("Rishi, Savla D-39") when it went from cold storage.
+  from_cold_unit?: string | null;
   received_by: string;
   received_at?: string | null;
   box_condition?: string | null;
@@ -253,8 +289,13 @@ export interface InnerColdChallan {
 }
 
 // ── Inner cold transfer create / edit (doc 11) ──
+// new_storage_location may only name the challan's own store (the page sends none).
 export interface InnerTransferLineInput {
   stock_record_id: number | null;
+  // The cold table stock_record_id is a row of (cfpl / cdpl, the picked search row's
+  // company): ids repeat across cfpl_cold_stocks and cdpl_cold_stocks, so each line names
+  // its own. Without it the server looks the id up in both.
+  company?: string | null;
   item_category?: string | null;
   item_description?: string | null;
   net_weight?: number | null;
@@ -264,7 +305,6 @@ export interface InnerTransferLineInput {
   new_storage_location?: string | null;
 }
 export interface InnerTransferCreateBody {
-  company?: string;
   header: {
     challan_no: string;
     transfer_name?: string | null;
@@ -337,6 +377,12 @@ async function putJson<T>(path: string, payload: unknown, fallback: string): Pro
   return (await res.json()) as T;
 }
 
+async function patchJson<T>(path: string, payload: unknown, fallback: string): Promise<T> {
+  const res = await apiFetch(path, { method: "PATCH", body: JSON.stringify(payload) });
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, fallback));
+  return (await res.json()) as T;
+}
+
 // ── Receive (Transfer-IN) lifecycle payloads ──
 export interface AcknowledgeBoxInput {
   box_id: string;
@@ -355,6 +401,35 @@ export interface AcknowledgeBoxInput {
 export interface PendingLookup {
   exists: boolean;
   header: TransferInDetail | null;
+}
+// A box of an acknowledge-batch the server refused (e.g. 409: not on the transfer, or a
+// second box with the same box id on one receipt); the others are recorded.
+export interface AckConflict {
+  box_id?: string | null;
+  transaction_no?: string | null;
+  status_code?: number;
+  detail?: unknown;
+}
+export interface AckBatchResult {
+  success: boolean;
+  count: number;
+  // The receipt box rows the batch wrote, one per box it recorded.
+  boxes?: TransferInBox[];
+  conflicts: AckConflict[];
+}
+// What the in-transit sync did (counts of boxes); `error` when it could not run.
+export interface BackfillResult {
+  transfers_scanned?: number;
+  transfers_with_existing_pending?: number;
+  boxes_parked_from_cold?: number;
+  boxes_parked_from_warehouse?: number;
+  boxes_parked_without_source?: number;
+  boxes_skipped_already_parked?: number;
+  boxes_with_missing_id?: number;
+  // Not recorded: the box went on on a newer transfer, or IMS's cold receive took it in.
+  boxes_skipped_sent_on?: number;
+  boxes_skipped_received?: number;
+  error?: string;
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -413,8 +488,11 @@ export const TransferApi = {
   getPendingStock: (params: { company?: string; search?: string; from_date?: string; to_date?: string } = {}) =>
     getJson<PendingStockResponse>(`${BASE}/pending-stock${qs(params)}`, "Failed to load pending stock."),
 
+  // Sync, on demand: records in-transit rows for dispatched transfers that have none,
+  // copying their boxes' details, leaving out boxes that went on since or that IMS took in.
+  // Record only — the stock tables (kept by IMS) are never changed.
   backfillPendingStock: () =>
-    mutate<{ synced?: number; message?: string }>(`${BASE}/pending-stock/backfill`, "POST", "Failed to sync pending stock."),
+    mutate<BackfillResult>(`${BASE}/pending-stock/backfill`, "POST", "Failed to sync pending stock."),
 
   getInnerColdList: (p: ListParams = {}) =>
     getJson<ListEnvelope<InnerColdChallan>>(
@@ -422,34 +500,49 @@ export const TransferApi = {
       "Failed to load inner cold transfers.",
     ),
 
-  // ── Request flow (migration 119) ──
-  // The store team of the supplying warehouse accepts (→ the inventory managers are asked)
-  // or holds with a reason (stays Pending; the inventory managers are told).
+  // ── Request flow (migration 121) ──
+  // The store team of the supplying warehouse accepts (→ it goes to the inventory managers)
+  // or rejects with a reason (the request is closed).
   acceptRequest: (id: number) =>
     postJson<TransferRequest>(`${BASE}/requests/${id}/accept`, {}, "Failed to accept the request."),
+  storeRejectRequest: (id: number, reason: string) =>
+    postJson<TransferRequest>(`${BASE}/requests/${id}/store-reject`, { reason }, "Failed to reject the request."),
+  // Or holds it with a reason (migration 127): it stays Pending, and the store can still
+  // accept or reject it.
   storeHoldRequest: (id: number, reason: string) =>
     postJson<TransferRequest>(`${BASE}/requests/${id}/store-hold`, { reason }, "Failed to put the request on hold."),
-  // An inventory manager approves (the store may then scan and send), holds or rejects.
+  // An inventory manager approves (the store may then scan and send) or rejects with a reason.
   approveRequest: (id: number) =>
     postJson<TransferRequest>(`${BASE}/requests/${id}/approve`, {}, "Failed to approve the request."),
-  holdRequest: (id: number, reason: string) =>
-    postJson<TransferRequest>(`${BASE}/requests/${id}/hold`, { reason }, "Failed to put the request on hold."),
   rejectRequest: (id: number, reason: string) =>
     postJson<TransferRequest>(`${BASE}/requests/${id}/reject`, { reason }, "Failed to reject the request."),
+  // Or holds an Accepted one with a reason (it turns On Hold and can still be approved or
+  // rejected).
+  holdRequest: (id: number, reason: string) =>
+    postJson<TransferRequest>(`${BASE}/requests/${id}/hold`, { reason }, "Failed to put the request on hold."),
 
   deleteRequest: (id: number) =>
     mutate<{ success: boolean; message: string }>(`${BASE}/requests/${id}`, "DELETE", "Failed to delete request."),
 
+  // Deletes the transfer and its in-transit / receipt records, which frees its boxes for
+  // another transfer. Nothing is put back into stock (record only).
   deleteTransfer: (id: number) =>
     mutate<{ success: boolean; message: string }>(`${BASE}/transfers/${id}`, "DELETE", "Failed to delete transfer."),
 
   deleteTransferIn: (id: number) =>
     mutate<{ success: boolean; message: string }>(`${BASE}/transfer-in/${id}`, "DELETE", "Failed to delete transfer IN."),
 
+  // Deleting an inner cold challan undoes it: every cold-stock row it changed gets its old
+  // lot, location, cartons, weight and value back, and the rows it added are removed, in
+  // one transaction. Refused (409) when one of those rows has changed since.
   deleteInnerCold: (challanNo: string) =>
     mutate<{ success: boolean; message: string }>(
       `${BASE}/inner-transfer/${encodeURIComponent(challanNo)}`, "DELETE", "Failed to delete inner cold transfer."),
 
+  // Relabels lots inside one cold store (header.from_warehouse): each line acts on its
+  // picked row (stock_record_id), then on rows of the same lot group at that store whose
+  // boxes are there by their latest transfer. A move to another cold store is refused (409:
+  // that has to be an inter-unit transfer); so is a store the user is not assigned to.
   createInnerTransfer: (body: InnerTransferCreateBody) =>
     postJson<InnerTransferResult>(`${BASE}/inner-transfer`, body, "Failed to submit inner cold transfer."),
 
@@ -470,10 +563,14 @@ export const TransferApi = {
     postJson<{ box_id: string; reconciliation?: unknown }>(`${BASE}/transfer-in/${headerId}/acknowledge`, body, "Failed to acknowledge box."),
 
   acknowledgeBatch: (headerId: number, boxes: AcknowledgeBoxInput[]) =>
-    postJson<{ success: boolean; count: number; conflicts: unknown[] }>(`${BASE}/transfer-in/${headerId}/acknowledge-batch`, boxes, "Failed to acknowledge boxes."),
+    postJson<AckBatchResult>(`${BASE}/transfer-in/${headerId}/acknowledge-batch`, boxes, "Failed to acknowledge boxes."),
 
-  unacknowledgeBox: (headerId: number, boxId: string) =>
-    mutate<{ success: boolean }>(`${BASE}/transfer-in/${headerId}/acknowledge/${encodeURIComponent(boxId)}`, "DELETE", "Failed to un-acknowledge box."),
+  // Takes a box off a pending receipt. `transactionNo` names which of two boxes sharing the
+  // box id goes; a server that does not read it takes off every receipt row of that box id.
+  unacknowledgeBox: (headerId: number, boxId: string, transactionNo?: string | null) =>
+    mutate<{ success: boolean }>(
+      `${BASE}/transfer-in/${headerId}/acknowledge/${encodeURIComponent(boxId)}${qs({ transaction_no: transactionNo })}`,
+      "DELETE", "Failed to un-acknowledge box."),
 
   finalizeTransferIn: (headerId: number, body: { box_condition?: string; condition_remarks?: string }) =>
     postJson<TransferInDetail>(`${BASE}/transfer-in/${headerId}/finalize`, body, "Failed to finalize receipt."),
@@ -502,32 +599,78 @@ export const TransferApi = {
 
   createRequest: (body: RequestCreateBody) =>
     postJson<TransferRequest>(`${BASE}/requests`, body, "Failed to create request."),
+  // Edit a Pending request (its raiser or an admin): the whole form, as on create; the
+  // request number, raiser and status stay.
+  updateRequest: (id: number, body: RequestCreateBody) =>
+    putJson<TransferRequest>(`${BASE}/requests/${id}`, body, "Failed to save request."),
 
   // ── Transfer OUT create / update (docs 07 / 08) ──
+  // Record only: each box's stock row is copied onto the transfer, never deducted. Before
+  // anything is written the server refuses with a 409: a box whose latest transfer has not
+  // left it at this dispatch's From site (still in transit, received at another site, or
+  // written off as short; on update the transfer's own boxes don't count), and, for a
+  // request's dispatch, a box the request doesn't take (another article, another lot, or
+  // over the line's qty) or no box at all ("Scan at least one box before sending.").
   createTransfer: (body: TransferCreateBody) =>
     postJson<TransferDetail>(`${BASE}/transfers`, body, "Failed to create transfer."),
 
   updateTransfer: (id: number, body: TransferCreateBody) =>
     putJson<TransferDetail>(`${BASE}/transfers/${id}`, body, "Failed to update transfer."),
 
+  // ── Scan & send: save on scan ──
+  // Every box scanned for a request is saved at once. The first scan of an Approved request
+  // creates its transfer (as createTransfer would, with that one box; the transport is
+  // required, else 409) and marks the request Transferred; each later scan adds its box to
+  // that transfer. The server refuses (409) what createTransfer refuses — a box the request
+  // doesn't take, or one not available at the request's From site — and a box already on
+  // the transfer, or a transfer received at its destination. Only scanned boxes are in
+  // transit: the transfer is Dispatch once its boxes reach the request's qty, else Partial.
+  scanBox: (requestId: number, body: ScanBoxBody) =>
+    postJson<ScanResult>(`${BASE}/requests/${requestId}/scan`, body, "Failed to save the box."),
+
+  // Only for a request's transfer that has not been received. Taking off its last box (or
+  // all of them) deletes the transfer and puts the request back to Approved (cancelled).
+  removeTransferBoxes: (transferId: number, body: RemoveBoxesBody) =>
+    postJson<RemoveBoxesResult>(`${BASE}/transfers/${transferId}/remove-boxes`, body, "Failed to remove the box."),
+
+  // A box's weights on a request's transfer (422 when negative, or net > gross while gross > 0).
+  updateTransferBoxWeights: (transferId: number, body: BoxWeightsBody) =>
+    patchJson<SavedTransferBox>(`${BASE}/transfers/${transferId}/boxes`, body, "Failed to save the weights."),
+
+  // Vehicle, driver and approval authority of a request's transfer, each non-blank (422).
+  updateTransferTransport: (transferId: number, body: TransportBody) =>
+    patchJson<TransportResult>(`${BASE}/transfers/${transferId}/transport`, body, "Failed to save the transfer information."),
+
   // In-transit (pending) qty + per-challan breakdown for a lot+item (cold picker hover).
   pendingByLot: (p: { lot_no?: string; item_description?: string; from_site?: string; from_company?: string }) =>
     getJson<PendingByLotResult>(`${BASE}/pending-stock/by-lot${qs(p)}`, "Failed to load in-transit stock."),
 
-  // Box lookups for the transfer-OUT form (manual entry + TR-/BE- QR).
-  boxLookupByNumber: (company: string, boxNumber: number, transactionNo: string) =>
+  // Box lookups for the transfer-OUT form (manual entry by box number or box ID, and the box
+  // QR: an IMS TR- / BE- code or an ERP Material In label). Read only. The by-number and
+  // by-id lookups search the IMS stock tables first and ERP Material In (po_box) only when
+  // they miss; a Material In box number restarts in every lot section, so one that matches
+  // more than one box is a 409 asking for the box ID or the QR. The box's latest transfer
+  // decides whether it can go on this one, from `fromWarehouse` (the dispatch's From site):
+  // none, or Received at that site with the box acknowledged on the receipt, lets it go on
+  // (an onward transfer); one still in transit, Received at another site, or Received with
+  // the box written off as short is refused with a 409 naming the challan ("Box … is
+  // already on challan … (in transit)", "Box … was received at … on challan …; send it
+  // from …", "Box … did not arrive on challan … (written off as short)"). Without
+  // `fromWarehouse` any transfer refuses it. The thrown Error carries the server's text for
+  // the form to show.
+  boxLookupByNumber: (company: string, boxNumber: number, transactionNo: string, fromWarehouse?: string | null) =>
     getJson<BoxLookupResult>(
-      `${BASE}/box-lookup/${encodeURIComponent(company)}${qs({ box_number: boxNumber, transaction_no: transactionNo })}`,
+      `${BASE}/box-lookup/${encodeURIComponent(company)}${qs({ box_number: boxNumber, transaction_no: transactionNo, from_warehouse: fromWarehouse })}`,
       "Box not found.",
     ),
-  boxLookupById: (company: string, boxId: string, transactionNo: string) =>
+  boxLookupById: (company: string, boxId: string, transactionNo: string, fromWarehouse?: string | null) =>
     getJson<BoxLookupResult>(
-      `${BASE}/box-lookup-by-id/${encodeURIComponent(company)}${qs({ box_id: boxId, transaction_no: transactionNo })}`,
+      `${BASE}/box-lookup-by-id/${encodeURIComponent(company)}${qs({ box_id: boxId, transaction_no: transactionNo, from_warehouse: fromWarehouse })}`,
       "Box not found.",
     ),
-  bulkEntryBoxLookup: (company: string, boxId: string, transactionNo: string) =>
+  bulkEntryBoxLookup: (company: string, boxId: string, transactionNo: string, fromWarehouse?: string | null) =>
     getJson<BoxLookupResult>(
-      `${BASE}/bulk-entry-box-lookup/${encodeURIComponent(company)}${qs({ box_id: boxId, transaction_no: transactionNo })}`,
+      `${BASE}/bulk-entry-box-lookup/${encodeURIComponent(company)}${qs({ box_id: boxId, transaction_no: transactionNo, from_warehouse: fromWarehouse })}`,
       "Box not found.",
     ),
 };
@@ -570,14 +713,80 @@ export interface TransferCreateBody {
     driver_name?: string | null;
     approved_by?: string | null;
     remark?: string | null;
+    // Optional (backend migration 122 made the column nullable); a request's transfer has none.
     reason_code?: string | null;
   };
+  // With a request_id (on create, or the transfer's own on an edit) the server locks the
+  // dispatch to the approved request: the route must be the request's (else 409), and the
+  // lines, remark and reason code come from the request, so these lines are ignored (at
+  // least one is still required). The boxes must be ones the request's lines take (see
+  // transferBoxMatch.ts), and at least one, else 409. An edit never changes a transfer's
+  // request_id.
   lines: TransferLineCreateInput[];
   boxes?: TransferBoxCreateInput[];
   request_id?: number | null;
 }
 
-// Box-lookup response (shared shape for manual / TR- / BE- lookups).
+// ── Scan & send (save on scan) types ──
+export interface TransportBody {
+  vehicle_no: string;
+  driver_name: string;
+  approved_by: string;
+}
+
+export interface ScanBoxBody {
+  // Used only by the scan that creates the transfer (route, lines and remark are the
+  // request's); a scan that adds to it leaves its header as it is.
+  header: TransportBody & {
+    challan_no?: string | null;
+    stock_trf_date?: string | null; // DD-MM-YYYY
+  };
+  box: TransferBoxCreateInput;
+}
+
+/** A box as the transfer stores it. */
+export interface SavedTransferBox {
+  box_number: number;
+  box_id?: string | null;
+  transaction_no?: string | null;
+  article: string;
+  lot_number?: string | null;
+  batch_number?: string | null;
+  net_weight: string | number;
+  gross_weight: string | number;
+}
+
+export interface ScanResult {
+  transfer_id: number;
+  challan_no: string;
+  status: string;          // "Dispatch" | "Partial"
+  box_count: number;       // real boxes on the transfer
+  created: boolean;        // this scan created the transfer
+  box: SavedTransferBox;
+}
+
+export interface TransferBoxKey {
+  box_id: string;
+  transaction_no: string;
+}
+
+export type RemoveBoxesBody = { boxes: TransferBoxKey[] } | { all: true };
+
+export type RemoveBoxesResult =
+  | { cancelled: true; request_status: string }
+  | { cancelled: false; transfer_id: number; status: string; box_count: number };
+
+export interface BoxWeightsBody extends TransferBoxKey {
+  net_weight: number;
+  gross_weight: number;
+}
+
+export interface TransportResult extends TransportBody {
+  transfer_id: number;
+}
+
+// Box-lookup response (shared shape for manual / TR- / BE- lookups). A box found in ERP
+// Material In also carries the optional fields after `count`; an IMS box has none of them.
 export interface LookupBox {
   box_id?: string | null;
   transaction_no?: string | null;
@@ -596,6 +805,18 @@ export interface LookupBox {
   quantity_units?: number | string | null;
   packaging_type?: string | null;
   count?: number | null;
+  // "material_in" for a box from ERP Material In (po_box).
+  source?: string | null;
+  // The PO's company (cfpl / cdpl).
+  company?: string | null;
+  // The PO's warehouse (the site it was received into), by canonical name; null when blank.
+  inward_site?: string | null;
+  po_number?: string | null;
+  // The PO line's Tally item name, as the box's label prints it.
+  tally_name?: string | null;
+  // How the article was chosen: "exact" (an item-master name equal to the Tally name),
+  // "matched" (the item-master name the PO line was matched to) or "tally" (the Tally name).
+  article_basis?: string | null;
 }
 
 export interface BoxLookupResult {

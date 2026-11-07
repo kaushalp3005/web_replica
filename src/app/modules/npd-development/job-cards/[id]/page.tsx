@@ -15,7 +15,8 @@ import type { MeResponse } from "@/lib/auth";
 import {
   getDevJobCard, replaceDevLines, startDevJobCard, closeDevJobCard, cancelDevJobCard,
   addDevPhase, replacePhaseLines, startDevPhase, completeDevPhase, deleteDevPhase, promoteApproval,
-  promoteRejectByEmail, dispatchDevJobCard, replaceDevArticles, updateDevJobCardDetails,
+  promoteRejectByEmail, dispatchDevJobCard, dispatchAllRemaining, replaceDevArticles,
+  updateDevJobCardDetails, linkDevJobCardToRequest,
   type DevJobCard, type DevLine, type DevPhase, type DevPhaseCompleteBody, type PromoteGate,
   type DevArticle, type DevJobCardCloseBody, type DevJobCardDetailsInput, type DevDispatch,
 } from "@/lib/npd-dev";
@@ -24,6 +25,8 @@ import {
   type ArticleDraft, type DraftLine,
 } from "../../_article-editor";
 import { DevJcStatusPill } from "../../../sample/_shared";
+import { listRequisitions, type Requisition } from "@/lib/sample";
+import { linkCandidates, linkLabel, LINKABLE_STATUSES } from "@/lib/npd-link";
 import {
   ArticlePicker, UomSelect,
   BillingFields, billingError, billingPayload, billingFrom, EMPTY_BILLING, type BillingValue,
@@ -142,6 +145,8 @@ export default function DevJobCardDetailPage() {
       setBusy(false);
     }
   }, [load]);
+  // In flight: "Dispatch all remaining & print outpass" (see dispatchAllAndPrint).
+  const dispatchingAll = useRef(false);
 
   // Arriving from the email Reject button (?promote_reject=<gate>&email=<addr>) → pop the
   // reason dialog bound to that gate + email. Strip the params so a manual refresh doesn't
@@ -293,9 +298,43 @@ export default function DevJobCardDetailPage() {
     window.open(`/modules/npd-development/job-cards/${id}/gate-pass?dispatch=${dispatchIds.join(",")}`,
       "_blank", "noopener");
   }
-  // One combined outpass listing EVERY article (each its own line) — merge=1.
-  function openMergedOutpass() {
-    window.open(`/modules/npd-development/job-cards/${id}/gate-pass?merge=1`, "_blank", "noopener");
+  // Record EVERY remaining balance as dispatched, then print one outpass for exactly
+  // those parts. The old "Combined outpass" / "Download full outpass" buttons only
+  // printed, so the samples left while every article still read as pending.
+  async function dispatchAllAndPrint(recipient: string): Promise<boolean> {
+    // A second click before the re-render disables the button would send a second
+    // request: it finds nothing left, fails, and shows an error over a dispatch that
+    // went through. A ref, not state — it must hold within the same tick.
+    if (dispatchingAll.current) return false;
+    dispatchingAll.current = true;
+    // Open the tab NOW, inside the click: one opened after the await is a popup the
+    // browser blocks. It shows a holding line until the dispatch is recorded.
+    const tab = window.open("", "_blank");
+    if (tab) {
+      tab.opener = null;
+      try { tab.document.title = "Outpass"; tab.document.body.textContent = "Recording the dispatch…"; } catch { /* ignore */ }
+    }
+    setBusy(true); setError(null);
+    try {
+      const res = await dispatchAllRemaining(id, { recipient: recipient.trim() || undefined });
+      const url = `/modules/npd-development/job-cards/${id}/gate-pass?dispatch=${res.dispatch_ids.join(",")}`;
+      // Popup blocked, or the holding tab closed while we waited: the dispatch IS
+      // recorded, so print it here rather than leave it with no outpass.
+      if (tab && !tab.closed) tab.location.href = url;
+      else window.location.assign(url);
+      await load();
+      return true;
+    } catch (e) {
+      tab?.close();
+      setError(e instanceof Error ? e.message : "Dispatch failed");
+      // Show what is really on the card now: someone else may have dispatched it (the
+      // 409), or the server committed and only the response was lost.
+      await load();
+      return false;
+    } finally {
+      dispatchingAll.current = false;
+      setBusy(false);
+    }
   }
   // Edit the card's customer & dispatch header (DRAFT/IN_DEVELOPMENT) → PATCH + reload.
   // Returns success so the editor stays open (typed input intact) on a failed save.
@@ -398,6 +437,15 @@ export default function DevJobCardDetailPage() {
                 <Field label="Base BOM" value={jc.base_bom_id != null ? `${jc.base_bom_name ? `${jc.base_bom_name} ` : ""}#${jc.base_bom_id}` : "—"} />
                 {jc.source_requisition_id != null && (
                   <>
+                    <div>
+                      <dt className="text-[11px] text-[var(--text-muted)]">Request</dt>
+                      <dd>
+                        <button onClick={() => router.push(`/modules/sample/${jc.source_requisition_id}`)}
+                          className="text-[var(--text-primary)] font-medium tabular-nums underline decoration-dotted underline-offset-2 hover:text-[var(--aws-orange)]">
+                          {jc.source_request_id ?? jc.source_requisition_id}
+                        </button>
+                      </dd>
+                    </div>
                     <Field label="Business head" value={jc.source_requestor_name ?? "—"} />
                     <Field label="Sales POC" value={jc.source_sales_poc_name ?? jc.source_sales_poc_email ?? "—"} />
                   </>
@@ -410,6 +458,13 @@ export default function DevJobCardDetailPage() {
                 <p className="mt-2 text-[12px] text-[var(--aws-error)]">Cancelled — {jc.cancellation_reason}</p>
               )}
             </section>
+
+            {/* A card made from the menu rather than a request's Develop has no request.
+                Linking it lets the request show this card and close once it's dispatched. */}
+            {caps.canNpd && jc.source_requisition_id == null && jc.status !== "CANCELLED" && (
+              <LinkRequestPanel busy={busy}
+                onLink={(reqId) => run(() => linkDevJobCardToRequest(id, reqId))} />
+            )}
 
             {/* Customer & dispatch — editable while DRAFT/IN_DEVELOPMENT (enter/adjust here),
                 else read-only. Set on the requisition by BD and inherited on Develop. */}
@@ -762,20 +817,15 @@ export default function DevJobCardDetailPage() {
                     {jc.dispatch_mat_doc_id ? ` · GI ${jc.dispatch_mat_doc_id}` : ""}
                   </p>
                 )}
-                {/* Permanent outpass — A4 Delivery Challan + Gate Pass for the FG sample.
-                    npd_team + admin only; BH/IM may view the card but not download.
-                    Hidden once any partial out exists — the per-part outpasses below
-                    then authorize movement, so a full-qty doc can't double-count. */}
-                {caps.canOutpass && canGatePass && (jc.dispatches?.length ?? 0) === 0 && (
-                <div className="mt-3">
-                  <button onClick={() => openGatePass()}
-                    className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium hover:bg-[var(--aws-orange-hover)] inline-flex items-center gap-1.5">
-                    <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
-                    Download full outpass
-                  </button>
-                </div>
-                )}
               </Card>
+            )}
+
+            {/* Dispatch everything still to send + print ONE outpass for it. Replaces the
+                print-only "Download full outpass" / "Combined outpass — all articles"
+                buttons, which let samples leave without recording a dispatch. */}
+            {jc.status === "CLOSED" && caps.canOutpass && canGatePass && (
+              <DispatchAllCard jc={jc} busy={busy} perArticle={hasArticles}
+                onDispatchAll={dispatchAllAndPrint} onPrintAll={openSelectedOutpass} />
             )}
 
             {/* Partial out — issue the finalized FG sample in parts, each part its
@@ -791,16 +841,6 @@ export default function DevJobCardDetailPage() {
                 finalized output from its own FG batch, each part its own outpass. */}
             {jc.status === "CLOSED" && caps.canOutpass && canGatePass && hasArticles && (
               <>
-                {/* One combined outpass for the whole card — every article on its own line. */}
-                {(jc.articles ?? []).some((a) => a.article_id != null && Number(a.output_qty) > 0) && (
-                  <div className="flex justify-end">
-                    <button onClick={openMergedOutpass}
-                      className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:bg-[var(--surface-subtle)] inline-flex items-center gap-1.5">
-                      <svg viewBox="0 0 24 24" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="M7 10l5 5 5-5" /><path d="M12 15V3" /></svg>
-                      Combined outpass — all articles
-                    </button>
-                  </div>
-                )}
                 {(jc.articles ?? []).filter((a) => a.article_id != null).map((a) => (
                   <PerArticleDispatchPanel key={a.article_id} jc={jc} article={a} busy={busy}
                     onDispatch={doDispatchArticle} onOutpass={openGatePass}
@@ -875,6 +915,44 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
 }
 function Field({ label, value }: { label: string; value: string }) {
   return <div><dt className="text-[11px] text-[var(--text-muted)]">{label}</dt><dd className="text-[var(--text-primary)]">{value}</dd></div>;
+}
+
+// Pick the open NPD / customer-trial request this card was developed for. Requests still
+// waiting for a card are listed first; one that already has a card says so.
+function LinkRequestPanel({ busy, onLink }: { busy: boolean; onLink: (requisitionId: number) => void }) {
+  const [options, setOptions] = useState<Requisition[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [choice, setChoice] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    listRequisitions({ sample_types: "NPD,TRIAL", statuses: LINKABLE_STATUSES.join(","), limit: 200 })
+      .then((rows) => { if (!cancelled) setOptions(linkCandidates(rows)); })
+      .catch((e) => { if (!cancelled) setLoadError(e instanceof Error ? e.message : "Couldn't load requests"); });
+    return () => { cancelled = true; };
+  }, []);
+  return (
+    <Card title="Request">
+      <p className="text-[12px] text-[var(--text-muted)] mb-2">
+        Not linked to a request. Link the request this card was developed for: the request then shows
+        this card, and closes itself once the sample has been dispatched.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <select className="form-input !w-auto max-w-full" value={choice} aria-label="Request to link"
+          onChange={(e) => setChoice(e.target.value)}>
+          <option value="">
+            {options == null ? (loadError ? "Couldn't load requests" : "Loading requests…")
+              : options.length ? "Select a request…" : "No open requests"}
+          </option>
+          {(options ?? []).map((r) => <option key={r.id} value={r.id}>{linkLabel(r)}</option>)}
+        </select>
+        <button disabled={busy || !choice} onClick={() => onLink(Number(choice))}
+          className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">
+          {busy ? "Linking…" : "Link request"}
+        </button>
+      </div>
+      {loadError && <p className="mt-1 text-[12px] text-[var(--aws-error)]">{loadError}</p>}
+    </Card>
+  );
 }
 
 // Customer + dispatch planning card — READ-ONLY on the job card. These are set on
@@ -1403,9 +1481,10 @@ interface DispatchForm {
 // The print is deliberately PER PART, never per balance: each part fired its own 265
 // goods issue, and its outpass (No <job card>-<seq>) is the document that authorizes
 // that movement. A single full-quantity doc alongside them would authorize the same
-// stock twice — which is why the "Download full outpass" button disappears as soon as
-// the first part is dispatched. Ticking several parts prints ONE document covering
-// exactly those (see lib/outpass).
+// stock twice, and one printed BEFORE any dispatch authorizes stock the system still
+// holds in R&D — so there is no such doc: "Dispatch all remaining & print outpass"
+// records the parts first. Ticking several parts prints ONE document covering exactly
+// those (see lib/outpass).
 function DispatchLedger({ dispatches, uom, total, remaining, fmt, onPrint, onPrintSelected, form, note }: {
   dispatches: DevDispatch[]; uom: string; total: number; remaining: number;
   fmt: (v: number) => string; onPrint: (dispatchId: number) => void;
@@ -1576,6 +1655,125 @@ function DispatchLedger({ dispatches, uom, total, remaining, fmt, onPrint, onPri
         )}
       </table>
     </div>
+  );
+}
+
+// ── Dispatch all remaining + ONE outpass for it ──────────────────────────────
+// Records every balance still to send (one part per article, all or nothing on the
+// server) and only then prints the outpass for exactly those parts — printing is never
+// the way stock leaves. Once everything is out it offers the combined print of every
+// recorded part instead.
+function DispatchAllCard({ jc, busy, perArticle, onDispatchAll, onPrintAll }: {
+  jc: DevJobCard; busy: boolean; perArticle: boolean;
+  onDispatchAll: (recipient: string) => Promise<boolean>;
+  onPrintAll: (dispatchIds: number[]) => void;
+}) {
+  const [recipient, setRecipient] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const f = (v: number) => Number(v.toFixed(3)).toLocaleString("en-IN");
+  const balance = (out: unknown, sentTotal: unknown, rem: unknown, ds: DevDispatch[] | undefined) => {
+    const o = Number(out) || 0;
+    const sent = sentTotal != null ? Number(sentTotal) : (ds ?? []).reduce((s, d) => s + (Number(d.qty) || 0), 0);
+    return rem != null ? Number(rem) : o - sent;
+  };
+  // What is still to send, per balance — the same figures the panels below show.
+  const left = perArticle
+    ? (jc.articles ?? []).filter((a) => a.article_id != null && Number(a.output_qty) > 0).map((a) => ({
+        name: a.name ?? "—", uom: a.output_uom || jc.uom || "kg",
+        qty: balance(a.output_qty, a.dispatched_total, a.remaining_qty, a.dispatches),
+      }))
+    : Number(jc.output_qty) > 0 ? [{
+        name: jc.fg_sku_name || jc.title || "—", uom: jc.output_uom || jc.uom || "kg",
+        qty: balance(jc.output_qty, jc.dispatched_total, jc.remaining_qty, jc.dispatches),
+      }] : [];
+  // Same 3-dp granularity the server dispatches at.
+  const pending = left.filter((l) => Math.round(l.qty * 1000) > 0);
+  const parts = (jc.dispatches ?? []).map((d) => d.dispatch_id);
+  if (pending.length === 0 && parts.length === 0) return null;
+  const pendingLabel = formatTotals(sumByUom(pending), f);
+  const title = perArticle ? "Dispatch & outpass — all articles" : "Dispatch & outpass";
+
+  if (pending.length === 0) {
+    return (
+      <Card title={title}>
+        <div className="flex flex-wrap items-center gap-3">
+          <p className="text-[13px] text-[#1d8102] flex-1">Everything on this job card has been dispatched.</p>
+          <button onClick={() => onPrintAll(parts)}
+            title="One outpass listing every recorded part, each at its own quantity"
+            className="h-9 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:bg-[var(--surface-subtle)] inline-flex items-center gap-1.5">
+            {PRINTER_ICON}
+            Print combined outpass — all {parts.length} part{parts.length === 1 ? "" : "s"}
+          </button>
+        </div>
+      </Card>
+    );
+  }
+
+  return (
+    <Card title={title}>
+      <p className="text-[12px] text-[var(--text-muted)] mb-2">
+        Records everything still to send as dispatched — issued out of R&amp;D stock, one part per
+        article — then prints one outpass for it. Use the panels below to send part of an article instead.
+      </p>
+      <table className="w-full border-collapse text-[13px] mb-3">
+        <thead>
+          <tr className="bg-[var(--surface-subtle)]">
+            <th className={`${DHEAD} text-left`}>Still to send</th>
+            <th className={`${DHEAD} text-right w-40`}>Qty</th>
+          </tr>
+        </thead>
+        <tbody>
+          {pending.map((l, i) => (
+            <tr key={i}>
+              <td className={`${DCELL} py-1.5`}>{l.name}</td>
+              <td className={`${DCELL} py-1.5 text-right tabular-nums`}>
+                {f(l.qty)} <span className="text-[11px] text-[var(--text-muted)]">{l.uom}</span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {!confirming ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <input className="form-input !w-64" value={recipient} placeholder="Recipient / driver…"
+            aria-label="Recipient / driver" onChange={(e) => setRecipient(e.target.value)} />
+          <button disabled={busy} onClick={() => setConfirming(true)}
+            className="h-9 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)] inline-flex items-center gap-1.5">
+            {PRINTER_ICON}
+            Dispatch all remaining &amp; print outpass
+          </button>
+          {parts.length > 0 && (
+            <button onClick={() => onPrintAll(parts)}
+              className="h-9 px-3 text-[12px] text-[var(--text-secondary)] hover:underline">
+              Print parts already sent ({parts.length})
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="rounded-md border border-[var(--aws-orange)] bg-[#fff8f0] p-3">
+          <p className="text-[13px] text-[var(--text-primary)]">
+            Dispatch <strong>{pendingLabel}</strong> ({pending.length} {pending.length === 1 ? "part" : "parts"})
+            to <strong>{recipient.trim() || "no recipient named"}</strong>?
+          </p>
+          <p className="text-[12px] text-[var(--text-muted)] mt-1">
+            This issues the stock out of R&amp;D and marks it as out on this job card. It can&apos;t be undone.
+          </p>
+          <div className="flex gap-2 mt-3">
+            <button disabled={busy}
+              onClick={async () => {
+                if (await onDispatchAll(recipient)) { setConfirming(false); setRecipient(""); }
+              }}
+              className="h-8 px-4 rounded-[2px] bg-[var(--aws-orange)] text-white text-[13px] font-medium disabled:opacity-50 hover:bg-[var(--aws-orange-hover)]">
+              {busy ? "Dispatching…" : "Confirm & print outpass"}
+            </button>
+            <button disabled={busy} onClick={() => setConfirming(false)}
+              className="h-8 px-4 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[13px] hover:bg-[var(--surface-subtle)]">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

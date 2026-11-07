@@ -7,10 +7,12 @@ import { useEffect, useId, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import { useSessionCache } from "@/lib/session-state";
 import { COMPANIES, type Company, type CRStatus, type CRWithDetails } from "@/lib/customer-returns";
-import { WAREHOUSES } from "@/lib/sample";
 import { getDisplayWarehouseName } from "@/lib/transferBuildSummary";
+import { fmtCrDate, fmtCrDateTime } from "./_dates";
+import { crStatusLabel } from "./_approvalFlow";
 
-export { WAREHOUSES };
+// The Factory Unit choices (the shared site table's grant codes; _factoryUnit).
+export { FACTORY_UNITS as WAREHOUSES } from "./_factoryUnit";
 
 export function cx(...parts: (string | false | null | undefined)[]): string {
   return parts.filter(Boolean).join(" ");
@@ -66,10 +68,15 @@ export function CompanyChip({ company }: { company: Company }) {
   );
 }
 
+// The status labels ('Submitted' — approved, then boxes saved — is shown as
+// "Approved · Boxed") live in the node-tested _approvalFlow.ts, so this badge and
+// the approval screens' sentences use the one wording.
+export { CR_STATUS_LABEL, crStatusLabel, isCrApproved } from "./_approvalFlow";
+
 const STATUS_STYLE: Record<CRStatus, string> = {
   Pending: "bg-[#fdf6e3] text-[#8a6d1a] border-[#ecd9a3]",
   Approved: "bg-[#eaf6ed] text-[var(--text-success)] border-[#b6dbb1]",
-  Submitted: "bg-[#eaf0fb] text-[#2c5fa8] border-[#c3d4f0]",
+  Submitted: "bg-[#eaf6ed] text-[var(--text-success)] border-[#b6dbb1]", // approved, then boxed
   Rejected: "bg-[#fbeced] text-[var(--aws-error)] border-[#f0c0c4]",
   "On Hold": "bg-[#f3eefb] text-[#6b3fa0] border-[#d9c8f0]",
 };
@@ -90,9 +97,12 @@ function StatusIcon({ status, className }: { status: CRStatus; className?: strin
 export function StatusBadge({ status, icon = true }: { status: CRStatus; icon?: boolean }) {
   const cls = STATUS_STYLE[status] ?? STATUS_STYLE.Pending;
   return (
-    <span className={cx("inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded border", cls)}>
+    <span
+      title={status === "Submitted" ? "Approved, then boxes saved (status “Submitted”)" : undefined}
+      className={cx("inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded border", cls)}
+    >
       {icon && <StatusIcon status={status} />}
-      {status}
+      {crStatusLabel(status)}
     </span>
   );
 }
@@ -121,25 +131,15 @@ export function InfoBanner({ children }: { children: React.ReactNode }) {
   );
 }
 
-// Deterministic date formatters (no date-fns in this app; native Intl only).
+// Date formatters (no date-fns in this app; native Intl only). Always the IST day
+// and clock, whatever the browser's zone (_dates.ts): the API's timestamps carry
+// their offset, and a legacy offset-less one is UTC, not local time.
 export function fmtDate(v: string | null | undefined): string {
-  if (!v) return "—";
-  const d = new Date(v);
-  if (isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+  return fmtCrDate(v) || "—";
 }
 
 export function fmtDateTime(v: string | null | undefined): string {
-  if (!v) return "—";
-  const d = new Date(v);
-  if (isNaN(d.getTime())) return "—";
-  return d.toLocaleString("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return fmtCrDateTime(v) || "—";
 }
 
 export function num(v: string | number | null | undefined): number {
@@ -201,11 +201,9 @@ function CrField({ label, value }: { label: string; value?: string | null }) {
 }
 
 // Cold-storage warehouses (legacy parity): the cold-only line fields
-// (lot_number/item_mark/spl_remarks/vakkal) show only for these factory units.
-const COLD_WAREHOUSES = new Set(["D-39", "D-514", "Rishi", "Supreme", "Eskimo"]);
-export function isColdWarehouse(code: string | null | undefined): boolean {
-  return !!code && COLD_WAREHOUSES.has(code.trim());
-}
+// (lot_number/item_mark/spl_remarks/vakkal) show only for a cold-store factory
+// unit, under any spelling of the store ("D-39", "Savla D-39", "Supreme Cold").
+export { isColdFactoryUnit as isColdWarehouse } from "./_factoryUnit";
 
 // Accessible confirm dialog (role=dialog/aria-modal + labelled title, initial
 // focus on Cancel, Escape-to-close unless busy, Tab focus-trap). Shared by the
