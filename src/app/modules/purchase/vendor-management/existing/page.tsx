@@ -13,12 +13,18 @@
 //
 // Approve (POST /{id}/approve) and Delete (DELETE /{id}, soft) are inline row
 // actions. "View" (detail drill-in) is the next page to be ported.
+//
+// "Download Excel" (header) is separate from the list:
+//   GET /api/v1/vendors/export     — whole vendor master as .xlsx; takes no
+//                                    parameters, so it ignores the filters and
+//                                    search on screen.
 
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useRequireAuth, useHasPermission } from "@/lib/user";
 import { BackLink } from "@/components/BackLink";
 import { PurchaseChrome } from "../../_chrome";
+import { useSupplierMasterDownload } from "../_useSupplierMasterDownload";
 import {
   VENDOR_STATUS,
   getLookups,
@@ -89,11 +95,12 @@ export default function ExistingVendorsPage(): React.JSX.Element {
   const [errorCode, setErrorCode] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   // `error`/`errorCode` are LOAD-time failures only — they drive the table
-  // empty-state. `actionError` is approve/delete failures — surfaced in the top
-  // strip only, so a failed row action never blanks the already-loaded list.
+  // empty-state. `actionError` is approve/delete/download failures — surfaced in
+  // the top strip only, so a failed action never blanks the already-loaded list.
   const [actionError, setActionError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const { downloading, download } = useSupplierMasterDownload();
 
   const mode: "list" | "search" = searchQuery ? "search" : "list";
 
@@ -241,6 +248,17 @@ export default function ExistingVendorsPage(): React.JSX.Element {
     }
   }, []);
 
+  // Whole vendor master as .xlsx — not the rows in view: the export takes no
+  // parameters, so filters and search don't apply. download() never throws; its
+  // message goes to the same two strips the row actions use.
+  const onDownload = useCallback(async () => {
+    setActionError(null);
+    setInfo(null);
+    const result = await download();
+    if (result.ok) setInfo(result.message);
+    else setActionError(result.message);
+  }, [download]);
+
   // ── Derived summary counts (over the rows currently in view) ──
   // Memoized so a search keystroke (searchInput change) doesn't re-run four O(n)
   // passes over an up-to-1000-row result set.
@@ -272,30 +290,45 @@ export default function ExistingVendorsPage(): React.JSX.Element {
         <BackLink parentHref={HUB_HREF} label="Vendor Management" />
       </div>
 
-      {/* Header */}
-      <div className="flex items-start justify-between gap-3 mb-5">
-        <div>
+      {/* Header. Wraps: on a phone the two buttons drop below the title instead of
+          pushing "Add Vendor" off the right edge. */}
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-5">
+        <div className="flex-1 min-w-[220px]">
           <p className="text-[11px] uppercase tracking-wide font-semibold text-[var(--text-muted)]">Vendor Management</p>
           <h1 className="text-[22px] leading-[28px] font-semibold text-[var(--text-primary)]">Existing Vendors</h1>
           <p className="text-[13px] text-[var(--text-secondary)] mt-1">
             Vendor master — search, filter, and manage compliance, banking and contracts.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => router.push(NEW_HREF)}
-          className="shrink-0 h-9 px-4 text-[13px] font-semibold rounded-[2px] bg-[var(--aws-navy)] text-white hover:brightness-95 flex items-center gap-2"
-        >
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
-            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-          Add Vendor
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onDownload}
+            disabled={downloading}
+            title="Download every vendor as an Excel file in the MIS Master – Suppliers data format"
+            className="h-9 px-4 text-[13px] font-semibold whitespace-nowrap rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[var(--text-primary)] hover:border-[var(--aws-navy)] disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          >
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden>
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            {downloading ? "Preparing…" : "Download Excel"}
+          </button>
+          <button
+            type="button"
+            onClick={() => router.push(NEW_HREF)}
+            className="h-9 px-4 text-[13px] font-semibold whitespace-nowrap rounded-[2px] bg-[var(--aws-navy)] text-white hover:brightness-95 flex items-center gap-2"
+          >
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+              <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            Add Vendor
+          </button>
+        </div>
       </div>
 
       {/* Feedback strips. Load/forbidden errors live in the table body (below);
-          the top strip is reserved for row-action (approve/delete) errors so the
-          same message is never rendered/announced twice. */}
+          the top strip is reserved for action (approve/delete/download) errors so
+          the same message is never rendered/announced twice. */}
       {actionError && (
         <p role="alert" aria-live="assertive" className="mb-3 text-[12px] text-[var(--aws-error)] bg-[#fdf3f1] border border-[#f5c6bc] rounded px-3 py-2">
           {actionError}

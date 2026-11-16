@@ -1,13 +1,17 @@
 "use client";
 
 // Vendor Management landing. Mirrors purchase/page.tsx card pattern. The
-// onboarding wizard is the entry point ported to the web so far; existing-
-// vendors / detail / evaluation still live only in the desktop app.
+// onboarding wizard and the existing-vendors list are navigation cards; the
+// third card downloads the whole vendor master as .xlsx
+// (GET /api/v1/vendors/export) instead of navigating, and its result message
+// is shown under the grid. Evaluation still lives only in the desktop app.
 
+import { useCallback, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useRequireAuth, useRequireModuleAccess } from "@/lib/user";
 import { BackLink } from "@/components/BackLink";
 import { PurchaseChrome } from "../_chrome";
+import { useSupplierMasterDownload, type SupplierMasterDownloadResult } from "./_useSupplierMasterDownload";
 
 type SubModule = { title: string; description: string; route?: string; soon?: boolean };
 
@@ -33,6 +37,15 @@ export default function VendorManagementLandingPage(): React.JSX.Element {
   useRequireAuth(router.replace);
   // Stores (store_head) is scoped to Material In only — deep links bounce.
   useRequireModuleAccess("purchase/vendor-management", router.replace);
+
+  // Download card — fires only on click (still no on-mount fetch), so the
+  // render-through above stays safe. download() never throws.
+  const { downloading, download } = useSupplierMasterDownload();
+  const [downloadResult, setDownloadResult] = useState<SupplierMasterDownloadResult | null>(null);
+  const onDownload = useCallback(async () => {
+    setDownloadResult(null);
+    setDownloadResult(await download());
+  }, [download]);
 
   return (
     <PurchaseChrome title="Vendor Management">
@@ -71,7 +84,39 @@ export default function VendorManagementLandingPage(): React.JSX.Element {
             <p className="text-[12px] text-[var(--text-secondary)]">{m.description}</p>
           </button>
         ))}
+        {/* Download card — same shell as the cards above, but it downloads
+            instead of navigating. */}
+        <button
+          type="button"
+          disabled={downloading}
+          onClick={onDownload}
+          className={[
+            "text-left bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.18)] p-4 transition",
+            downloading
+              ? "opacity-60 cursor-not-allowed"
+              : "hover:border-[var(--aws-navy)] hover:shadow-[0_2px_6px_rgba(0,28,36,0.18)]",
+          ].join(" ")}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            <h2 className="text-[14px] font-semibold text-[var(--text-primary)]">
+              {downloading ? "Preparing…" : "Download vendor master"}
+            </h2>
+          </div>
+          <p className="text-[12px] text-[var(--text-secondary)]">
+            Excel file of every vendor, in the MIS Master – Suppliers data format.
+          </p>
+        </button>
       </div>
+
+      {downloadResult && (downloadResult.ok ? (
+        <p role="status" aria-live="polite" className="mt-3 text-[12px] text-[var(--text-success)] bg-[#eaf6ed] border border-[#b6dbb1] rounded px-3 py-2">
+          {downloadResult.message}
+        </p>
+      ) : (
+        <p role="alert" aria-live="assertive" className="mt-3 text-[12px] text-[var(--aws-error)] bg-[#fdf3f1] border border-[#f5c6bc] rounded px-3 py-2">
+          {downloadResult.message}
+        </p>
+      ))}
     </PurchaseChrome>
   );
 }

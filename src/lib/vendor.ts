@@ -566,6 +566,36 @@ export async function searchVendors(params: VendorSearchParams): Promise<VendorS
   return res.json();
 }
 
+/** Download the whole vendor master as .xlsx (GET /vendors/export), in the
+ *  "MIS Master – Suppliers data" layout the backend builds.
+ *
+ *  The blob is fetched through apiFetch (rather than pointing the browser at the
+ *  URL) because the endpoint needs the bearer token, which a plain navigation
+ *  would not carry.
+ *
+ *  Takes no arguments on purpose: the endpoint accepts no query parameters and
+ *  always exports every vendor, whatever filters or search are on screen. */
+export async function downloadSupplierMasterExcel(): Promise<{ rows: number; filename: string }> {
+  const res = await apiFetch(`${VENDORS_PATH}/export`);
+  // Branch on res.ok BEFORE res.blob(): readVendorError consumes the body as JSON.
+  if (!res.ok) throw await readVendorError(res, "Download failed");
+  const rows = Number(res.headers.get("X-Total-Rows") ?? 0);
+  const blob = await res.blob();
+  const cd = res.headers.get("Content-Disposition") ?? "";
+  const filename = /filename="([^"]+)"/.exec(cd)?.[1] ?? "MIS Master_Suppliers_data.xlsx";
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Revoked on the next tick: revoking synchronously can cancel the download in
+  // some browsers before it has read the blob.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { rows, filename };
+}
+
 // POST /vendors/{id}/approve — SCM-Head sign-off. 409 (ApprovalError) surfaces
 // as a VendorApiError whose `code` is the specific pre-condition failure
 // (e.g. no_primary_banking, kyc_incomplete).
