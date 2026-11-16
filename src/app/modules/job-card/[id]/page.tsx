@@ -604,17 +604,6 @@ const REJECTION_OPTIONS: { value: string; label: string }[] = [
   { value: "other",           label: "Other" },
 ];
 
-// R11/C7 — packing-stage detection mirrors the backend's is_packing_stage
-// helper at server_replica/app/modules/production/services/job_card_v2.py:91.
-// Only packing stages may record EGA (extra giveaway) or PM variance.
-const PACKING_STAGE_TOKENS = ["packaging", "packing"] as const;
-
-function isPackingStageJc(stage: string | null | undefined): boolean {
-  if (!stage) return false;
-  const s = stage.toLowerCase();
-  return PACKING_STAGE_TOKENS.some((t) => s.includes(t));
-}
-
 // ── ONE definition of "this card can handle packaging material" ────────────
 // Every PM surface keys off this: the Material Consumption grid, the PM
 // store-return list, the PM Variance panel and Extra Giveaway. Mirrored
@@ -622,11 +611,9 @@ function isPackingStageJc(stage: string | null | undefined): boolean {
 // an input the server will reject — previously the EGA field was offered on
 // 119 cards where the server refused the row.
 //
-// isPackingStageJc above answers a DIFFERENT question and is deliberately
-// kept narrow. Rule of thumb: this predicate widens a CAPABILITY (which inputs
-// appear), so a broad answer can only unblock work; isPackingStageJc gates a
-// REQUIREMENT (you must name the batch before opening it) and plan step
-// ordering, where widening would block operators who can work today.
+// (The narrow isPackingStageJc that used to sit here only gated a batch-name
+// requirement on Open Batch. That requirement is gone — every batch gets its
+// auto-generated 8-digit code — so the helper went with it.)
 type PmStageFields = {
   process_name?: string | null;
   stage?: string | null;
@@ -3953,35 +3940,26 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   const [batchActionMsg, setBatchActionMsg] = useState<
     { kind: "ok" | "err"; msg: string } | null
   >(null);
-  // 072: operator-typed batch name for the next Open Batch. Blank → server
-  // keeps NULL and the batch shows as its 8-digit code.
-  const [newBatchLabel, setNewBatchLabel] = useState("");
-  // Packing batches must be named (labels drive QR / label traceability);
-  // every other stage opens a nameless batch identified by its 8-digit code.
-  const isPackingStage = isPackingStageJc(detail.stage);
-
+  // Open Batch takes no name on any stage: every batch is identified by its
+  // auto-generated 8-digit code. (Packing stages used to demand a typed name;
+  // nothing downstream — box labels, QR, reports — reads it, and its required
+  // input sat inside the Accounting form, so it blocked saving the figures of
+  // an already-open batch.) A name can still be added later with Rename.
   const doOpenBatch = useCallback(async () => {
-    const label = newBatchLabel.trim();
-    // Name is mandatory only for packing batches; other stages open nameless.
-    if (isPackingStage && !label) {
-      setBatchActionMsg({ kind: "err", msg: "Enter a batch name before opening a batch." });
-      return;
-    }
     // Confirm before creating — a new batch is not trivially undoable.
-    if (!window.confirm(label ? `Open a new batch named "${label}"?` : "Open a new batch?")) return;
+    if (!window.confirm("Open a new batch?")) return;
     setBatchActionMsg(null);
     setBatchActionBusy(true);
     try {
       const res = await apiFetch(
         `/api/v1/production/job-cards-v2/${detail.job_card_id}/batches/open`,
-        { method: "POST", body: JSON.stringify(label ? { batch_label: label } : {}) },
+        { method: "POST", body: JSON.stringify({}) },
       );
       if (!res.ok) {
         throw new Error(
           await readApiErrorMessage(res, `HTTP ${res.status}`),
         );
       }
-      setNewBatchLabel("");
       setBatchActionMsg({ kind: "ok", msg: "Batch opened." });
       // R10 — explicit refresh; the [detail.job_card_id]-only batches
       // effect won't pick up the new batch otherwise. Run both: the
@@ -3995,19 +3973,16 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
     } finally {
       setBatchActionBusy(false);
     }
-  }, [detail.job_card_id, reloadAll, refetchBatches, newBatchLabel, isPackingStage]);
+  }, [detail.job_card_id, reloadAll, refetchBatches]);
 
   // 072: rename a batch (so a batch — including legacy ones — can be given the
-  // free-text name shown in the batch table). Acts on the passed row.
+  // free-text name shown in the batch table). Acts on the passed row. A name is
+  // optional: blank clears it and the batch shows as its 8-digit code again
+  // (the rename route treats blank as "clear").
   const doRenameBatch = useCallback(async (batch: BatchRow) => {
-    const input = window.prompt("Batch name:", batch.batch_label ?? "");
+    const input = window.prompt("Batch name (leave blank to show the 8-digit code):", batch.batch_label ?? "");
     if (input === null) return; // cancelled
     const label = input.trim();
-    // Batch name is mandatory — a rename cannot blank it out.
-    if (!label) {
-      setBatchActionMsg({ kind: "err", msg: "Batch name cannot be empty." });
-      return;
-    }
     setBatchActionMsg(null);
     setBatchActionBusy(true);
     try {
@@ -5322,7 +5297,6 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   // gated on packing-stage detection (PM stocks are only consumed there).
   // EGA is now consolidated (no per-article picker), so the rmArticles
   // memo that previously filtered for the dropdown is gone.
-  // (isPackingStage is declared once, up by the batch-open handler.)
   // C3: any operational input is disabled when locked. We compute this
   // OR with submitting so the save-in-flight state still wins (you can't
   // edit mid-flight either).
@@ -5531,38 +5505,19 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
             />
           </dl>
         ) : null}
-        {/* Open a new batch — name is mandatory for packing stages only.
-            Hidden when the role lacks overview/start (batch-open). */}
+        {/* Open a new batch — no name needed on any stage; the batch gets its
+            auto-generated 8-digit code. Hidden when the role lacks
+            overview/start (batch-open). */}
         {(detail.status !== "completed" || isAdmin) && canStartBatch ? (
           <div className="flex items-center gap-2 mb-3 flex-wrap">
             <label className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)] sm:w-[110px]">
               New batch
             </label>
-            {isPackingStage ? (
-              <input
-                type="text"
-                value={newBatchLabel}
-                onChange={(e) => setNewBatchLabel(e.target.value)}
-                disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked}
-                placeholder="Batch name (required)"
-                maxLength={120}
-                required
-                aria-label="Batch name for the new batch"
-                // w-[220px] used to sit here next to inputCls's own w-full.
-                // Tailwind resolves that by stylesheet order, where w-full
-                // comes last and wins, so the field has always been full
-                // width — the 220px was dead and is gone. max-sm:h-9 is a
-                // thumb-sized target on a phone and beats inputCls's h-8
-                // (variants are emitted after plain utilities); sm and up is
-                // untouched.
-                className={`${inputCls} h-7 max-sm:h-9 text-[12px]`}
-              />
-            ) : null}
             <button
               type="button"
               onClick={() => void doOpenBatch()}
-              disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked || (isPackingStage && !newBatchLabel.trim())}
-              title={lifecycleLocked ? "Start the job card first" : (isPackingStage && !newBatchLabel.trim()) ? "Enter a batch name first" : undefined}
+              disabled={batchActionBusy || submitting || lock.isLocked || lifecycleLocked}
+              title={lifecycleLocked ? "Start the job card first" : undefined}
               className="h-7 max-sm:h-9 px-3 text-[11px] font-semibold rounded-[2px] border bg-[var(--aws-orange)] border-[var(--aws-orange-active)] text-white hover:bg-[var(--aws-orange-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {batchActionBusy ? "…" : "Open Batch"}
@@ -5578,7 +5533,7 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
           <div className="text-[12px] text-[var(--text-muted)] italic mb-2">loading batches…</div>
         ) : batches.length === 0 ? (
           <div className="text-[12px] text-[var(--text-secondary)] mb-2">
-            No batches yet — {isPackingStage ? <>enter a name and click <strong>Open Batch</strong></> : <>click <strong>Open Batch</strong></>} to create the first one.
+            No batches yet — click <strong>Open Batch</strong> to create the first one.
           </div>
         ) : (
           /* Two layouts, ONE data source (batchListRows above).
@@ -6534,8 +6489,8 @@ function AccountingTab({ detail, onReload, onJumpToBoxes }: { detail: JobCardDet
   );
 }
 
-// R11/C7 — `isFinalStageJc` was retired; EGA now keys on packing-stage
-// detection (`isPackingStageJc`) so non-final packing stages also accept
+// R11/C7 — `isFinalStageJc` was retired; EGA now keys on the PM-bearing
+// stage check (`isPmStageJc`) so non-final packing stages also accept
 // extra-giveaway entries, and final non-packing stages don't.
 
 // ── C5: Accounting Summary card + variance chip ──────────────────────────
