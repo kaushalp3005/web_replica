@@ -39,10 +39,11 @@ export const SECTIONS: SectionDef[] = [
   {
     key: "apmc",
     label: "APMC + Non-APMC",
+    // Uploaded company by company, like CD-CF: one customer can be here under each.
     dimensions: [
+      { field: "division", label: "CD - CF", title: "By CD - CF", blank: "Not set", pill: true },
       { field: "type", label: "Type", title: "By type", blank: "No type", pill: true },
-      { field: "broker", label: "Broker", title: "By broker", blank: "No broker" },
     ],
-    searchPlaceholder: "Customer, type or broker",
+    searchPlaceholder: "Customer or type",
   },
 ];

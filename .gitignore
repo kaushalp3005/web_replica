@@ -54,6 +54,8 @@ next-env.d.ts
 *.zip
 
 # Debtors Collection DPD data (customer balances), written by
-# `npm run dpd:import`. This repo is public — never commit it, and don't deploy
-# it: anything under public/ is served to anyone, logged in or not.
+# `npm run dpd:import` and loaded into the collections database from there.
+# This repo is public — never commit it. It lives outside public/ so it is never
+# served; the old location stays ignored in case a copy is still lying there.
+/debtors-data/
 /public/debtors-data/

@@ -10,12 +10,17 @@
 
 import { useMemo, useState, type RefObject } from "react";
 import {
-  AGE_BUCKETS, compactInr, dimensionValue, formatInr, groupParties, hasDues, isFiltered, sortParties, totalsOf,
-  NO_FILTER, type AgeBucketKey, type DpdExcludedGroup, type DpdFilter, type DpdParty, type DpdSortKey, type SortDir,
+  AGE_BUCKETS, compactInr, dimensionValue, formatInr, groupParties, hasDues, isFiltered, totalsOf,
+  NO_FILTER, type AgeBucketKey, type DpdFilter, type DpdParty, type DpdSectionKey,
+  type DpdSortKey, type SortDir,
 } from "@/lib/debtors";
 import { AgeingBar, PhoneIcon, Pill, Remark, Swatch } from "./_ui";
 import { CallDialog } from "./_CallDialog";
-import type { DimensionDef } from "./_sections";
+import { PartySummaryDialog } from "./_SummaryDialog";
+import { EditPartyDialog } from "./_EditPartyDialog";
+import { SECTIONS, type DimensionDef } from "./_sections";
+import { exportPartiesToExcel } from "./_export";
+import { useDebtorsAccess } from "./_access";
 
 export interface SortState {
   key: DpdSortKey;
@@ -65,8 +70,52 @@ function CallNowButton({ party, onCall, size }: { party: DpdParty; onCall: (p: D
   );
 }
 
+/** Opens the summary sheet for one party; sits beside Call now, in neutral grey. */
+function SummaryButton({ party, onSummary, size }: { party: DpdParty; onSummary: (p: DpdParty) => void; size: "sm" | "md" }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSummary(party)}
+      aria-haspopup="dialog"
+      aria-label={`Summary: ${party.customer}`}
+      className={[
+        "inline-flex items-center justify-center gap-1.5 rounded-[2px] border border-[var(--aws-border-strong)] bg-white font-semibold text-[var(--text-primary)] whitespace-nowrap transition-colors hover:bg-[var(--surface-subtle)]",
+        size === "sm" ? "h-7 px-2.5 text-[12px]" : "h-9 px-3.5 text-[13px]",
+      ].join(" ")}
+    >
+      <svg aria-hidden viewBox="0 0 16 16" className="w-3.5 h-3.5">
+        <path d="M3 13V8M8 13V3M13 13V6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      </svg>
+      Summary
+    </button>
+  );
+}
+
+/** Opens the edit sheet for one party's row. Quietest of the three: it is the one used least. */
+function EditButton({ party, onEdit, size }: { party: DpdParty; onEdit: (p: DpdParty) => void; size: "sm" | "md" }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onEdit(party)}
+      aria-haspopup="dialog"
+      aria-label={`Edit: ${party.customer}`}
+      className={[
+        "inline-flex items-center justify-center gap-1.5 rounded-[2px] border border-[var(--aws-border-strong)] bg-white font-semibold text-[var(--text-primary)] whitespace-nowrap transition-colors hover:bg-[var(--surface-subtle)]",
+        size === "sm" ? "h-7 px-2.5 text-[12px]" : "h-9 px-3.5 text-[13px]",
+      ].join(" ")}
+    >
+      <svg aria-hidden viewBox="0 0 16 16" className="w-3.5 h-3.5">
+        <path d="M10.5 2.5 13.5 5.5 5.5 13.5 2 14 2.5 10.5Z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+      </svg>
+      Edit
+    </button>
+  );
+}
+
 export function PartiesList({
   anchorRef,
+  section,
+  onPartyChange,
   all,
   rows,
   dimensions,
@@ -79,6 +128,9 @@ export function PartiesList({
 }: {
   /** Scrolled to when a breakdown row narrows the list. */
   anchorRef: RefObject<HTMLElement | null>;
+  section: DpdSectionKey;
+  /** A party was edited on this screen: swap `before` for `after` in the section's data. */
+  onPartyChange: (before: DpdParty, after: DpdParty) => void;
   /** Every party in the section — the filter options come from these. */
   all: readonly DpdParty[];
   /** The parties to show, already filtered and sorted. */
@@ -98,6 +150,26 @@ export function PartiesList({
   // The card list keeps its own "show more" count; a new filter starts it over.
   const filterKey = JSON.stringify([filter, sort]);
   const [calling, setCalling] = useState<DpdParty | null>(null);
+  const [summarising, setSummarising] = useState<DpdParty | null>(null);
+  const [editing, setEditing] = useState<DpdParty | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportNote, setExportNote] = useState<{ error: boolean; text: string } | null>(null);
+  // Rows get no Edit / Call now button, and the header no Export, for someone who may not.
+  const access = useDebtorsAccess();
+
+  async function exportExcel() {
+    setExporting(true);
+    setExportNote(null);
+    try {
+      const label = SECTIONS.find((s) => s.key === section)?.label ?? section;
+      const n = await exportPartiesToExcel({ section, label, dimensions, rows, filtered });
+      setExportNote({ error: false, text: `Exported ${n} ${n === 1 ? "party" : "parties"}.` });
+    } catch (err) {
+      setExportNote({ error: true, text: err instanceof Error ? err.message : "The export failed." });
+    } finally {
+      setExporting(false);
+    }
+  }
 
   return (
     <section
@@ -105,20 +177,41 @@ export function PartiesList({
       aria-labelledby="dpd-parties-title"
       className="scroll-mt-4 bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.12)] p-4 sm:p-5"
     >
-      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 mb-3">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 mb-3">
         <h2 id="dpd-parties-title" className="text-[14px] font-semibold text-[var(--text-primary)]">Parties</h2>
-        <p aria-live="polite" className="text-[12px] text-[var(--text-secondary)] tabular-nums">
-          {filtered ? (
-            <>
-              Showing <span className="font-semibold text-[var(--text-primary)]">{rows.length}</span> of {all.length}
-            </>
-          ) : (
-            <>{all.length} parties</>
-          )}
-          {" · "}
-          <span className="font-semibold text-[var(--text-primary)]">{compactInr(totals.pending)}</span>
-        </p>
+        <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
+          <p aria-live="polite" className="text-[12px] text-[var(--text-secondary)] tabular-nums">
+            {filtered ? (
+              <>
+                Showing <span className="font-semibold text-[var(--text-primary)]">{rows.length}</span> of {all.length}
+              </>
+            ) : (
+              <>{all.length} parties</>
+            )}
+            {" · "}
+            <span className="font-semibold text-[var(--text-primary)]">{compactInr(totals.pending)}</span>
+          </p>
+          {access.export ? (
+            <button
+              type="button"
+              onClick={exportExcel}
+              disabled={exporting || rows.length === 0}
+              title={filtered ? "Exports the parties the filters are showing" : "Exports every party on this tab"}
+              className="inline-flex items-center gap-1.5 h-8 px-3 rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[12px] font-semibold text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-subtle)] disabled:opacity-50"
+            >
+              <svg aria-hidden viewBox="0 0 16 16" className="w-3.5 h-3.5">
+                <path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M2.5 10.5v2.5a.5.5 0 0 0 .5.5h10a.5.5 0 0 0 .5-.5v-2.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              {exporting ? "Exporting…" : filtered ? `Export ${rows.length} to Excel` : "Export to Excel"}
+            </button>
+          ) : null}
+        </div>
       </div>
+      {exportNote ? (
+        <p role={exportNote.error ? "alert" : "status"} className={`-mt-1.5 mb-3 text-right text-[12px] ${exportNote.error ? "text-[#b0280e]" : "text-[var(--text-secondary)]"}`}>
+          {exportNote.text}
+        </p>
+      ) : null}
 
       <div className="flex flex-wrap items-end gap-2 sm:gap-3 mb-4">
         <div className="w-full sm:w-auto sm:flex-1 sm:min-w-[220px] sm:max-w-[340px]">
@@ -190,7 +283,9 @@ export function PartiesList({
             bucket={filter.bucket}
             sort={sort}
             onSort={onSort}
-            onCall={setCalling}
+            onCall={access.call ? setCalling : null}
+            onSummary={setSummarising}
+            onEdit={access.edit ? setEditing : null}
           />
           <PartyCards
             key={filterKey}
@@ -198,11 +293,52 @@ export function PartiesList({
             keyOf={keyOf}
             dimensions={dimensions}
             bucket={filter.bucket}
-            onCall={setCalling}
+            onCall={access.call ? setCalling : null}
+            onSummary={setSummarising}
+            onEdit={access.edit ? setEditing : null}
           />
         </>
       )}
-      <CallDialog party={calling} dimensions={dimensions} onClose={() => setCalling(null)} />
+      <CallDialog
+        party={calling}
+        section={section}
+        dimensions={dimensions}
+        onClose={() => setCalling(null)}
+        onViewSummary={(p) => {
+          setCalling(null);
+          setSummarising(p);
+        }}
+        onContactSaved={(p, phone) => {
+          const after = { ...p, phone };
+          onPartyChange(p, after);
+          // The sheet stays open on the same party, now with its new number.
+          setCalling(after);
+        }}
+      />
+      <EditPartyDialog
+        party={editing}
+        section={section}
+        dimensions={dimensions}
+        onClose={() => setEditing(null)}
+        onSaved={(before, after) => {
+          onPartyChange(before, after);
+          setEditing(null);
+        }}
+      />
+      <PartySummaryDialog
+        party={summarising}
+        section={section}
+        onPartyChange={(before, after) => {
+          onPartyChange(before, after);
+          // The sheet stays open on the same party, now with its new remarks.
+          setSummarising(after);
+        }}
+        onClose={() => setSummarising(null)}
+        onCall={(p) => {
+          setSummarising(null);
+          setCalling(p);
+        }}
+      />
     </section>
   );
 }
@@ -314,6 +450,8 @@ function PartiesTable({
   sort,
   onSort,
   onCall,
+  onSummary,
+  onEdit,
 }: {
   rows: readonly DpdParty[];
   totals: ReturnType<typeof totalsOf>;
@@ -322,7 +460,11 @@ function PartiesTable({
   bucket: AgeBucketKey | null;
   sort: SortState;
   onSort: (s: SortState) => void;
-  onCall: (p: DpdParty) => void;
+  /** null: no Call now button (the user may not place calls). */
+  onCall: ((p: DpdParty) => void) | null;
+  onSummary: (p: DpdParty) => void;
+  /** null: no Edit button (the user may not change parties). */
+  onEdit: ((p: DpdParty) => void) | null;
 }) {
   const header = (key: DpdSortKey, label: string, align: "left" | "right", swatch?: AgeBucketKey) => {
     const active = sort.key === key;
@@ -372,7 +514,7 @@ function PartiesTable({
             {header("pending", "Outstanding", "right")}
             {AGE_BUCKETS.map((b) => header(b.key, b.label, "right", b.key))}
             <th scope="col" className={`${TH} bg-[var(--surface-subtle)] text-center`}>
-              Call now
+              Actions
             </th>
           </tr>
         </thead>
@@ -383,7 +525,7 @@ function PartiesTable({
                 <span className="font-medium text-[var(--text-primary)]">{p.customer}</span>
                 {p.remarks ? <Remark text={p.remarks} /> : null}
               </td>
-              {/* Pills stay on one line; names may wrap (broker names run to 30+ characters). */}
+              {/* Pills stay on one line; names may wrap (sales person names run long). */}
               {dimensions.map((d) => (
                 <td
                   key={d.field}
@@ -399,7 +541,11 @@ function PartiesTable({
                 </td>
               ))}
               <td className={`${TD} text-center`}>
-                <CallNowButton party={p} onCall={onCall} size="sm" />
+                <span className="inline-flex items-center gap-1.5">
+                  {onEdit ? <EditButton party={p} onEdit={onEdit} size="sm" /> : null}
+                  <SummaryButton party={p} onSummary={onSummary} size="sm" />
+                  {onCall ? <CallNowButton party={p} onCall={onCall} size="sm" /> : null}
+                </span>
               </td>
             </tr>
           ))}
@@ -434,12 +580,18 @@ function PartyCards({
   dimensions,
   bucket,
   onCall,
+  onSummary,
+  onEdit,
 }: {
   rows: readonly DpdParty[];
   keyOf: Map<DpdParty, number>;
   dimensions: readonly DimensionDef[];
   bucket: AgeBucketKey | null;
-  onCall: (p: DpdParty) => void;
+  /** null: no Call now button (the user may not place calls). */
+  onCall: ((p: DpdParty) => void) | null;
+  onSummary: (p: DpdParty) => void;
+  /** null: no Edit button (the user may not change parties). */
+  onEdit: ((p: DpdParty) => void) | null;
 }) {
   const [limit, setLimit] = useState(CARD_PAGE);
   const shown = rows.slice(0, limit);
@@ -487,11 +639,16 @@ function PartyCards({
                   );
                 })}
               </dl>
-              <div className="mt-2.5 pt-2.5 border-t border-[var(--surface-divider)] flex items-center justify-between gap-3">
+              {/* Three buttons do not fit beside the number on a phone: the row wraps, buttons to the right. */}
+              <div className="mt-2.5 pt-2.5 border-t border-[var(--surface-divider)] flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
                 <span className="min-w-0 truncate text-[12px] tabular-nums text-[var(--text-secondary)]" title={p.phone ?? undefined}>
                   {p.phone ?? ""}
                 </span>
-                <CallNowButton party={p} onCall={onCall} size="md" />
+                <span className="ml-auto flex flex-wrap items-center justify-end gap-2">
+                  {onEdit ? <EditButton party={p} onEdit={onEdit} size="md" /> : null}
+                  <SummaryButton party={p} onSummary={onSummary} size="md" />
+                  {onCall ? <CallNowButton party={p} onCall={onCall} size="md" /> : null}
+                </span>
               </div>
             </li>
           );
@@ -507,54 +664,5 @@ function PartyCards({
         </button>
       ) : null}
     </div>
-  );
-}
-
-// ── Parties the report leaves out ───────────────────────────────────────────
-
-/** A collapsed list of parties the report keeps out of its totals — one sheet
- *  of the workbook ("LEGAL", "write off", "Before APMC outlet" …) — with the
- *  report's reason when the whole sheet shares one. */
-export function ExcludedParties({ group }: { group: DpdExcludedGroup }) {
-  const total = useMemo(() => totalsOf(group.parties).pending, [group]);
-  const sorted = useMemo(() => sortParties(group.parties, "pending", "desc"), [group]);
-  return (
-    <details className="group/ex bg-white border border-[var(--aws-border)] rounded-md shadow-[0_1px_1px_rgba(0,28,36,0.12)]">
-      <summary className="flex cursor-pointer list-none items-start gap-3 rounded-md px-4 sm:px-5 py-3.5 hover:bg-[var(--surface-subtle)] [&::-webkit-details-marker]:hidden">
-        <svg
-          aria-hidden
-          viewBox="0 0 16 16"
-          className="mt-[3px] w-3.5 h-3.5 shrink-0 text-[var(--text-muted)] transition-transform duration-200 group-open/ex:rotate-90"
-        >
-          <path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-        <span className="min-w-0 flex-1">
-          <span className="block text-[13px] font-semibold text-[var(--text-primary)]">{group.title}</span>
-          <span className="block mt-0.5 text-[12px] text-[var(--text-secondary)]">
-            {group.parties.length} {group.parties.length === 1 ? "party" : "parties"}, not counted in the totals above
-            {group.note ? ` — ${group.note}` : ""}
-          </span>
-        </span>
-        <span className="shrink-0 text-[13px] font-semibold tabular-nums text-[var(--text-primary)]">{formatInr(total)}</span>
-      </summary>
-      <ul role="list" className="border-t border-[var(--aws-border)] divide-y divide-[var(--surface-divider)]">
-        {sorted.map((p, i) => (
-          <li key={i} className="flex items-center gap-3 px-4 sm:px-5 py-2 text-[13px]">
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-[var(--text-primary)]" title={p.customer}>{p.customer}</span>
-              {p.remarks && p.remarks !== group.note ? <Remark text={p.remarks} /> : null}
-            </span>
-            {p.type ? (
-              <span className="hidden sm:inline">
-                <Pill>{p.type}</Pill>
-              </span>
-            ) : null}
-            <span className="w-[108px] shrink-0 text-right tabular-nums font-medium text-[var(--text-primary)]">
-              {formatInr(p.pending)}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </details>
   );
 }

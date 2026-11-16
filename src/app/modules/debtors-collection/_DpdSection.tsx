@@ -1,8 +1,7 @@
 "use client";
 
-// One DPD section: the summary, the breakdown, the parties list and the groups
-// the report sets aside (legal, write-offs, APMC's pre-outlet billing…). Owns
-// the section's filter and sort; the page remounts it per section, so each tab
+// One DPD section: the summary, the breakdown and the parties list. Owns the
+// section's filter and sort; the page remounts it per section, so each tab
 // opens unfiltered.
 //
 // The filter row sits directly above the list it scopes. The summary and the
@@ -11,17 +10,27 @@
 
 import { useMemo, useRef, useState } from "react";
 import {
-  filterParties, sortParties, totalsOf, NO_FILTER, type AgeBucketKey, type DpdDimension, type DpdFilter, type DpdReport,
+  filterParties, sortParties, totalsOf, NO_FILTER, type AgeBucketKey, type DpdDimension, type DpdFilter, type DpdParty,
+  type DpdReport,
 } from "@/lib/debtors";
 import { SummaryCard } from "./_Summary";
 import { BreakdownCard } from "./_Breakdown";
-import { ExcludedParties, PartiesList, type SortState } from "./_Parties";
+import { PartiesList, type SortState } from "./_Parties";
 import { prefersReducedMotion } from "./_ui";
 import type { SectionDef } from "./_sections";
 
 const DEFAULT_SORT: SortState = { key: "pending", dir: "desc" };
 
-export function DpdSection({ report, def }: { report: DpdReport; def: SectionDef }) {
+export function DpdSection({
+  report,
+  def,
+  onPartyChange,
+}: {
+  report: DpdReport;
+  def: SectionDef;
+  /** A party was edited on this screen: swap `before` for `after` in the report. */
+  onPartyChange: (before: DpdParty, after: DpdParty) => void;
+}) {
   const [filter, setFilter] = useState<DpdFilter>(NO_FILTER);
   const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
   const [breakdownBy, setBreakdownBy] = useState<DpdDimension>(def.defaultBreakdown ?? def.dimensions[0].field);
@@ -60,8 +69,7 @@ export function DpdSection({ report, def }: { report: DpdReport; def: SectionDef
     <div className="space-y-4">
       <SummaryCard
         totals={totals}
-        asOf={report.asOf}
-        source={report.source}
+        loadedAt={report.loadedAt}
         bucket={filter.bucket}
         onBucket={setBucket}
       />
@@ -75,6 +83,8 @@ export function DpdSection({ report, def }: { report: DpdReport; def: SectionDef
       />
       <PartiesList
         anchorRef={listRef}
+        section={report.section}
+        onPartyChange={onPartyChange}
         all={report.parties}
         rows={rows}
         dimensions={def.dimensions}
@@ -85,11 +95,6 @@ export function DpdSection({ report, def }: { report: DpdReport; def: SectionDef
         sort={sort}
         onSort={setSort}
       />
-      {report.excluded
-        .filter((g) => g.parties.length > 0)
-        .map((g) => (
-          <ExcludedParties key={g.title} group={g} />
-        ))}
     </div>
   );
 }

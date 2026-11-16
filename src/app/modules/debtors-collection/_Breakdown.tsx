@@ -1,7 +1,7 @@
 "use client";
 
-// Outstanding broken down by one text column: sales person for CD-CF, type or
-// broker for APMC. One bar per group, its length the group's outstanding
+// Outstanding broken down by one text column: CD / CF or sales person for
+// CD-CF, type for APMC. One bar per group, its length the group's outstanding
 // against the largest group and its segments the ageing split, so "who owes
 // most" and "whose dues are oldest" read together. A row is also a filter:
 // pressing it narrows the parties list to that group.
