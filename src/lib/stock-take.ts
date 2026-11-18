@@ -106,11 +106,27 @@ export interface StockTakeFilterOptions {
   warehouse_labels?: Record<string, string>;
   /** Which of `warehouses` are the third-party cold stores (Savla, Rishi, ...). */
   cold_warehouses?: string[];
+  /** What Stock Take shows for a floor whose stored name stays as it is:
+   *  "Dmart Packing Area" -> "Packing Area" (backend stock_take/floors.py
+   *  FLOOR_DISPLAY). Display only — filters and posts keep the stored name. */
+  floor_labels?: Record<string, string>;
 }
 
 /** "Savla D-39" for D39; the code itself when the server sent no name for it. */
 export function warehouseLabel(code: string, labels?: Record<string, string>): string {
   return labels?.[code] ?? code;
+}
+
+/** "Packing Area" for "Dmart Packing Area"; any other floor as given. Matches
+ *  ignoring case and outer spaces, the way the server compares floors. */
+export function floorLabel(floor: string | null | undefined, labels?: Record<string, string>): string {
+  const name = String(floor ?? "").trim();
+  if (!labels || !name) return name;
+  const key = name.toUpperCase();
+  for (const [stored, shown] of Object.entries(labels)) {
+    if (stored.trim().toUpperCase() === key) return shown;
+  }
+  return name;
 }
 
 export interface LatestStockQuery {
@@ -224,6 +240,8 @@ export interface StockTakeScope {
   floors_by_warehouse?: Record<string, string[]>;
   /** D39 -> "Savla D-39", as on the Stock Take page. */
   warehouse_labels?: Record<string, string>;
+  /** "Dmart Packing Area" -> "Packing Area"; see StockTakeFilterOptions.floor_labels. */
+  floor_labels?: Record<string, string>;
   can_post: boolean;
   blocked_reason: "no_stock_data" | "no_floor_access" | "no_warehouse_access" | null;
   warehouses_unrestricted?: boolean;

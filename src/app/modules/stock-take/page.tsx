@@ -31,6 +31,7 @@ import {
   formatDate,
   formatNumber,
   warehouseLabel,
+  floorLabel,
   type LatestStockResponse,
   type StockTakeFilterOptions,
 } from "@/lib/stock-take";
@@ -484,7 +485,9 @@ export default function StockTakeLandingPage() {
                   className="h-9 px-2 text-[13px] rounded-[2px] bg-white border border-[var(--aws-border-strong)] outline-none focus:border-[#9a393e]"
                 >
                   <option value="">{label}: all</option>
-                  {(opts ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
+                  {(opts ?? []).map((o) => (
+                    <option key={o} value={o}>{label === "Floor" ? floorLabel(o, options?.floor_labels) : o}</option>
+                  ))}
                 </select>
               ))}
               <label className="flex items-center gap-2 text-[13px] text-[var(--text-secondary)]">

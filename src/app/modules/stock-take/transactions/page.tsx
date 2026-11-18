@@ -23,6 +23,7 @@ import {
   fetchLedger,
   fetchStockTakeFilterOptions,
   warehouseLabel,
+  floorLabel,
   formatNumber,
   type LedgerFilters,
   type LedgerPage,
@@ -210,7 +211,7 @@ function LedgerScreen() {
           {canVerify && (
             <button onClick={onVerify} disabled={verifying || !canView}
                     title={verifyDay
-                      ? `Sign off every adjustment on ${verifyDay}${warehouse ? ` in ${warehouse}` : ""}${location ? ` · ${location}` : ""}`
+                      ? `Sign off every adjustment on ${verifyDay}${warehouse ? ` in ${warehouse}` : ""}${location ? ` · ${floorLabel(location, options?.floor_labels)}` : ""}`
                       : "Sign off today's adjustments. Pick a single day above to sign off a different one."}
                     className="h-9 px-4 rounded-[2px] border border-[#1d7324] text-[#1d7324] text-[14px] font-medium disabled:opacity-40 hover:bg-[#f0f7f0]">
               {verifying ? "Verifying…" : verifyDay ? `Verify ${verifyDay}` : "Verify today"}
@@ -245,7 +246,7 @@ function LedgerScreen() {
               <label className={LABEL} htmlFor="f">Floor</label>
               <select id="f" className={FIELD} value={location} onChange={(e) => change(() => setLocation(e.target.value))}>
                 <option value="">All floors</option>
-                {(options?.floors ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
+                {(options?.floors ?? []).map((o) => <option key={o} value={o}>{floorLabel(o, options?.floor_labels)}</option>)}
               </select>
             </div>
             <div>
@@ -355,7 +356,7 @@ function LedgerScreen() {
                     </td>
                     <td className={`${CELL} whitespace-nowrap`}>{formatWhen(t.created_at)}</td>
                     <td className={CELL}>{t.warehouse}</td>
-                    <td className={CELL}>{t.location}</td>
+                    <td className={CELL}>{floorLabel(t.location, options?.floor_labels)}</td>
                     <td className={`${CELL} text-[var(--text-primary)]`}>{t.item_name}</td>
                     <td className={`${CELL} whitespace-nowrap`}>
                       <span className={`text-[11px] px-1.5 py-0.5 rounded-sm ${
@@ -396,7 +397,7 @@ function LedgerScreen() {
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="text-[14px] font-medium text-[var(--text-primary)]">{t.item_name}</p>
-                  <p className="text-[12px] text-[var(--text-secondary)] mt-0.5">{t.warehouse} · {t.location}</p>
+                  <p className="text-[12px] text-[var(--text-secondary)] mt-0.5">{t.warehouse} · {floorLabel(t.location, options?.floor_labels)}</p>
                 </div>
                 <span className={`text-[15px] font-semibold shrink-0 tabular-nums ${t.operation === "ADDITION" ? "text-[#1d7324]" : "text-[#a8500a]"}`}>
                   {t.operation === "ADDITION" ? "+" : "−"}{formatNumber(t.qty_kg ?? 0)} kg

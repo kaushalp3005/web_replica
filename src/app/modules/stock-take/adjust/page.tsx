@@ -44,6 +44,7 @@ import {
   verifyAdjustments,
   verifyTransactions,
   warehouseLabel,
+  floorLabel,
   type LatestStockResponse,
   type StockTakeItem,
   type StockOperation,
@@ -492,7 +493,7 @@ function StockAdjustScreen() {
                           disabled={!warehouse || floorOptions.length === 1}
                           onChange={(e) => { setLocation(e.target.value); setData(null); }}>
                     <option value="">{warehouse ? "Select…" : "Choose a warehouse first"}</option>
-                    {floorOptions.map((f) => <option key={f} value={f}>{f}</option>)}
+                    {floorOptions.map((f) => <option key={f} value={f}>{floorLabel(f, scope.floor_labels)}</option>)}
                   </select>
                 </div>
                 <div>
@@ -611,7 +612,7 @@ function StockAdjustScreen() {
                       <tr><td colSpan={8} className="px-3 py-8 text-center text-[var(--text-secondary)]">
                         {!warehouse || !location ? "Choose a warehouse and floor to see its stock."
                           : viewingPast ? `No stock on record here${search ? ` matching “${search}”` : ""} on or before ${formatDate(asOf)}.`
-                          : focused ? `${focusItem} has no stock at ${warehouse} · ${location}. Pick another floor, or use “+ New article” to record it here.`
+                          : focused ? `${focusItem} has no stock at ${warehouse} · ${floorLabel(location, scope.floor_labels)}. Pick another floor, or use “+ New article” to record it here.`
                           : adjustedOnly && search ? `Nothing matching “${search}” has been adjusted here. Untick “Only lines with an adjustment” to see what was counted.`
                           : adjustedOnly ? "No adjustments have been posted at this location."
                           : search ? `Nothing matches “${search}”. Use “+ New article” if it has never been counted here.`
@@ -790,6 +791,7 @@ function StockAdjustScreen() {
           operation={operation}
           warehouse={warehouse}
           location={location}
+          locationLabel={floorLabel(location, scope?.floor_labels)}
           onCancel={() => setTarget(null)}
           onPosted={(msg) => {
             // A deep link can pin the view to one article AND one stock type
@@ -839,8 +841,10 @@ function StockAdjustScreen() {
  *  Reason is not optional: stocktake_transactions declares it NOT NULL with a
  *  CHECK(btrim(reason) <> ''), so a blank one is rejected by the database, not
  *  merely by this form. It is kept to one line so the action stays quick. */
-function AdjustDialog({ target, operation, warehouse, location, onCancel, onPosted }: {
+function AdjustDialog({ target, operation, warehouse, location, locationLabel, onCancel, onPosted }: {
   target: Target; operation: StockOperation; warehouse: string; location: string;
+  /** What the floor is shown as ("Packing Area"); `location` is still what is posted. */
+  locationLabel: string;
   onCancel: () => void; onPosted: (msg: string) => void;
 }) {
   const [units, setUnits] = useState("");
@@ -936,7 +940,7 @@ function AdjustDialog({ target, operation, warehouse, location, onCancel, onPost
           </span>
         </p>
         <p className="text-[12px] text-[var(--text-secondary)] mt-1">
-          {warehouse} · {location}
+          {warehouse} · {locationLabel}
           {target.available_kg != null && <> — currently <span className="font-medium text-[var(--text-primary)]">{formatNumber(target.available_kg)} kg</span></>}
           {target.is_new_article
             ? <> — <span className="text-[#a8500a]">new article, never counted here</span></>
