@@ -29,6 +29,7 @@ type SubModule = {
 // brings them back without re-deriving the metadata.
 const SUB_MODULES: SubModule[] = [
   { group: "Sales",      title: "SO Creation",        description: "Upload Sales Register, create or update Sales Orders, reconcile GST.",                                                                                  route: "/modules/production/so-creation", implemented: true },
+  { group: "Sales",      title: "Pending Orders",     description: "Per SO line: ordered − invoiced = pending, by ageing, factory, floor and customer, in the Pending orders sheet's columns.",                  route: "/modules/production/so-creation/pending-orders", implemented: true },
   { group: "Planning",   title: "Planning",           description: "Track open SO demand by entity, filter by customer / SO / article, set deadlines, and bundle selected articles into a plan.",                          route: "/modules/production/planning",    implemented: true, hidden: true },
   { group: "Planning",   title: "Plan List",          description: "Review draft / approved / executed plans · approve drafts or cancel them with a reason.",                                                              route: "/modules/production/plan-list",   implemented: true },
   { group: "Planning",   title: "Plan Builder",       description: "Interactive plan editor with capacity and BOM constraints.",                                                                                            route: "/modules/production/plan-builder",implemented: false, hidden: true },
@@ -70,7 +71,7 @@ export default function ProductionLandingPage() {
   // Route → required permission for the tiles covered by the SO/Planning
   // permission map. Tiles not listed here keep their role-scope gate only.
   function tileAllowed(route: string): boolean {
-    if (route === "/modules/production/so-creation") return canSeeSo;
+    if (route === "/modules/production/so-creation" || route === "/modules/production/so-creation/pending-orders") return canSeeSo;
     if (route === "/modules/production/planning" || route === "/modules/production/plan-list") return canSeePlans;
     if (route === "/modules/production/prod-indents") return canSeeProdIndents || canSeePurchIndents;
     if (route === "/modules/production/floor-requisitions") return canSeeFloorReqs;

@@ -25,7 +25,10 @@ import {
   fetchSoExport,
   listSos,
   uploadSoBook,
+  uploadSalesInvoices,
+  type SalesInvoiceUploadResponse,
 } from "@/lib/so";
+import { SalesInvoiceResult } from "@/lib/salesInvoiceResult";
 import { fetchFulfillmentsBySoLines, fmtKg, fmtUnits, syncFulfillmentNow, type FulfillmentRow } from "@/lib/fulfillment";
 import { usePlanBuilder, SelectedArticlesPanel } from "@/lib/planBuilder";
 import { CreatedPlansPanel } from "@/lib/createdPlansPanel";
@@ -340,6 +343,14 @@ export default function SoCreationPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadFileName, setUploadFileName] = useState("");
   const [uploadMsg, setUploadMsg] = useState<{ kind: "ok" | "warn" | "err"; text: string } | null>(null);
+  // Second upload zone: the Tally Sales Register (invoices raised). Choosing a
+  // file only checks it; Save sends the same file again to store it.
+  const [upload2Busy, setUpload2Busy] = useState(false);
+  const [upload2FileName, setUpload2FileName] = useState("");
+  const [upload2Msg, setUpload2Msg] = useState<{ kind: "ok" | "warn" | "err"; text: string } | null>(null);
+  const [upload2Result, setUpload2Result] = useState<SalesInvoiceUploadResponse | null>(null);
+  const [upload2File, setUpload2File] = useState<File | null>(null);
+  const [upload2Saving, setUpload2Saving] = useState(false);
 
   // Manual fulfillment sync (toolbar Sync button) ─────────────────────────
   // First step of the model-merge work: a visible manual control that pushes
@@ -727,6 +738,77 @@ export default function SoCreationPage() {
     }
   }
 
+  // Second upload: the Sales Register (invoices) ─────────────────────────
+  // Choosing a file only checks it: the server links each invoice to its SO
+  // and each item to its SO line, matches the master list and works out kg.
+  // onSaveInvoices then stores it (sales_invoice / sales_invoice_line).
+  async function onSecondFileChosen(file: File) {
+    if (!/\.xlsx?$/i.test(file.name)) {
+      setUpload2Msg({ kind: "err", text: "Only .xlsx / .xls files are accepted." });
+      return;
+    }
+    if (file.size > 50 * 1024 * 1024) {
+      setUpload2Msg({ kind: "err", text: "File too large — maximum 50 MB." });
+      return;
+    }
+    setUpload2Busy(true);
+    setUpload2FileName(file.name);
+    setUpload2Msg(null);
+    setUpload2Result(null);
+    setUpload2File(null);
+    try {
+      const r = await uploadSalesInvoices(file);
+      const s = r.summary;
+      const problems = r.issues.length + s.unmatched_articles + s.low_confidence_articles + s.invoices_with_issues;
+      setUpload2Result(r);
+      setUpload2File(file);
+      setUpload2Msg({
+        kind: problems ? "warn" : "ok",
+        text: `Read ${s.invoices} invoice${s.invoices === 1 ? "" : "s"} (${s.cancelled} cancelled) · `
+          + `${s.lines} line${s.lines === 1 ? "" : "s"}. `
+          + (problems ? "Some things need a look — see below. " : "No problems found. ")
+          + "Not saved yet: check it below, then Save.",
+      });
+    } catch (e) {
+      setUpload2Msg({ kind: "err", text: friendlyApiError(e) });
+    } finally {
+      setUpload2Busy(false);
+    }
+  }
+
+  async function onSaveInvoices() {
+    if (!upload2File) return;
+    setUpload2Saving(true);
+    try {
+      const r = await uploadSalesInvoices(upload2File, true);
+      setUpload2Result(r);
+      const sr = r.save_result;
+      setUpload2Msg({
+        kind: "ok",
+        text: sr
+          ? `Saved ${sr.inserted + sr.updated} invoices (${sr.inserted} new, ${sr.updated} updated) · ${sr.lines} lines.`
+          : "Saved.",
+      });
+    } catch (e) {
+      setUpload2Msg({ kind: "err", text: `Not saved: ${friendlyApiError(e)}` });
+    } finally {
+      setUpload2Saving(false);
+    }
+  }
+
+
+  function closeUploads() {
+    // Close both drop zones and wipe any stale feedback so the next entry
+    // starts clean. The close button is hidden while either one is busy.
+    setUploadOpen(false);
+    setUploadMsg(null);
+    setUploadFileName("");
+    setUpload2Msg(null);
+    setUpload2FileName("");
+    setUpload2Result(null);
+    setUpload2File(null);
+  }
+
   function toggleExpanded(soId: number) {
     setExpanded((s) => {
       const next = new Set(s);
@@ -819,7 +901,7 @@ export default function SoCreationPage() {
         <div className="min-w-0">
           <h1 className="text-[22px] leading-[28px] font-semibold text-[var(--text-primary)]">SO Creation</h1>
           <p className="text-[13px] text-[var(--text-secondary)] mt-1">
-            Upload a Sales Register file to create and reconcile Sales Orders.
+            Upload the Sales Order Book to create and reconcile Sales Orders, or the Sales Register to check the invoices raised.
           </p>
         </div>
         {/* Entity scope (company) — mirrors the planning page's entity selector;
@@ -830,19 +912,38 @@ export default function SoCreationPage() {
           {canCreateSO ? (
           <button
             type="button"
-            onClick={() => { setUploadOpen((v) => !v); setUploadMsg(null); }}
+            onClick={() => {
+              if (uploadOpen) {
+                if (!uploading && !upload2Busy && !upload2Saving) closeUploads();
+              } else {
+                setUploadOpen(true);
+              }
+            }}
             className={[
               "h-8 px-3 text-[12px] rounded-[2px] border inline-flex items-center gap-1.5",
               uploadOpen
                 ? "border-[var(--aws-orange)] text-[var(--aws-orange)] bg-[#fbeced]"
                 : "border-[var(--aws-border-strong)] bg-white text-[var(--text-primary)] hover:border-[var(--aws-navy)]",
             ].join(" ")}
-            title="Upload a Sales Register .xlsx to bulk-process Sales Orders"
+            title="Upload Excel files: the Sales Register (bulk-processes Sales Orders) and a second upload"
           >
             <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" />
             </svg>
             Upload Excel
+          </button>
+          ) : null}
+          {canExportSO ? (
+          <button
+            type="button"
+            onClick={() => router.push("/modules/production/so-creation/pending-orders")}
+            className="h-8 px-3 text-[12px] rounded-[2px] border border-[var(--aws-border-strong)] bg-white text-[var(--text-primary)] hover:border-[var(--aws-navy)] inline-flex items-center gap-1.5"
+            title="Open the Pending Orders dashboard: per SO line, ordered − invoiced = pending (invoices from the Sales Register upload)"
+          >
+            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <line x1="4" y1="20" x2="4" y2="10" /><line x1="10" y1="20" x2="10" y2="4" /><line x1="16" y1="20" x2="16" y2="13" /><line x1="2" y1="20" x2="22" y2="20" />
+            </svg>
+            Pending orders
           </button>
           ) : null}
           <EntitySelector value={company} onChange={onEntityChange} />
@@ -877,20 +978,54 @@ export default function SoCreationPage() {
       </div>
 
       {uploadOpen ? (
-        <UploadZone
-          uploading={uploading}
-          fileName={uploadFileName}
-          message={uploadMsg}
-          onChosen={onFileChosen}
-          onCancel={() => {
-            // Close the drop zone and wipe any stale feedback so the next
-            // entry starts clean. Disabled while an upload is in-flight
-            // (button is hidden in that case).
-            setUploadOpen(false);
-            setUploadMsg(null);
-            setUploadFileName("");
-          }}
-        />
+        <div className="mb-5">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <h2 className="text-[13px] font-semibold text-[var(--text-primary)]">Upload Excel</h2>
+            {/* Hidden while either upload is in flight: closing mid-POST would
+                leave the backend half-processed. */}
+            {!uploading && !upload2Busy && !upload2Saving ? (
+              <button
+                type="button"
+                onClick={closeUploads}
+                aria-label="Close uploads"
+                title="Close"
+                className="w-7 h-7 flex items-center justify-center rounded-sm text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-divider)] focus:outline-none focus:ring-2 focus:ring-[#9a393e]"
+              >
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            ) : null}
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <UploadZone
+              title="1 · Sales Orders (SO Book)"
+              prompt="Drop your Sales Order Book here"
+              note="Creates and reconciles Sales Orders."
+              uploading={uploading}
+              fileName={uploadFileName}
+              message={uploadMsg}
+              onChosen={onFileChosen}
+            />
+            <UploadZone
+              title="2 · Sales Register (invoices)"
+              prompt="Drop the Tally Sales Register here"
+              note="Checks the invoices raised against the SOs; Save stores them for the Pending orders sheet."
+              uploading={upload2Busy}
+              fileName={upload2FileName}
+              message={upload2Msg}
+              onChosen={onSecondFileChosen}
+            />
+          </div>
+          {upload2Result ? (
+            <SalesInvoiceResult
+              result={upload2Result}
+              onSave={canCreateSO && upload2File ? onSaveInvoices : undefined}
+              saving={upload2Saving}
+            />
+          ) : null}
+        </div>
       ) : null}
 
       <Toolbar
@@ -1063,49 +1198,36 @@ export default function SoCreationPage() {
 // ── Upload zone ──────────────────────────────────────────────────────────
 
 function UploadZone({
-  uploading, fileName, message, onChosen, onCancel,
+  title, prompt, note, uploading, fileName, message, onChosen,
 }: {
+  title: string;
+  prompt: string;
+  // A line under the prompt, e.g. that this upload is not set up yet.
+  note?: string;
   uploading: boolean;
   fileName: string;
   message: { kind: "ok" | "warn" | "err"; text: string } | null;
   onChosen: (file: File) => void;
-  onCancel: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [drag, setDrag] = useState(false);
   return (
-    <div className="mb-5">
+    <div className="min-w-0">
+      <p className="mb-1.5 text-[11px] uppercase tracking-wide font-semibold text-[var(--text-secondary)]">{title}</p>
       <div
-        onClick={() => inputRef.current?.click()}
+        onClick={() => { if (!uploading) inputRef.current?.click(); }}
         onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
         onDragLeave={() => setDrag(false)}
         onDrop={(e) => {
           e.preventDefault(); setDrag(false);
           const f = e.dataTransfer.files?.[0];
-          if (f) onChosen(f);
+          if (f && !uploading) onChosen(f);
         }}
         className={[
           "relative bg-white border-2 border-dashed rounded-md p-6 text-center cursor-pointer transition",
           drag ? "border-[var(--aws-orange)] bg-[#fbeced]" : "border-[var(--aws-border-strong)] hover:border-[var(--aws-navy)]",
         ].join(" ")}
       >
-        {/* Close affordance — hidden while an upload is in-flight (cancelling
-            mid-POST would leave the backend half-processed). stopPropagation
-            prevents the click from also opening the file-picker. */}
-        {!uploading ? (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); onCancel(); }}
-            aria-label="Cancel upload"
-            title="Cancel"
-            className="absolute top-2 right-2 w-7 h-7 flex items-center justify-center rounded-sm text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-divider)] focus:outline-none focus:ring-2 focus:ring-[#9a393e]"
-          >
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
-        ) : null}
         <input
           ref={inputRef}
           type="file"
@@ -1122,10 +1244,11 @@ function UploadZone({
           <polyline points="17 8 12 3 7 8" />
           <line x1="12" y1="3" x2="12" y2="15" />
         </svg>
-        <p className="text-[14px] font-semibold text-[var(--text-primary)]">Drop your Sales Register here</p>
+        <p className="text-[14px] font-semibold text-[var(--text-primary)]">{prompt}</p>
         <p className="text-[12px] text-[var(--text-secondary)] mt-1">
           or click to browse — <strong>.xlsx / .xls</strong>, max 50 MB
         </p>
+        {note ? <p className="text-[11px] text-[var(--text-muted)] mt-2 italic">{note}</p> : null}
       </div>
       {uploading ? (
         <div className="mt-2 text-[12px] text-[var(--text-secondary)] flex items-center gap-2">

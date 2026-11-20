@@ -227,15 +227,136 @@ export async function uploadSoBook(file: File): Promise<SoUploadResponse> {
     method: "POST",
     body: fd,
   });
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch { /* non-JSON body */ }
-    throw new Error(detail);
-  }
+  // The reason is in the error envelope's `message`; reading only `detail`
+  // showed a bare "HTTP 400" for a wrong or duplicate file.
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
   return (await res.json()) as SoUploadResponse;
+}
+
+// ── Sales Register (invoices) — SO Creation's second upload ──────────────
+//
+// The Tally Sales Register: the invoices actually raised. The server reads
+// and checks it and returns what it found; it saves nothing yet (saved=false)
+// because where invoices are stored is still to be decided.
+
+export interface SalesInvoiceLine {
+  line_no: number;
+  particulars: string;
+  quantity: number | null;
+  alt_units: number | null;
+  rate: number | null;
+  value: number | null;
+  matched_article: string | null;
+  match_score: number;
+  item_type: string | null;
+  kg: number | null;
+  kg_source: "alt_units" | "master_uom" | null;
+  so_line_id: number | null;
+  so_line_article: string | null;
+  so_line_score: number;
+}
+
+export interface SalesInvoice {
+  voucher_no: string;
+  voucher_type: string | null;
+  date: string;
+  party: string | null;
+  buyer: string | null;
+  consignee: string | null;
+  reference: string | null;
+  quoted_so_number: string | null;
+  so_number: string | null;
+  so_found: boolean;
+  narration: string | null;
+  dispatch_from: string | null;
+  cartons: number | null;
+  replaces_invoice: string | null;
+  cancelled: boolean;
+  quantity: number | null;
+  alt_units: number | null;
+  value: number | null;
+  gross_total: number | null;
+  ledgers: Record<string, number>;
+  lines: SalesInvoiceLine[];
+  issues: string[];
+}
+
+export interface SalesInvoiceSummary {
+  company: string | null;
+  period: string | null;
+  sheet: string;
+  invoices: number;
+  cancelled: number;
+  by_voucher_type: Record<string, number>;
+  by_dispatch_site: Record<string, number>;
+  parties: number;
+  lines: number;
+  total_value: number;
+  total_gross: number;
+  total_kg: number;
+  lines_without_kg: number;
+  date_from: string | null;
+  date_to: string | null;
+  linked_to_so: number;
+  sos_invoiced: number;
+  so_not_found: number;
+  reference_not_an_so: number;
+  without_reference: number;
+  lines_on_so_line: number;
+  lines_not_on_so_line: number;
+  unmatched_articles: number;
+  low_confidence_articles: number;
+  invoices_with_issues: number;
+  duplicate_vouchers: number;
+  ledger_columns: string[];
+}
+
+export interface SalesInvoiceUploadResponse {
+  saved: boolean;
+  save_result: { inserted: number; updated: number; lines: number } | null;
+  summary: SalesInvoiceSummary;
+  issues: string[];
+  unmatched_articles: { particulars: string; lines: number }[];
+  low_confidence_articles: { particulars: string; lines: number; matched_article: string; match_score: number }[];
+  so_numbers_not_found: string[];
+  invoices: SalesInvoice[];
+}
+
+/** save=false only reads and checks the file; save=true also stores the
+ *  invoices (an invoice number already saved is updated, not doubled). */
+export async function uploadSalesInvoices(file: File, save = false): Promise<SalesInvoiceUploadResponse> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await apiFetch(`/api/v1/so/upload-sales-invoices${save ? "?save=true" : ""}`, {
+    method: "POST",
+    body: fd,
+  });
+  // The server's error envelope carries the reason in `message` ("This file
+  // holds Sales Orders…"), not `detail`.
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, `HTTP ${res.status}`));
+  return (await res.json()) as SalesInvoiceUploadResponse;
+}
+
+/** The "Pending orders" sheet (per SO line: ordered - invoiced = pending),
+ *  downloaded as .xlsx. Fetched through apiFetch because the endpoint needs
+ *  the bearer token. Returns the number of rows. */
+export async function downloadPendingOrders(): Promise<number> {
+  const res = await apiFetch(`/api/v1/so/pending-orders/export`);
+  if (!res.ok) throw new Error(await readApiErrorMessage(res, `Pending orders HTTP ${res.status}`));
+  const rows = Number(res.headers.get("X-Total-Rows") ?? 0);
+  const blob = await res.blob();
+  const cd = res.headers.get("Content-Disposition") ?? "";
+  const name = /filename="([^"]+)"/.exec(cd)?.[1] ?? "Pending orders.xlsx";
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Revoked on the next tick: revoking synchronously can cancel the download.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return rows;
 }
 
 // ── Fulfillment sync ─────────────────────────────────────────────────────
