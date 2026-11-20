@@ -179,6 +179,19 @@ export default function PendingOrdersPage() {
     return { pendingValue, sentValue, kg, noKg, partly, over20, over20Value };
   }, [rows]);
 
+  // What the saved invoices did to every SO line, whatever the filters: the
+  // default "Pending" view hides fully dispatched lines, so without this the
+  // effect of saving a Sales Register isn't visible anywhere.
+  const overall = useMemo(() => {
+    let full = 0, partly = 0, none = 0, invoiced = 0;
+    for (const r of data?.rows ?? []) {
+      const p = pendingOf(r), d = sentOf(r);
+      if (p <= 0) full += 1; else if (d > 0) partly += 1; else none += 1;
+      invoiced += num(r["Dispatch Value"]);
+    }
+    return { full, partly, none, invoiced };
+  }, [data]);
+
   const groups = useMemo(() => {
     const by = (key: (r: PendingRow) => string) => {
       const m = new Map<string, { value: number; lines: number; kg: number }>();
@@ -270,6 +283,9 @@ export default function PendingOrdersPage() {
           {!inv.tables ? "The invoice tables aren't set up yet, so nothing counts as dispatched."
             : inv.invoices ? <>Dispatch comes from <strong className="text-[var(--text-primary)]">{inv.invoices.toLocaleString("en-IN")}</strong> saved
               invoices ({fmtDate(inv.first_date)} – {fmtDate(inv.last_date)}), {inv.lines_on_so_line.toLocaleString("en-IN")} items tied to an SO line.
+              Of the {data?.so_lines.toLocaleString("en-IN")} SO lines: <strong className="text-[var(--text-primary)]">{overall.full.toLocaleString("en-IN")}</strong> fully
+              dispatched, {overall.partly.toLocaleString("en-IN")} partly, {overall.none.toLocaleString("en-IN")} with no invoice yet
+              {data?.sees_cost ? <> · {fmtMeasure(overall.invoiced, "value")} invoiced against them</> : null}.
               SOs dispatched before {fmtDate(inv.first_date)} still count as pending until that period&apos;s Sales Register is saved.</>
               : <>No invoices saved yet, so every line counts as not dispatched. Upload and Save the Sales Register on SO Creation.</>}
         </div>
@@ -335,7 +351,7 @@ export default function PendingOrdersPage() {
               sub={`of ${data.so_lines.toLocaleString("en-IN")} · ${kpi.partly.toLocaleString("en-IN")} partly dispatched`} />
             {data.sees_cost ? (
               <Stat label="Pending value" value={fmtMeasure(kpi.pendingValue, "value")}
-                sub={`Dispatched ${fmtMeasure(kpi.sentValue, "value")}`} />
+                sub={`${fmtMeasure(kpi.sentValue, "value")} already invoiced on these lines`} />
             ) : null}
             <Stat label="Pending weight" value={fmtMeasure(kpi.kg, "kg")}
               sub={kpi.noKg ? `${kpi.noKg.toLocaleString("en-IN")} pending lines without kg` : "every pending line has kg"} />
